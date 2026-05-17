@@ -15,6 +15,14 @@ struct Args {
     ///   postgres://user:pass@host/dbname
     #[arg(long, env = "DATABASE_URL", default_value = "sqlite:drift.db")]
     db: String,
+
+    /// Directory of pre-built static files to serve under /app (e.g. drift-ui/dist).
+    #[arg(long, env = "STATIC_DIR")]
+    static_dir: Option<String>,
+
+    /// Socket address to listen on. Use 127.0.0.1:8080 in desktop sidecar mode.
+    #[arg(long, env = "BIND_ADDR", default_value = "0.0.0.0:8080")]
+    bind: String,
 }
 
 #[tokio::main]
@@ -27,9 +35,11 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    info!(db_url = %args.db, "starting drift-api");
+    info!(db_url = %args.db, bind = %args.bind, "starting drift-api");
 
     let db_url = args.db.as_str();
+    let static_dir = args.static_dir.as_deref();
+    let bind_addr = args.bind.as_str();
 
     let pool_for_retention = {
         sqlx::any::install_default_drivers();
@@ -50,5 +60,5 @@ async fn main() -> Result<()> {
         }
     });
 
-    drift_api::run(db_url).await
+    drift_api::run(db_url, static_dir, bind_addr).await
 }

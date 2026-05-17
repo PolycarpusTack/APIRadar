@@ -11,7 +11,7 @@ use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::any::AnyPoolOptions;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing::info;
 use uuid::Uuid;
 
@@ -72,7 +72,7 @@ impl IntoResponse for ApiError {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub async fn run(db_url: &str) -> Result<()> {
+pub async fn run(db_url: &str, static_dir: Option<&str>, bind_addr: &str) -> Result<()> {
     sqlx::any::install_default_drivers();
 
     let pool = AnyPoolOptions::new()
@@ -84,9 +84,9 @@ pub async fn run(db_url: &str) -> Result<()> {
 
     info!("migrations applied");
 
-    let app = build_router(pool);
+    let app = build_router(pool, static_dir);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     info!("listening on {}", listener.local_addr()?);
 
     axum::serve(listener, app).await?;
@@ -134,7 +134,7 @@ async fn auth_middleware(
 // Router
 // ---------------------------------------------------------------------------
 
-pub fn build_router(pool: sqlx::AnyPool) -> Router {
+pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>) -> Router {
     let v1 = Router::new()
         .route("/services", get(list_services))
         .route("/services/:id/diffs", get(list_diffs).post(create_diff))
@@ -149,11 +149,17 @@ pub fn build_router(pool: sqlx::AnyPool) -> Router {
         .layer(middleware::from_fn_with_state(pool.clone(), auth_middleware))
         .with_state(pool.clone());
 
-    Router::new()
+    let mut app = Router::new()
         .route("/health", get(health))
         .nest("/v1", v1)
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::permissive());
+
+    if let Some(dir) = static_dir {
+        app = app.nest_service("/app", ServeDir::new(dir));
+    }
+
+    app
 }
 
 // ---------------------------------------------------------------------------
@@ -1095,7 +1101,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool);
+        let app = build_router(pool, None);
 
         let body = serde_json::json!([
             {
@@ -1128,7 +1134,7 @@ mod tests {
     #[tokio::test]
     async fn test_ingest_too_large_batch_rejected() {
         let pool = test_pool().await;
-        let app = build_router(pool);
+        let app = build_router(pool, None);
 
         // Build a batch of 501 events.
         let events: Vec<serde_json::Value> = (0..501)
@@ -1252,7 +1258,7 @@ mod tests {
     #[tokio::test]
     async fn test_blast_radius_404_for_unknown_diff() {
         let pool = test_pool().await;
-        let app = build_router(pool);
+        let app = build_router(pool, None);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -1342,7 +1348,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool);
+        let app = build_router(pool, None);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -1477,7 +1483,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool);
+        let app = build_router(pool, None);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -1581,7 +1587,7 @@ mod tests {
         .bind("GET /invoices").bind("src/api.rs").bind(42i64).bind(&now)
         .execute(&pool).await.unwrap();
 
-        let app = build_router(pool);
+        let app = build_router(pool, None);
         let req = HttpRequest::builder()
             .method("GET")
             .uri(format!("/v1/diffs/{diff_id}/blast-radius"))
@@ -1602,7 +1608,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_consumer_returns_201() {
         let pool = test_pool().await;
-        let app = build_router(pool);
+        let app = build_router(pool, None);
 
         let body = serde_json::json!({
             "name": "billing-svc",
@@ -1630,7 +1636,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_consumer_validates_name() {
         let pool = test_pool().await;
-        let app = build_router(pool);
+        let app = build_router(pool, None);
 
         let body = serde_json::json!({
             "name": "",
@@ -1668,7 +1674,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool);
+        let app = build_router(pool, None);
 
         // 1. Create consumer.
         let consumer_body = serde_json::json!({
@@ -1749,7 +1755,7 @@ mod tests {
             .bind(Uuid::new_v4().to_string()).bind(&diff_id).bind("GET /items → response.name").bind("field_added").bind("safe").bind::<Option<String>>(None)
             .execute(&pool).await.unwrap();
 
-        let app = build_router(pool);
+        let app = build_router(pool, None);
 
         let req = HttpRequest::builder()
             .method("GET").uri("/v1/diffs").body(Body::empty()).unwrap();
@@ -1797,7 +1803,7 @@ mod tests {
                 .execute(&pool).await.unwrap();
         }
 
-        let app = build_router(pool);
+        let app = build_router(pool, None);
 
         let req = HttpRequest::builder()
             .method("GET").uri("/v1/summary").body(Body::empty()).unwrap();
