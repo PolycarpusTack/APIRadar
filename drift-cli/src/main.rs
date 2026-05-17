@@ -4,8 +4,12 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use drift_core::models::Severity;
 
+mod api_client;
+mod claude;
+mod explain;
 mod github;
 mod policy;
+mod register;
 mod render;
 
 // ---------------------------------------------------------------------------
@@ -63,6 +67,14 @@ enum Commands {
         /// Base URL of the drift-api server.
         #[arg(long, env = "DRIFT_API_URL")]
         api_url: Option<String>,
+
+        /// UUID of the producer service (enables posting diff & fetching blast radius).
+        #[arg(long)]
+        service_id: Option<String>,
+
+        /// Optional bearer token for the drift-api server.
+        #[arg(long, env = "DRIFT_SERVICE_TOKEN")]
+        token: Option<String>,
     },
 
     /// Register this service or consumer with the drift-api server.
@@ -70,6 +82,30 @@ enum Commands {
         /// Base URL of the drift-api server.
         #[arg(long, env = "DRIFT_API_URL")]
         api_url: String,
+
+        /// UUID of the producer service to subscribe to.
+        #[arg(long)]
+        service_id: String,
+
+        /// Name of this consumer.
+        #[arg(long)]
+        consumer_name: String,
+
+        /// Repository URL of this consumer.
+        #[arg(long)]
+        repo_url: String,
+
+        /// Owning team of this consumer.
+        #[arg(long)]
+        owner_team: String,
+
+        /// Contact e-mail for this consumer.
+        #[arg(long)]
+        contact: String,
+
+        /// Optional bearer token for the drift-api server.
+        #[arg(long)]
+        token: Option<String>,
     },
 
     /// Scan a consumer repository for API usage.
@@ -128,7 +164,9 @@ async fn main() -> Result<()> {
             post_comment,
             json,
             no_color,
-            api_url: _,
+            api_url,
+            service_id,
+            token,
         } => {
             // Load policy
             let config = policy::load_config(policy.as_deref())?;
@@ -147,10 +185,11 @@ async fn main() -> Result<()> {
 
             let changes = drift_core::diff::diff_openapi(&base_spec, &head_spec);
 
+            let use_color = !no_color && std::env::var("NO_COLOR").is_err();
+
             if json {
                 render::print_json(&changes);
             } else {
-                let use_color = !no_color && std::env::var("NO_COLOR").is_err();
                 render::print_table(&changes, use_color);
             }
 
@@ -188,20 +227,88 @@ async fn main() -> Result<()> {
                 }
             }
 
+            // Post diff and fetch blast radius when api_url and service_id are both set.
+            if let (Some(ref url), Some(ref svc_id)) = (&api_url, &service_id) {
+                let token_ref = token.as_deref();
+                match api_client::post_diff(
+                    url,
+                    api_client::PostDiffParams {
+                        service_id: svc_id,
+                        service_name: svc_id,
+                        from_ref: &base,
+                        to_ref: &head,
+                        pr_url: None,
+                        spec_format: "openapi",
+                        changes: &changes,
+                        token: token_ref,
+                    },
+                )
+                .await
+                {
+                    Ok(diff_id) => {
+                        if !json {
+                            println!("Diff posted: {diff_id}");
+                        }
+                        match api_client::get_blast_radius(url, &diff_id, token_ref).await {
+                            Ok(br) => {
+                                if !json {
+                                    render::print_blast_radius(&br, use_color);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: failed to fetch blast radius: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: failed to post diff to API: {e}");
+                    }
+                }
+            }
+
             // P0: no consumer registry yet → has_active_consumers = false
             let code = policy::exit_code(&changes, &pol, false);
             if code != 0 {
                 std::process::exit(code);
             }
         }
-        Commands::Register { .. } => {
-            println!("Not yet implemented: register");
+        Commands::Register {
+            api_url,
+            service_id,
+            consumer_name,
+            repo_url,
+            owner_team,
+            contact,
+            token,
+        } => {
+            register::run(
+                &api_url,
+                &service_id,
+                &consumer_name,
+                &repo_url,
+                &owner_team,
+                &contact,
+                token.as_deref(),
+            )
+            .await?;
         }
         Commands::Scan { .. } => {
             println!("Not yet implemented: scan");
         }
-        Commands::Explain { .. } => {
-            println!("Not yet implemented: explain");
+        Commands::Explain {
+            diff_id,
+            release_notes,
+            out,
+            api_url,
+        } => {
+            explain::run(
+                &api_url,
+                &diff_id,
+                release_notes,
+                out.as_deref(),
+                std::env::var("DRIFT_SERVICE_TOKEN").ok().as_deref(),
+            )
+            .await?;
         }
     }
 

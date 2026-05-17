@@ -29,5 +29,26 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     info!(db_url = %args.db, "starting drift-api");
 
-    drift_api::run(&args.db).await
+    let db_url = args.db.as_str();
+
+    let pool_for_retention = {
+        sqlx::any::install_default_drivers();
+        sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(db_url)
+            .await?
+    };
+    let retention_days = 90u32;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            match drift_api::purge_old_usage_events(&pool_for_retention, retention_days).await {
+                Ok(n) => tracing::info!("retention: purged {n} old usage events"),
+                Err(e) => tracing::warn!("retention job failed: {e}"),
+            }
+        }
+    });
+
+    drift_api::run(db_url).await
 }
