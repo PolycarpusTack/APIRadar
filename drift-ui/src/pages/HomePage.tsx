@@ -5,6 +5,12 @@ import KpiCard from '../components/KpiCard'
 
 type ApiStatus = 'checking' | 'online' | 'offline'
 
+interface Summary {
+  breaking_changes_30d: number
+  consumers_at_risk: number
+  services_count: number
+}
+
 function ApiStatusBadge() {
   const [status, setStatus] = useState<ApiStatus>('checking')
 
@@ -26,9 +32,9 @@ function ApiStatusBadge() {
   }, [])
 
   const dot = {
-    checking: { bg: 'var(--amber)',   animate: 'animate-pulse' },
-    online:   { bg: 'var(--teal)',    animate: '' },
-    offline:  { bg: 'var(--red)',     animate: 'animate-pulse' },
+    checking: { bg: 'var(--amber)',   pulse: 'animate-pulse' },
+    online:   { bg: 'var(--teal)',    pulse: '' },
+    offline:  { bg: 'var(--red)',     pulse: 'animate-pulse' },
   }[status]
 
   const label = {
@@ -40,14 +46,14 @@ function ApiStatusBadge() {
   return (
     <div
       className="inline-flex items-center gap-3 rounded-lg px-4 py-2.5"
-      style={{
-        background: 'var(--bg-surface)',
-        border: '1px solid var(--border)',
-      }}
+      style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}
     >
       <span
-        className={`h-2 w-2 flex-shrink-0 rounded-full ${dot.animate}`}
-        style={{ background: dot.bg, boxShadow: status === 'online' ? 'var(--glow-teal)' : undefined }}
+        className={`h-2 w-2 flex-shrink-0 rounded-full ${dot.pulse}`}
+        style={{
+          background: dot.bg,
+          boxShadow: status === 'online' ? 'var(--glow-teal)' : undefined,
+        }}
       />
       <span
         className="text-[12.5px] font-medium"
@@ -68,7 +74,7 @@ function CodeExample() {
     { type: 'arg',     text: '  --api-url http://localhost:8080 \\' },
     { type: 'arg',     text: '  --service-id my-service' },
     { type: 'blank',   text: '' },
-    { type: 'comment', text: '# Register a consumer' },
+    { type: 'comment', text: '# Register a consumer service' },
     { type: 'cmd',     text: 'drift register \\' },
     { type: 'arg',     text: '  --api-url http://localhost:8080 \\' },
     { type: 'arg',     text: '  --service-id my-service \\' },
@@ -110,6 +116,17 @@ function CodeExample() {
 }
 
 export default function HomePage() {
+  const [summary, setSummary] = useState<Summary | null>(null)
+
+  useEffect(() => {
+    fetch('/v1/summary')
+      .then((r) => r.ok ? r.json() as Promise<Summary> : Promise.reject())
+      .then(setSummary)
+      .catch(() => { /* server may not be reachable yet — KPIs stay as — */ })
+  }, [])
+
+  const fmt = (n: number | undefined) => n === undefined ? '—' : String(n)
+
   return (
     <div>
       <PageHeader
@@ -120,10 +137,7 @@ export default function HomePage() {
       />
 
       <div className="px-14 py-10 space-y-10">
-        {/* API status */}
-        <div>
-          <ApiStatusBadge />
-        </div>
+        <ApiStatusBadge />
 
         {/* KPI row */}
         <section>
@@ -136,19 +150,19 @@ export default function HomePage() {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <KpiCard
               label="Breaking Changes"
-              value="—"
+              value={fmt(summary?.breaking_changes_30d)}
               meta="across all services"
               variant="red"
             />
             <KpiCard
               label="Consumers at Risk"
-              value="—"
+              value={fmt(summary?.consumers_at_risk)}
               meta="with active subscriptions"
               variant="amber"
             />
             <KpiCard
               label="APIs Monitored"
-              value="—"
+              value={fmt(summary?.services_count)}
               meta="registered services"
               variant="teal"
             />
@@ -163,10 +177,7 @@ export default function HomePage() {
           >
             Quick Start
           </p>
-          <p
-            className="mb-4 text-[13px] leading-relaxed"
-            style={{ color: 'var(--text-3)' }}
-          >
+          <p className="mb-4 text-[13px] leading-relaxed" style={{ color: 'var(--text-3)' }}>
             Add the CLI to your CI pipeline. Run{' '}
             <code
               className="rounded px-1.5 py-0.5 text-[11.5px]"

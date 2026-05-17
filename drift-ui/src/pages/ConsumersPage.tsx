@@ -1,18 +1,27 @@
+import { useEffect, useState } from 'react'
 import { Users } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
 
-const TABLE_COLS = ['Consumer', 'Team', 'Contact', 'Runtime', 'Subscriptions', 'Last Seen']
-
 interface ConsumerRow {
   id: string
   name: string
-  ownerTeam: string
+  repo_url: string
+  owner_team: string
   contact: string
-  repoUrl: string
-  subscriptions: number
-  lastSeen: string | null
+  subscription_count: number
+  last_seen: string | null
+}
+
+const TABLE_COLS = ['Consumer', 'Team', 'Contact', 'Subscriptions', 'Last Seen']
+
+function formatDate(iso: string) {
+  try {
+    return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+  } catch {
+    return iso
+  }
 }
 
 function ConsumerTable({ rows }: { rows: ConsumerRow[] }) {
@@ -48,11 +57,7 @@ function ConsumerTable({ rows }: { rows: ConsumerRow[] }) {
               <th
                 key={col}
                 className="border-b px-3 py-2 text-left text-[10.5px] font-semibold uppercase tracking-[0.8px]"
-                style={{
-                  background: 'var(--bg-raised)',
-                  borderColor: 'var(--border)',
-                  color: 'var(--text-3)',
-                }}
+                style={{ background: 'var(--bg-raised)', borderColor: 'var(--border)', color: 'var(--text-3)' }}
               >
                 {col}
               </th>
@@ -61,55 +66,32 @@ function ConsumerTable({ rows }: { rows: ConsumerRow[] }) {
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr
-              key={row.id}
-              className="group transition-colors"
-              style={{ borderBottom: '1px solid var(--border)' }}
-            >
-              <td
-                className="px-3 py-2.5 font-medium group-hover:bg-[var(--bg-hover)]"
-                style={{ color: 'var(--text-1)', fontSize: '12.5px' }}
-              >
-                {row.name}
+            <tr key={row.id} className="group transition-colors" style={{ borderBottom: '1px solid var(--border)' }}>
+              <td className="px-3 py-2.5 font-medium group-hover:bg-[var(--bg-hover)]" style={{ fontSize: '12.5px', color: 'var(--text-1)' }}>
+                <div>{row.name}</div>
+                {row.repo_url && (
+                  <a
+                    href={row.repo_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[11px] underline decoration-dotted hover:no-underline"
+                    style={{ color: 'var(--cobalt-mid)', fontFamily: 'var(--font-mono)' }}
+                  >
+                    {row.repo_url.replace(/^https?:\/\//, '').slice(0, 40)}
+                  </a>
+                )}
               </td>
-              <td
-                className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]"
-                style={{ color: 'var(--text-2)', fontSize: '12.5px' }}
-              >
-                {row.ownerTeam || <span style={{ color: 'var(--text-dim)' }}>—</span>}
+              <td className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]" style={{ fontSize: '12.5px', color: 'var(--text-2)' }}>
+                {row.owner_team || <span style={{ color: 'var(--text-dim)' }}>—</span>}
               </td>
-              <td
-                className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]"
-                style={{ fontFamily: 'var(--font-mono)', fontSize: '11.5px', color: 'var(--text-2)' }}
-              >
+              <td className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]" style={{ fontFamily: 'var(--font-mono)', fontSize: '11.5px', color: 'var(--text-2)' }}>
                 {row.contact || <span style={{ color: 'var(--text-dim)' }}>—</span>}
               </td>
               <td className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]">
-                {row.repoUrl ? (
-                  <a
-                    href={row.repoUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[11.5px] underline decoration-dotted hover:no-underline"
-                    style={{ color: 'var(--cobalt-mid)', fontFamily: 'var(--font-mono)' }}
-                  >
-                    {row.repoUrl.replace(/^https?:\/\//, '').slice(0, 32)}
-                    {row.repoUrl.length > 40 ? '…' : ''}
-                  </a>
-                ) : (
-                  <span style={{ color: 'var(--text-dim)', fontSize: '12px' }}>—</span>
-                )}
+                <Badge variant={row.subscription_count > 0 ? 'cobalt' : 'neutral'}>{row.subscription_count}</Badge>
               </td>
-              <td className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]">
-                <Badge variant={row.subscriptions > 0 ? 'cobalt' : 'neutral'}>
-                  {row.subscriptions}
-                </Badge>
-              </td>
-              <td
-                className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]"
-                style={{ fontFamily: 'var(--font-mono)', fontSize: '11.5px', color: 'var(--text-3)' }}
-              >
-                {row.lastSeen ?? <span style={{ color: 'var(--text-dim)' }}>never</span>}
+              <td className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]" style={{ fontFamily: 'var(--font-mono)', fontSize: '11.5px', color: 'var(--text-3)' }}>
+                {row.last_seen ? formatDate(row.last_seen) : <span style={{ color: 'var(--text-dim)' }}>never</span>}
               </td>
             </tr>
           ))}
@@ -120,7 +102,20 @@ function ConsumerTable({ rows }: { rows: ConsumerRow[] }) {
 }
 
 export default function ConsumersPage() {
-  const rows: ConsumerRow[] = []
+  const [rows, setRows] = useState<ConsumerRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch('/v1/consumers')
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json() as Promise<ConsumerRow[]>
+      })
+      .then(setRows)
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [])
 
   return (
     <div>
@@ -131,19 +126,19 @@ export default function ConsumersPage() {
       />
 
       <div className="px-14 py-8">
-        <div
-          className="overflow-hidden rounded-lg"
-          style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}
-        >
-          <div className="flex items-center justify-between px-4 py-3">
-            <p
-              className="text-[11px] font-semibold uppercase tracking-[0.8px]"
-              style={{ color: 'var(--text-3)' }}
-            >
-              All consumers
+        <div className="overflow-hidden rounded-lg" style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
+          <div className="flex items-center px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+              {loading ? 'Loading…' : `${rows.length} consumer${rows.length !== 1 ? 's' : ''}`}
             </p>
           </div>
-          <ConsumerTable rows={rows} />
+          {error ? (
+            <div className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>
+              Failed to load consumers: {error}
+            </div>
+          ) : (
+            <ConsumerTable rows={rows} />
+          )}
         </div>
       </div>
     </div>

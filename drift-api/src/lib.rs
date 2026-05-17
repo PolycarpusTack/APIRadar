@@ -136,13 +136,16 @@ async fn auth_middleware(
 
 pub fn build_router(pool: sqlx::AnyPool) -> Router {
     let v1 = Router::new()
+        .route("/services", get(list_services))
         .route("/services/:id/diffs", get(list_diffs).post(create_diff))
         .route("/services/:id/consumers", get(list_consumers))
         .route("/services/:id/subscriptions", post(create_subscription))
-        .route("/consumers", post(create_consumer))
+        .route("/consumers", get(list_all_consumers).post(create_consumer))
+        .route("/diffs", get(list_all_diffs))
         .route("/diffs/:id", get(get_diff))
         .route("/diffs/:id/blast-radius", get(blast_radius))
         .route("/usage/events", post(ingest_usage_event))
+        .route("/summary", get(get_summary))
         .layer(middleware::from_fn_with_state(pool.clone(), auth_middleware))
         .with_state(pool.clone());
 
@@ -847,6 +850,175 @@ async fn ingest_usage_event(
     Ok((StatusCode::ACCEPTED, Json(json!({"accepted": count}))))
 }
 
+// GET /v1/diffs — all diffs across all services (last 100, newest first)
+async fn list_all_diffs(
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            d.id            AS diff_id,
+            sv_from.git_ref AS from_git_ref,
+            sv_to.git_ref   AS to_git_ref,
+            s.id            AS service_id,
+            s.name          AS service_name,
+            d.pr_url,
+            d.created_at,
+            (SELECT COUNT(*) FROM change c WHERE c.diff_id = d.id AND c.severity = 'breaking')           AS breaking_count,
+            (SELECT COUNT(*) FROM change c WHERE c.diff_id = d.id AND c.severity = 'non_breaking_risky') AS risky_count,
+            (SELECT COUNT(*) FROM change c WHERE c.diff_id = d.id AND c.severity = 'safe')               AS safe_count
+        FROM diff d
+        JOIN spec_version sv_from ON sv_from.id = d.from_version
+        JOIN spec_version sv_to   ON sv_to.id   = d.to_version
+        JOIN service s            ON s.id        = sv_to.service_id
+        ORDER BY d.created_at DESC
+        LIMIT 100
+        "#,
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id":            row.get::<String, _>("diff_id"),
+                "service_id":    row.get::<String, _>("service_id"),
+                "service_name":  row.get::<String, _>("service_name"),
+                "from_git_ref":  row.get::<String, _>("from_git_ref"),
+                "to_git_ref":    row.get::<String, _>("to_git_ref"),
+                "pr_url":        row.try_get::<Option<String>, _>("pr_url").unwrap_or(None),
+                "created_at":    row.get::<String, _>("created_at"),
+                "breaking_count": row.try_get::<i64, _>("breaking_count").unwrap_or(0),
+                "risky_count":    row.try_get::<i64, _>("risky_count").unwrap_or(0),
+                "safe_count":     row.try_get::<i64, _>("safe_count").unwrap_or(0),
+            })
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(json!(items))))
+}
+
+// GET /v1/services — list all registered Producer services
+async fn list_services(
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+
+    let rows = sqlx::query(
+        "SELECT id, name, repo_url, owner_team, spec_format FROM service ORDER BY name",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id":          row.get::<String, _>("id"),
+                "name":        row.get::<String, _>("name"),
+                "repo_url":    row.get::<String, _>("repo_url"),
+                "owner_team":  row.get::<String, _>("owner_team"),
+                "spec_format": row.get::<String, _>("spec_format"),
+            })
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(json!(items))))
+}
+
+// GET /v1/consumers — list all registered Consumer services
+async fn list_all_consumers(
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            c.id, c.name, c.repo_url, c.owner_team, c.contact,
+            (SELECT COUNT(*) FROM subscription s WHERE s.consumer_id = c.id)         AS subscription_count,
+            (SELECT MAX(recorded_at) FROM usage_event ue WHERE ue.consumer_id = c.id) AS last_seen
+        FROM consumer c
+        ORDER BY c.name
+        "#,
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id":                 row.get::<String, _>("id"),
+                "name":               row.get::<String, _>("name"),
+                "repo_url":           row.get::<String, _>("repo_url"),
+                "owner_team":         row.get::<String, _>("owner_team"),
+                "contact":            row.get::<String, _>("contact"),
+                "subscription_count": row.try_get::<i64, _>("subscription_count").unwrap_or(0),
+                "last_seen":          row.try_get::<Option<String>, _>("last_seen").unwrap_or(None),
+            })
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(json!(items))))
+}
+
+// GET /v1/summary — KPI stats for the dashboard home page
+async fn get_summary(
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+
+    let cutoff_30 = (Utc::now() - Duration::days(30)).to_rfc3339();
+
+    let breaking_row = sqlx::query(
+        r#"
+        SELECT COUNT(*) AS cnt FROM change c
+        JOIN diff d ON d.id = c.diff_id
+        WHERE c.severity = 'breaking' AND d.created_at >= ?
+        "#,
+    )
+    .bind(&cutoff_30)
+    .fetch_one(&pool)
+    .await?;
+    let breaking_changes_30d: i64 = breaking_row.try_get("cnt").unwrap_or(0);
+
+    let consumers_row = sqlx::query(
+        r#"
+        SELECT COUNT(DISTINCT s.consumer_id) AS cnt FROM subscription s
+        WHERE EXISTS (
+            SELECT 1 FROM diff d
+            JOIN spec_version sv ON sv.id = d.to_version
+            JOIN change c        ON c.diff_id = d.id
+            WHERE sv.service_id  = s.service_id
+              AND c.severity     = 'breaking'
+              AND d.created_at  >= ?
+        )
+        "#,
+    )
+    .bind(&cutoff_30)
+    .fetch_one(&pool)
+    .await?;
+    let consumers_at_risk: i64 = consumers_row.try_get("cnt").unwrap_or(0);
+
+    let services_row = sqlx::query("SELECT COUNT(*) AS cnt FROM service")
+        .fetch_one(&pool)
+        .await?;
+    let services_count: i64 = services_row.try_get("cnt").unwrap_or(0);
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "breaking_changes_30d": breaking_changes_30d,
+            "consumers_at_risk":    consumers_at_risk,
+            "services_count":       services_count,
+        })),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Retention job (public, callable on a schedule)
 // ---------------------------------------------------------------------------
@@ -1544,5 +1716,99 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_list_all_diffs_returns_diff_with_counts() {
+        let pool = test_pool().await;
+        let now = Utc::now().to_rfc3339();
+
+        let service_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind(&service_id).bind("list-api").bind("https://github.com/acme/list").bind("platform").bind("openapi")
+            .execute(&pool).await.unwrap();
+
+        let from_sv = Uuid::new_v4().to_string();
+        let to_sv = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind(&from_sv).bind(&service_id).bind("main").bind(&now).bind("openapi")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind(&to_sv).bind(&service_id).bind("pr-1").bind(&now).bind("openapi")
+            .execute(&pool).await.unwrap();
+
+        let diff_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)")
+            .bind(&diff_id).bind(&from_sv).bind(&to_sv).bind::<Option<String>>(None).bind(&now)
+            .execute(&pool).await.unwrap();
+
+        sqlx::query("INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(Uuid::new_v4().to_string()).bind(&diff_id).bind("GET /items").bind("operation_removed").bind("breaking").bind::<Option<String>>(None)
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(Uuid::new_v4().to_string()).bind(&diff_id).bind("GET /items → response.name").bind("field_added").bind("safe").bind::<Option<String>>(None)
+            .execute(&pool).await.unwrap();
+
+        let app = build_router(pool);
+
+        let req = HttpRequest::builder()
+            .method("GET").uri("/v1/diffs").body(Body::empty()).unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], diff_id);
+        assert_eq!(arr[0]["service_name"], "list-api");
+        assert_eq!(arr[0]["breaking_count"], 1);
+        assert_eq!(arr[0]["safe_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_summary_breaking_changes_and_services_count() {
+        let pool = test_pool().await;
+        let now = Utc::now().to_rfc3339();
+
+        let service_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind(&service_id).bind("summary-api").bind("https://github.com/acme/summary").bind("platform").bind("openapi")
+            .execute(&pool).await.unwrap();
+
+        let from_sv = Uuid::new_v4().to_string();
+        let to_sv = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind(&from_sv).bind(&service_id).bind("v1").bind(&now).bind("openapi")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind(&to_sv).bind(&service_id).bind("v2").bind(&now).bind("openapi")
+            .execute(&pool).await.unwrap();
+
+        let diff_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)")
+            .bind(&diff_id).bind(&from_sv).bind(&to_sv).bind::<Option<String>>(None).bind(&now)
+            .execute(&pool).await.unwrap();
+
+        for path in &["GET /users", "POST /orders"] {
+            sqlx::query("INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)")
+                .bind(Uuid::new_v4().to_string()).bind(&diff_id).bind(path).bind("operation_removed").bind("breaking").bind::<Option<String>>(None)
+                .execute(&pool).await.unwrap();
+        }
+
+        let app = build_router(pool);
+
+        let req = HttpRequest::builder()
+            .method("GET").uri("/v1/summary").body(Body::empty()).unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["breaking_changes_30d"], 2);
+        assert_eq!(json["services_count"], 1);
+        assert_eq!(json["consumers_at_risk"], 0);
     }
 }

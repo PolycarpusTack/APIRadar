@@ -1,9 +1,11 @@
 import { NavLink, Routes, Route } from 'react-router-dom'
-import { LayoutDashboard, GitCompare, Users, FileText, Settings } from 'lucide-react'
+import { LayoutDashboard, GitCompare, Users, FileText, Telescope, Settings } from 'lucide-react'
 import HomePage from './pages/HomePage'
 import DiffsPage from './pages/DiffsPage'
+import DiffDetailPage from './pages/DiffDetailPage'
 import ConsumersPage from './pages/ConsumersPage'
 import ReleaseNotesPage from './pages/ReleaseNotesPage'
+import PlaygroundPage from './pages/PlaygroundPage'
 
 const NAV = [
   {
@@ -20,9 +22,10 @@ const NAV = [
     ],
   },
   {
-    label: 'Docs',
+    label: 'Docs & Demo',
     items: [
       { to: '/release-notes', label: 'Release Notes', icon: FileText },
+      { to: '/playground', label: 'API Playground', icon: Telescope },
     ],
   },
 ]
@@ -78,7 +81,6 @@ function Sidebar() {
       {/* Logo */}
       <div className="px-5 py-6" style={{ borderBottom: '1px solid var(--border)' }}>
         <div className="flex items-center gap-2.5 mb-1">
-          {/* Brand icon: cobalt gradient square with white inset */}
           <div
             className="relative flex-shrink-0 h-8 w-8 overflow-hidden rounded-[7px]"
             style={{ background: 'linear-gradient(135deg, var(--cobalt) 0%, var(--cobalt-mid) 100%)' }}
@@ -142,12 +144,14 @@ export default function App() {
   return (
     <div className="flex min-h-screen" style={{ background: 'var(--bg-base)' }}>
       <Sidebar />
-      <main className="ml-64 flex-1 overflow-y-auto">
+      <main className="ml-64 flex-1">
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/diffs" element={<DiffsPage />} />
+          <Route path="/diffs/:id" element={<DiffDetailPage />} />
           <Route path="/consumers" element={<ConsumersPage />} />
           <Route path="/release-notes" element={<ReleaseNotesPage />} />
+          <Route path="/playground" element={<PlaygroundPage />} />
         </Routes>
       </main>
     </div>

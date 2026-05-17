@@ -1,23 +1,40 @@
+import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { GitCompare } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
 
-const TABLE_COLS = ['Date', 'Service', 'Refs', 'Breaking', 'Risky', 'Safe', 'Blast Radius']
-
-type SeverityCount = { breaking: number; risky: number; safe: number }
-
-interface DiffRow {
+interface DiffSummary {
   id: string
-  date: string
-  service: string
-  fromRef: string
-  toRef: string
-  counts: SeverityCount
-  affectedConsumers: number
+  service_id: string
+  service_name: string
+  from_git_ref: string
+  to_git_ref: string
+  pr_url: string | null
+  created_at: string
+  breaking_count: number
+  risky_count: number
+  safe_count: number
 }
 
-function DiffTable({ rows }: { rows: DiffRow[] }) {
+function formatDate(iso: string) {
+  try {
+    return new Date(iso).toLocaleDateString('en-GB', {
+      day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+    })
+  } catch {
+    return iso
+  }
+}
+
+function shortRef(ref: string) {
+  return ref.length > 12 ? ref.slice(0, 12) : ref
+}
+
+const TABLE_COLS = ['Date', 'Service', 'Refs', 'Breaking', 'Risky', 'Safe']
+
+function DiffTable({ rows, onSelect }: { rows: DiffSummary[]; onSelect: (id: string) => void }) {
   if (rows.length === 0) {
     return (
       <EmptyState
@@ -37,11 +54,7 @@ function DiffTable({ rows }: { rows: DiffRow[] }) {
               <th
                 key={col}
                 className="border-b px-3 py-2 text-left text-[10.5px] font-semibold uppercase tracking-[0.8px]"
-                style={{
-                  background: 'var(--bg-raised)',
-                  borderColor: 'var(--border)',
-                  color: 'var(--text-3)',
-                }}
+                style={{ background: 'var(--bg-raised)', borderColor: 'var(--border)', color: 'var(--text-3)' }}
               >
                 {col}
               </th>
@@ -54,51 +67,45 @@ function DiffTable({ rows }: { rows: DiffRow[] }) {
               key={row.id}
               className="group cursor-pointer transition-colors"
               style={{ borderBottom: '1px solid var(--border)' }}
+              onClick={() => onSelect(row.id)}
             >
               <td
-                className="px-3 py-2.5 text-[12.5px] group-hover:bg-[var(--bg-hover)]"
-                style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-3)', fontSize: '11.5px' }}
+                className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]"
+                style={{ fontFamily: 'var(--font-mono)', fontSize: '11.5px', color: 'var(--text-3)' }}
               >
-                {row.date}
+                {formatDate(row.created_at)}
               </td>
               <td
-                className="px-3 py-2.5 text-[12.5px] font-medium group-hover:bg-[var(--bg-hover)]"
-                style={{ color: 'var(--text-1)' }}
+                className="px-3 py-2.5 font-medium group-hover:bg-[var(--bg-hover)]"
+                style={{ fontSize: '12.5px', color: 'var(--text-1)' }}
               >
-                {row.service}
+                {row.service_name}
               </td>
               <td
                 className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]"
                 style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-3)' }}
               >
-                <span style={{ color: 'var(--text-2)' }}>{row.fromRef}</span>
+                <span style={{ color: 'var(--text-2)' }}>{shortRef(row.from_git_ref)}</span>
                 <span className="mx-1">→</span>
-                <span style={{ color: 'var(--cobalt-mid)' }}>{row.toRef}</span>
+                <span style={{ color: 'var(--cobalt-mid)' }}>{shortRef(row.to_git_ref)}</span>
               </td>
               <td className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]">
-                {row.counts.breaking > 0 ? (
-                  <Badge variant="err">{row.counts.breaking}</Badge>
+                {row.breaking_count > 0 ? (
+                  <Badge variant="err">{row.breaking_count}</Badge>
                 ) : (
                   <span style={{ color: 'var(--text-dim)', fontSize: '12px' }}>—</span>
                 )}
               </td>
               <td className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]">
-                {row.counts.risky > 0 ? (
-                  <Badge variant="warn">{row.counts.risky}</Badge>
+                {row.risky_count > 0 ? (
+                  <Badge variant="warn">{row.risky_count}</Badge>
                 ) : (
                   <span style={{ color: 'var(--text-dim)', fontSize: '12px' }}>—</span>
                 )}
               </td>
               <td className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]">
-                {row.counts.safe > 0 ? (
-                  <Badge variant="ok">{row.counts.safe}</Badge>
-                ) : (
-                  <span style={{ color: 'var(--text-dim)', fontSize: '12px' }}>—</span>
-                )}
-              </td>
-              <td className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]">
-                {row.affectedConsumers > 0 ? (
-                  <Badge variant="cobalt">{row.affectedConsumers} consumer{row.affectedConsumers !== 1 ? 's' : ''}</Badge>
+                {row.safe_count > 0 ? (
+                  <Badge variant="ok">{row.safe_count}</Badge>
                 ) : (
                   <span style={{ color: 'var(--text-dim)', fontSize: '12px' }}>—</span>
                 )}
@@ -112,33 +119,47 @@ function DiffTable({ rows }: { rows: DiffRow[] }) {
 }
 
 export default function DiffsPage() {
-  const rows: DiffRow[] = []
+  const navigate = useNavigate()
+  const [rows, setRows] = useState<DiffSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch('/v1/diffs')
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json() as Promise<DiffSummary[]>
+      })
+      .then(setRows)
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [])
 
   return (
     <div>
       <PageHeader
         tag="Monitor"
         title="Schema Diffs"
-        description="Every drift check run that was posted to this server. Click a row to see the full blast-radius report and release notes."
+        description="Every drift check run posted to this server. Click a row to see the full blast-radius report."
       />
 
       <div className="px-14 py-8">
         <div
-          className="rounded-lg overflow-hidden"
+          className="overflow-hidden rounded-lg"
           style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}
         >
-          <div
-            className="flex items-center justify-between px-4 py-3"
-            style={{ borderBottom: rows.length > 0 ? '1px solid var(--border)' : undefined }}
-          >
-            <p
-              className="text-[11px] font-semibold uppercase tracking-[0.8px]"
-              style={{ color: 'var(--text-3)' }}
-            >
-              All diffs
+          <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+              {loading ? 'Loading…' : `${rows.length} diff${rows.length !== 1 ? 's' : ''}`}
             </p>
           </div>
-          <DiffTable rows={rows} />
+          {error ? (
+            <div className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>
+              Failed to load diffs: {error}
+            </div>
+          ) : (
+            <DiffTable rows={rows} onSelect={(id) => navigate(`/diffs/${id}`)} />
+          )}
         </div>
       </div>
     </div>
