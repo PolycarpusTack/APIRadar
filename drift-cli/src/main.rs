@@ -2,7 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::info;
+use drift_core::models::Severity;
+
+mod github;
+mod policy;
+mod render;
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -108,27 +112,95 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
 
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Check { .. } => {
-            info!("Not yet implemented: check");
-            println!("Not yet implemented: check");
+        Commands::Check {
+            base,
+            head,
+            spec: _spec,
+            format: _format,
+            policy,
+            post_comment,
+            json,
+            no_color,
+            api_url: _,
+        } => {
+            // Load policy
+            let config = policy::load_config(policy.as_deref())?;
+            let pol = config.policy();
+
+            // Read specs — for P0, --base and --head are file paths
+            let base_content = std::fs::read_to_string(&base)
+                .map_err(|e| anyhow::anyhow!("cannot read base spec '{}': {e}", base))?;
+            let head_content = std::fs::read_to_string(&head)
+                .map_err(|e| anyhow::anyhow!("cannot read head spec '{}': {e}", head))?;
+
+            let base_spec = drift_core::diff::parse_openapi(&base_content)
+                .map_err(|e| anyhow::anyhow!("parse error in base spec: {e}"))?;
+            let head_spec = drift_core::diff::parse_openapi(&head_content)
+                .map_err(|e| anyhow::anyhow!("parse error in head spec: {e}"))?;
+
+            let changes = drift_core::diff::diff_openapi(&base_spec, &head_spec);
+
+            if json {
+                render::print_json(&changes);
+            } else {
+                let use_color = !no_color && std::env::var("NO_COLOR").is_err();
+                render::print_table(&changes, use_color);
+            }
+
+            if post_comment {
+                match github::GithubContext::from_env() {
+                    Some(ctx) => {
+                        let breaking = changes
+                            .iter()
+                            .filter(|c| c.severity == Severity::Breaking)
+                            .count();
+                        let policy_verdict = format!(
+                            "Policy: `{}` \u{2014} {} breaking change(s) found.",
+                            match pol.block_on {
+                                policy::BlockOn::Never => "never",
+                                policy::BlockOn::AnyBreak => "any_break",
+                                policy::BlockOn::ActiveConsumers => "active_consumers",
+                            },
+                            breaking
+                        );
+                        let comment_body =
+                            github::build_comment(&changes, &base, &head, &policy_verdict);
+                        match github::post_or_update_comment(&ctx, &comment_body).await {
+                            Ok(url) => println!("PR comment posted: {url}"),
+                            Err(e) => eprintln!("Warning: failed to post PR comment: {e}"),
+                        }
+                    }
+                    None => {
+                        if !json {
+                            eprintln!(
+                                "Warning: --post-comment set but not running in a GitHub Actions PR context \
+                                (GITHUB_TOKEN or PR number missing). Skipping."
+                            );
+                        }
+                    }
+                }
+            }
+
+            // P0: no consumer registry yet → has_active_consumers = false
+            let code = policy::exit_code(&changes, &pol, false);
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
         Commands::Register { .. } => {
-            info!("Not yet implemented: register");
             println!("Not yet implemented: register");
         }
         Commands::Scan { .. } => {
-            info!("Not yet implemented: scan");
             println!("Not yet implemented: scan");
         }
         Commands::Explain { .. } => {
-            info!("Not yet implemented: explain");
             println!("Not yet implemented: explain");
         }
     }

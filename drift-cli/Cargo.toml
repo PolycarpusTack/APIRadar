@@ -15,3 +15,10 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
+colored = { workspace = true }
+serde_yaml = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
