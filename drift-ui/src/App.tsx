@@ -85,7 +85,7 @@ function Sidebar() {
             className="relative flex-shrink-0 h-8 w-8 overflow-hidden rounded-[7px]"
             style={{ background: 'linear-gradient(135deg, var(--cobalt) 0%, var(--cobalt-mid) 100%)' }}
           >
-            <div className="absolute inset-[6px] rounded-[3px] bg-white" />
+            <div className="absolute inset-[6px] rounded-[3px]" style={{ background: 'var(--text-inverse)' }} />
           </div>
           <span
             className="text-[17px] font-bold tracking-[-0.4px]"

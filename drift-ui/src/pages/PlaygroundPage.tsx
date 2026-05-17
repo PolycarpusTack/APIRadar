@@ -4,6 +4,8 @@ import PageHeader from '../components/PageHeader'
 
 const DEFAULT_SPEC = 'https://cdn.jsdelivr.net/npm/@scalar/galaxy/dist/latest.yaml'
 const STORAGE_KEY = 'drift-playground-envs'
+// Mirrors --bg-base token; used inside iframe srcdoc where CSS variables from the parent page are unavailable.
+const BG_BASE_DARK = '#0B0F19'
 
 interface PlayEnv {
   id: string
@@ -46,7 +48,7 @@ function buildScalarHtml(specUrl: string, theme: 'dark' | 'light', env?: PlayEnv
   <title>API Playground</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: ${theme === 'dark' ? '#0B0F19' : '#ffffff'}; }
+    body { background: ${theme === 'dark' ? BG_BASE_DARK : '#ffffff'}; }
   </style>
 </head>
 <body>
@@ -183,7 +185,7 @@ export default function PlaygroundPage() {
         <button
           onClick={handleLoad}
           className="flex-shrink-0 rounded-md px-4 py-[7px] text-[12.5px] font-semibold transition-all"
-          style={{ background: 'var(--cobalt)', color: '#fff' }}
+          style={{ background: 'var(--cobalt)', color: 'var(--text-inverse)' }}
           onMouseEnter={(e) => {
             e.currentTarget.style.background = 'var(--cobalt-mid)'
             e.currentTarget.style.transform = 'translateY(-1px)'
@@ -215,7 +217,7 @@ export default function PlaygroundPage() {
           {!envOpen && activeEnv && (
             <span
               className="rounded px-2 py-0.5 text-[11px] font-medium"
-              style={{ background: 'var(--cobalt)', color: '#fff', fontFamily: 'var(--font-mono)' }}
+              style={{ background: 'var(--cobalt)', color: 'var(--text-inverse)', fontFamily: 'var(--font-mono)' }}
             >
               {activeEnv.name}
             </span>
@@ -319,7 +321,7 @@ export default function PlaygroundPage() {
                     <button
                       onClick={saveForm}
                       className="rounded-md px-4 py-[6px] text-[12px] font-semibold transition-all"
-                      style={{ background: 'var(--cobalt)', color: '#fff' }}
+                      style={{ background: 'var(--cobalt)', color: 'var(--text-inverse)' }}
                       onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--cobalt-mid)' }}
                       onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--cobalt)' }}
                     >

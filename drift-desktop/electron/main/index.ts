@@ -30,7 +30,8 @@ function resolveApiBinary(): string | null {
 
 function startApiSidecar(): ChildProcess | null {
   const dbPath = `sqlite:${join(app.getPath('userData'), 'drift.db')}`
-  const args = ['--db', dbPath]
+  // Bind to loopback only — sidecar must never be reachable from the network in desktop mode.
+  const args = ['--db', dbPath, '--bind', '127.0.0.1:8080']
 
   const bin = resolveApiBinary()
 
@@ -127,7 +128,7 @@ function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
-    backgroundColor: '#0f0f14',
+    backgroundColor: '#0B0F19', // matches --bg-base token; Electron reads this before CSS loads
     titleBarStyle: 'default',
     webPreferences: {
       contextIsolation: true,
