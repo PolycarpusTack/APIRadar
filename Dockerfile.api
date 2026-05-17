@@ -1,0 +1,44 @@
+# =============================================================================
+# Stage 1 — builder
+# =============================================================================
+FROM rust:1.80-slim AS builder
+
+# System build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy the entire workspace so Cargo can resolve the workspace graph
+COPY . .
+
+# Build only the drift-api binary in release mode
+RUN cargo build --release --bin drift-api
+
+# =============================================================================
+# Stage 2 — runtime
+# =============================================================================
+FROM debian:bookworm-slim AS runtime
+
+# Minimal runtime libs (openssl / ca-certs for TLS, libpq if needed)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the compiled binary from the builder stage
+COPY --from=builder /build/target/release/drift-api ./drift-api
+
+# Copy migrations so the API can apply them at startup (sqlx migrate run)
+COPY --from=builder /build/drift-api/migrations ./migrations
+
+# Persistent volume for the SQLite database file
+VOLUME /data
+
+EXPOSE 8080
+
+CMD ["./drift-api", "--db", "sqlite:/data/drift.db"]

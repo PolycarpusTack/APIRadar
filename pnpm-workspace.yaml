@@ -1,0 +1,7 @@
+packages:
+  - drift-ui
+  - drift-desktop
+
+ignoredBuiltDependencies:
+  - electron
+  - esbuild
