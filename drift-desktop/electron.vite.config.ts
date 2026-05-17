@@ -29,6 +29,7 @@ export default defineConfig({
     resolve: {
       alias: {
         '@': resolve(__dirname, 'src/renderer/src'),
+        '@drift-ui': resolve(__dirname, '../drift-ui/src'),
       },
     },
     plugins: [react()],

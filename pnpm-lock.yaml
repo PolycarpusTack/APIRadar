@@ -29,6 +29,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^4.3.0
         version: 4.7.0(vite@5.4.21(@types/node@20.19.41))
+      autoprefixer:
+        specifier: ^10.4.0
+        version: 10.5.0(postcss@8.5.14)
       electron:
         specifier: ^33.0.0
         version: 33.4.11
@@ -38,12 +41,21 @@ importers:
       electron-vite:
         specifier: ^2.3.0
         version: 2.3.0(vite@5.4.21(@types/node@20.19.41))
+      postcss:
+        specifier: ^8.4.0
+        version: 8.5.14
       react:
         specifier: ^19.0.0
         version: 19.2.6
       react-dom:
         specifier: ^19.0.0
         version: 19.2.6(react@19.2.6)
+      react-router-dom:
+        specifier: ^6.24.0
+        version: 6.30.3(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
+      tailwindcss:
+        specifier: ^3.4.0
+        version: 3.4.19
       typescript:
         specifier: ^5.4.0
         version: 5.9.3

@@ -1,9 +1,8 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
-import App from './App'
-
-// Routing is wired in when drift-ui renderer is fully integrated (Story C-9).
-// HashRouter will be added here at that point (required for file:// protocol).
+import { HashRouter } from 'react-router-dom'
+import App from '@drift-ui/App'
+import '@drift-ui/index.css'
 
 const rootElement = document.getElementById('root')
 if (!rootElement) {
@@ -12,6 +11,8 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
   <React.StrictMode>
-    <App />
+    <HashRouter>
+      <App />
+    </HashRouter>
   </React.StrictMode>
 )
