@@ -1,4 +1,4 @@
-# API Contract Drift Monitor — Development Plan
+# API Contract Radar Monitor — Development Plan
 
 > **Framework:** AI-Native Software Delivery · Core Spec v1 · GPM v2.1 · Backlog Builder v5.1
 > **Backlog built from:** `SOLUTION_DESIGN.md` v0.2
@@ -36,24 +36,24 @@ _Architect produces all Phase 0 artifacts before any code task is pulled. Stakeh
 | **Subscription** | A registered Consumer-to-Producer relationship (Consumer opted in) |
 | **Lookback Window** | Rolling time period (default 30 days) used to determine if a Consumer is "active" |
 | **Sandbox Environment** | A named pre-configured environment entry in the Playground (base URL + auth) used for pre-sales demos |
-| **Desktop Mode** | `drift-api` running with SQLite, spawned as a child process by `drift-desktop` (Electron), with no external infrastructure |
-| **Web Mode** | `drift-api` running with PostgreSQL, deployed on a server, with `drift-ui` served as a static bundle |
+| **Desktop Mode** | `radar-api` running with SQLite, spawned as a child process by `radar-desktop` (Electron), with no external infrastructure |
+| **Web Mode** | `radar-api` running with PostgreSQL, deployed on a server, with `radar-ui` served as a static bundle |
 
 ### Architecture Memory
 
 ```
-drift-cli        Rust binary — local/CI diff runs, release-notes generation, PR comment posting
-drift-api        Rust/axum HTTP service — Consumer Registry, usage ingest, diff result store
+radar-cli        Rust binary — local/CI diff runs, release-notes generation, PR comment posting
+radar-api        Rust/axum HTTP service — Consumer Registry, usage ingest, diff result store
                  Compiled once; targets SQLite (local/Electron) or PostgreSQL (web/prod) via --db flag
-                 Also serves drift-ui static bundle at /app in web mode
-drift-scanner    Rust/tree-sitter background worker — call-site extraction from Consumer repos
-drift-ui         Vite 6 + React 19 + Tailwind + shadcn/ui — shared renderer
-                 Runs in browser (web) or inside drift-desktop Electron renderer (desktop)
-drift-desktop    Electron 33 shell — wraps drift-ui; spawns drift-api sidecar; manages SQLite file
+                 Also serves radar-ui static bundle at /app in web mode
+radar-scanner    Rust/tree-sitter background worker — call-site extraction from Consumer repos
+radar-ui         Vite 6 + React 19 + Tailwind + shadcn/ui — shared renderer
+                 Runs in browser (web) or inside radar-desktop Electron renderer (desktop)
+radar-desktop    Electron 33 shell — wraps radar-ui; spawns radar-api sidecar; manages SQLite file
 drift-db         SQLite file (local/Electron default) | PostgreSQL 16 (web/production)
                  Same sqlx migrations apply to both; TimescaleDB optional on PostgreSQL at scale
 
-Dependencies point inward: cli → api; drift-ui → api (HTTP); drift-desktop → drift-ui + drift-api (IPC+HTTP); scanner → api; nothing → cli
+Dependencies point inward: cli → api; radar-ui → api (HTTP); radar-desktop → radar-ui + radar-api (IPC+HTTP); scanner → api; nothing → cli
 ```
 
 ### Architectural Decision Records
@@ -61,16 +61,16 @@ Dependencies point inward: cli → api; drift-ui → api (HTTP); drift-desktop �
 | ADR | Decision | Rationale | Alternatives rejected |
 |---|---|---|---|
 | ADR-001 | Rust for all backend components | Spec parsing is CPU-bound per PR; cross-platform binary ships without a runtime | Go (no tree-sitter bindings as mature), Python (too slow for per-PR parsing) |
-| ADR-002 | SQLite (local/Electron default) + PostgreSQL 16 (web/production) via sqlx | sqlx `AnyDatabase` lets `drift-api` compile once and target either engine; SQLite gives zero-setup desktop experience; PostgreSQL unlocks HA and TimescaleDB at scale | Two separate ORMs (more code, drift risk), SQLite-only (no web scale path), PostgreSQL-only (kills offline/desktop use) |
+| ADR-002 | SQLite (local/Electron default) + PostgreSQL 16 (web/production) via sqlx | sqlx `AnyDatabase` lets `radar-api` compile once and target either engine; SQLite gives zero-setup desktop experience; PostgreSQL unlocks HA and TimescaleDB at scale | Two separate ORMs (more code, drift risk), SQLite-only (no web scale path), PostgreSQL-only (kills offline/desktop use) |
 | ADR-003 | Scalar (MIT) for API Playground | Zero per-seat cost; renders directly from parsed OpenAPI spec; self-hosted; skinnable | Postman (paid per-seat), Swagger UI (older UX), Redoc (no interactive testing) |
 | ADR-004 | Claude for narrative generation only | Diff classification must be deterministic and auditable; only human-readable prose uses LLM | LLM for classification (non-deterministic, hallucination risk on field paths) |
 | ADR-005 | tree-sitter for call-site extraction | Language-agnostic, embeddable in Rust, mature grammars for TS/Python/Go/Rust/Java | Regex (brittle), language-specific AST tools (can't unify in one binary) |
 | ADR-006 | OTLP-compatible ingest for Usage Events | Consumers already export OTLP; re-using the same pipeline avoids a second SDK | Custom SDK (adoption friction), log scraping (unstructured) |
-| ADR-007 | Vite 6 over Next.js 15 for `drift-ui` | Next.js SSR runs in a Node.js process; Electron's renderer is a Chromium page — SSR is incompatible. Vite produces a static bundle that loads identically in a browser or Electron renderer. In web mode, drift-api serves the Vite build from `/app`. | CRA (deprecated), Next.js with `output: 'export'` (loses API routes, SSR, image optimisation — same result as Vite but with more complexity) |
-| ADR-008 | Electron 33 for desktop distribution | Cross-platform installers (.exe / .dmg / .AppImage) with one codebase; main process can spawn drift-api as a child process and manage the SQLite file lifecycle; auto-update via electron-updater | Tauri (Rust-native, lighter, but WebView rendering differs per OS which would require significant CSS testing), PWA (no sidecar process management, no offline DB) |
-| ADR-009 | electron-vite as the Electron build tool | Same Vite config for `drift-ui` (web) and `drift-desktop` (renderer); HMR in development; no separate webpack config | Plain webpack (no HMR, verbose config), Electron Forge with webpack plugin (heavier, less Vite-native) |
+| ADR-007 | Vite 6 over Next.js 15 for `radar-ui` | Next.js SSR runs in a Node.js process; Electron's renderer is a Chromium page — SSR is incompatible. Vite produces a static bundle that loads identically in a browser or Electron renderer. In web mode, radar-api serves the Vite build from `/app`. | CRA (deprecated), Next.js with `output: 'export'` (loses API routes, SSR, image optimisation — same result as Vite but with more complexity) |
+| ADR-008 | Electron 33 for desktop distribution | Cross-platform installers (.exe / .dmg / .AppImage) with one codebase; main process can spawn radar-api as a child process and manage the SQLite file lifecycle; auto-update via electron-updater | Tauri (Rust-native, lighter, but WebView rendering differs per OS which would require significant CSS testing), PWA (no sidecar process management, no offline DB) |
+| ADR-009 | electron-vite as the Electron build tool | Same Vite config for `radar-ui` (web) and `radar-desktop` (renderer); HMR in development; no separate webpack config | Plain webpack (no HMR, verbose config), Electron Forge with webpack plugin (heavier, less Vite-native) |
 | ADR-010 | `graphql-parser 0.4` for GraphQL SDL parsing | Pure Rust, no external binary, MIT licence; parses SDL into a typed AST sufficient for object/interface/enum/union/input diff; owned-string generic (`parse_schema::<String>`) avoids lifetime propagation across crate boundaries | `async-graphql` (heavier, server-oriented), rolling a hand-written parser (high maintenance for a well-solved problem) |
-| ADR-011 | Hand-rolled proto3 parser in `drift-core` (no `protoc`) | Installing `protoc` in CI and on developer machines adds external tool dependency and complicates cross-compilation; our use-case only needs message/enum/field structure — not the full proto descriptor — so a character-scanning parser (~300 LOC) covers 100 % of the test matrix with zero binary dependency | `prost-build` (requires `protoc`; generates Rust structs — not the schema diff model we need), `protobuf` crate (same `protoc` dependency), `protox` (parses, but re-exports `prost-build` model) |
+| ADR-011 | Hand-rolled proto3 parser in `radar-core` (no `protoc`) | Installing `protoc` in CI and on developer machines adds external tool dependency and complicates cross-compilation; our use-case only needs message/enum/field structure — not the full proto descriptor — so a character-scanning parser (~300 LOC) covers 100 % of the test matrix with zero binary dependency | `prost-build` (requires `protoc`; generates Rust structs — not the schema diff model we need), `protobuf` crate (same `protoc` dependency), `protox` (parses, but re-exports `prost-build` model) |
 
 ### Value Hypotheses (Stakeholder)
 
@@ -103,7 +103,7 @@ Dependencies point inward: cli → api; drift-ui → api (HTTP); drift-desktop �
 > - `drift check` runs in CI on one real repo
 > - PR comment lists at least one Breaking Change with field path, kind, and severity
 > - Exit code 0 / 1 / 2 semantics documented
-> - `drift-desktop` launches on Windows and macOS; drift-api sidecar starts with SQLite; drift-ui loads inside the Electron window
+> - `radar-desktop` launches on Windows and macOS; radar-api sidecar starts with SQLite; radar-ui loads inside the Electron window
 > - All tasks pass DoD (80 % test coverage, lint clean, no secrets, no two-hat violations)
 
 ---
@@ -122,7 +122,7 @@ Dependencies point inward: cli → api; drift-ui → api (HTTP); drift-desktop �
 ```gherkin
 Given the repo is cloned on a fresh machine
 When `cargo build` is run
-Then drift-cli compiles without errors
+Then radar-cli compiles without errors
 
 Given the repo is cloned
 When `pnpm install && pnpm build` is run in drift-dashboard/
@@ -137,9 +137,9 @@ Then cargo test, clippy, and pnpm lint all pass
 
 | ID | Hat | Goal | Agent tier | Token budget |
 |---|---|---|---|---|
-| A-1-T1 | PREPARATORY | Init Cargo workspace with `drift-cli`, `drift-api`, `drift-scanner` crates; `drift-dashboard` pnpm workspace | Sonnet | ≤ 2 000 |
+| A-1-T1 | PREPARATORY | Init Cargo workspace with `radar-cli`, `radar-api`, `radar-scanner` crates; `drift-dashboard` pnpm workspace | Sonnet | ≤ 2 000 |
 | A-1-T2 | PREPARATORY | GitHub Actions CI: cargo test + clippy + pnpm lint + pnpm build | Sonnet | ≤ 1 500 |
-| A-1-T3 | PREPARATORY | Docker Compose: postgres:16, drift-api, drift-dashboard for local dev | Sonnet | ≤ 1 500 |
+| A-1-T3 | PREPARATORY | Docker Compose: postgres:16, radar-api, drift-dashboard for local dev | Sonnet | ≤ 1 500 |
 | A-1-T4 | PREPARATORY | sqlx migrate setup: `drift-db` crate, initial empty migration, run-on-startup flag | Sonnet | ≤ 1 000 |
 
 **Hand-off artifact:** `README.md` with `cargo build`, `docker compose up`, and CI badge.
@@ -244,7 +244,7 @@ Then stdout is valid JSON matching the Change schema
 
 **CLI output contract:**
 ```
-drift check — API Contract Drift Monitor
+drift check — API Contract Radar Monitor
 ════════════════════════════════════════
   BREAKING   user.phone         field_removed
   BREAKING   user.address.zip   type_changed  string→integer
@@ -255,7 +255,7 @@ drift check — API Contract Drift Monitor
 
 ---
 
-### Story A-5 · Policy File (`.drift.yml`)
+### Story A-5 · Policy File (`.radar.yml`)
 
 > **Persona:** Platform engineer configuring CI behaviour per repo
 > **Value:** So that teams can choose warn-only vs block without changing the CLI invocation
@@ -266,15 +266,15 @@ drift check — API Contract Drift Monitor
 **Acceptance Criteria**
 
 ```gherkin
-Given .drift.yml sets block_on: never
+Given .radar.yml sets block_on: never
 When breaking changes are found
 Then exit code is 0 (warn only)
 
-Given .drift.yml sets block_on: active_consumers
+Given .radar.yml sets block_on: active_consumers
 When no consumers are registered
 Then exit code is 0 (no active consumers known yet)
 
-Given .drift.yml is malformed YAML
+Given .radar.yml is malformed YAML
 Then exit code is 2 with a clear error message
 ```
 
@@ -282,7 +282,7 @@ Then exit code is 2 with a clear error message
 
 | ID | Hat | Goal | Agent tier | Token budget |
 |---|---|---|---|---|
-| A-5-T1 | FEATURE | Parse `.drift.yml` config; default values when file absent | Sonnet | ≤ 1 500 |
+| A-5-T1 | FEATURE | Parse `.radar.yml` config; default values when file absent | Sonnet | ≤ 1 500 |
 | A-5-T2 | FEATURE | Policy evaluation: `block_on: never | any_break | active_consumers`; exit code decision | Sonnet | ≤ 1 000 |
 
 ---
@@ -315,11 +315,11 @@ Then the existing comment is updated, not duplicated
 | A-6-T2 | FEATURE | POST/PATCH GitHub comment via REST API; idempotent (find-then-update) | Sonnet | ≤ 2 000 |
 | A-6-T3 | FEATURE | Markdown comment template: summary header, changes table, blast-radius placeholder (empty in P0), policy verdict | Sonnet | ≤ 1 500 |
 
-**Security note:** `GITHUB_TOKEN` read from env only; never logged or included in drift-api payloads.
+**Security note:** `GITHUB_TOKEN` read from env only; never logged or included in radar-api payloads.
 
 ---
 
-### Story A-8 · `drift-ui` + `drift-desktop` Electron Shell (SQLite mode)
+### Story A-8 · `radar-ui` + `radar-desktop` Electron Shell (SQLite mode)
 
 > **Persona:** Internal engineer running the tool on their laptop for the first time
 > **Value:** So that I can open a desktop app, point it at a spec, and see diffs without configuring any infrastructure
@@ -331,39 +331,39 @@ Then the existing comment is updated, not duplicated
 **Acceptance Criteria**
 
 ```gherkin
-Given drift-desktop is launched on Windows or macOS
+Given radar-desktop is launched on Windows or macOS
 When it starts
-Then drift-api sidecar is spawned automatically, pointing at a local SQLite file
-And the drift-ui interface loads inside the Electron window
+Then radar-api sidecar is spawned automatically, pointing at a local SQLite file
+And the radar-ui interface loads inside the Electron window
 
 Given the user clicks "Run Check" and selects two spec files
 When drift check completes
-Then the Diff result appears in drift-ui without opening a terminal
+Then the Diff result appears in radar-ui without opening a terminal
 
 Given the app is closed
-Then the drift-api sidecar process is also terminated cleanly
+Then the radar-api sidecar process is also terminated cleanly
 
-Given drift-api is also accessible via HTTP on localhost during the session
-Then drift-cli can connect to it for CI runs targeting the same local data
+Given radar-api is also accessible via HTTP on localhost during the session
+Then radar-cli can connect to it for CI runs targeting the same local data
 ```
 
 **Tasks**
 
 | ID | Hat | Goal | Agent tier | Token budget |
 |---|---|---|---|---|
-| A-8-T1 | PREPARATORY | `drift-ui` pnpm workspace with Vite 6 + React 19 + TypeScript + Tailwind + shadcn/ui scaffold; `drift-desktop` pnpm workspace with electron-vite; shared `drift-ui` renderer | Sonnet | ≤ 2 500 |
-| A-8-T2 | FEATURE | `drift-api` SQLite mode: `--db sqlite:PATH` flag; sqlx `AnyDatabase` feature; same migrations run on SQLite | Sonnet | ≤ 2 500 |
-| A-8-T3 | FEATURE | Electron main process: spawn `drift-api` child process with SQLite path in `userData`; wait for health-check before opening window; terminate on app quit | Sonnet | ≤ 2 500 |
-| A-8-T4 | FEATURE | Minimal `drift-ui` home screen: service list (empty state), "Run Check" button that calls drift-api via fetch; displays raw JSON result | Sonnet | ≤ 2 000 |
+| A-8-T1 | PREPARATORY | `radar-ui` pnpm workspace with Vite 6 + React 19 + TypeScript + Tailwind + shadcn/ui scaffold; `radar-desktop` pnpm workspace with electron-vite; shared `radar-ui` renderer | Sonnet | ≤ 2 500 |
+| A-8-T2 | FEATURE | `radar-api` SQLite mode: `--db sqlite:PATH` flag; sqlx `AnyDatabase` feature; same migrations run on SQLite | Sonnet | ≤ 2 500 |
+| A-8-T3 | FEATURE | Electron main process: spawn `radar-api` child process with SQLite path in `userData`; wait for health-check before opening window; terminate on app quit | Sonnet | ≤ 2 500 |
+| A-8-T4 | FEATURE | Minimal `radar-ui` home screen: service list (empty state), "Run Check" button that calls radar-api via fetch; displays raw JSON result | Sonnet | ≤ 2 000 |
 | A-8-T5 | FEATURE | electron-builder config: Windows NSIS installer, macOS DMG, Linux AppImage; GitHub Actions release job | Sonnet | ≤ 1 500 |
 
-**Security note:** Electron `contextIsolation: true`, `nodeIntegration: false`. All Node.js access via `contextBridge` preload script. drift-api sidecar bound to `127.0.0.1` only — not exposed on the network.
+**Security note:** Electron `contextIsolation: true`, `nodeIntegration: false`. All Node.js access via `contextBridge` preload script. radar-api sidecar bound to `127.0.0.1` only — not exposed on the network.
 
-**Hand-off artifact:** Updated Architecture Memory confirming IPC/HTTP boundary between drift-desktop and drift-api.
+**Hand-off artifact:** Updated Architecture Memory confirming IPC/HTTP boundary between radar-desktop and radar-api.
 
 ---
 
-### Story A-7 · `drift-api` Stub — Diff Submission
+### Story A-7 · `radar-api` Stub — Diff Submission
 
 > **Persona:** CI pipeline
 > **Value:** So that diff results are persisted for future dashboard and blast-radius use
@@ -447,7 +447,7 @@ Then list of subscribed consumers returned with name and contact
 |---|---|---|---|---|
 | B-1-T1 | FEATURE | `consumer` + `subscription` tables, migrations | Sonnet | ≤ 1 500 |
 | B-1-T2 | FEATURE | `POST /v1/consumers`, `POST /v1/services/:id/subscriptions`, `GET /v1/services/:id/consumers` routes | Sonnet | ≤ 2 500 |
-| B-1-T3 | FEATURE | `drift register` CLI subcommand: reads `.drift.yml`, calls POST /v1/consumers + subscription | Sonnet | ≤ 2 000 |
+| B-1-T3 | FEATURE | `drift register` CLI subcommand: reads `.radar.yml`, calls POST /v1/consumers + subscription | Sonnet | ≤ 2 000 |
 
 ---
 
@@ -530,7 +530,7 @@ pub async fn blast_radius(diff_id: Uuid, db: &Pool) -> Vec<BlastEntry>
 > **Priority:** P1
 > **Size:** M
 > **Dependencies:** B-3 (blast radius enriches the per-consumer section)
-> **Feature flag:** `DRIFT_RELEASE_NOTES_ENABLED=true` (Claude call gated)
+> **Feature flag:** `RADAR_RELEASE_NOTES_ENABLED=true` (Claude call gated)
 
 **Acceptance Criteria**
 
@@ -552,7 +552,7 @@ Then the file is written; stdout is silent
 
 | ID | Hat | Goal | Agent tier | Token budget |
 |---|---|---|---|---|
-| B-4-T1 | FEATURE | Fetch Diff + Blast Radius from drift-api; populate template structured sections deterministically | Sonnet | ≤ 2 500 |
+| B-4-T1 | FEATURE | Fetch Diff + Blast Radius from radar-api; populate template structured sections deterministically | Sonnet | ≤ 2 500 |
 | B-4-T2 | FEATURE | Claude API call for narrative sections (breaking changes plain-language + per-consumer one-liner); prompt-cached | **Opus** | ≤ 3 000 |
 | B-4-T3 | FEATURE | `--out FILE` and `--post-github-release` output modes | Sonnet | ≤ 1 500 |
 
@@ -580,10 +580,10 @@ Then the file is written; stdout is silent
 > **Unlock condition:** EPIC A phase gate passed
 > **Exit criteria:**
 > - `drift check` works on GraphQL SDL and protobuf inputs
-> - drift-ui (full dashboard) shows cross-service trend view in both browser and Electron
+> - radar-ui (full dashboard) shows cross-service trend view in both browser and Electron
 > - Playground tab shows "Try It" for any registered producer's spec; sandbox environment pre-configured
 > - PostgreSQL mode verified: same migrations, same API behaviour as SQLite mode
-> - Web self-host confirmed: `docker compose up` brings up drift-api + PostgreSQL + drift-ui in browser
+> - Web self-host confirmed: `docker compose up` brings up radar-api + PostgreSQL + radar-ui in browser
 
 **Stories (DoR to be completed before pull)**
 
@@ -597,14 +597,14 @@ Then the file is written; stdout is silent
 | C-6 | tree-sitter Rust + Java grammars | M | Sonnet | C-5 |
 | C-7 | `call_site` table + scanner job (cron, not per-PR) | M | Sonnet | C-5 |
 | C-8 | Blast radius: union usage events + call sites | S | Sonnet | B-3, C-7 |
-| C-9 | drift-ui full shell (sg-shell, sg-nav, dark theme, React Router) | M | Sonnet | A-8 |
-| C-10 | drift-ui: Diffs list + Diff detail with blast radius table | M | Sonnet | C-9 |
-| C-11 | drift-ui: KPI cards (breaking-changes-30d, consumers-at-risk) | S | Sonnet | C-10 |
+| C-9 | radar-ui full shell (sg-shell, sg-nav, dark theme, React Router) | M | Sonnet | A-8 |
+| C-10 | radar-ui: Diffs list + Diff detail with blast radius table | M | Sonnet | C-9 |
+| C-11 | radar-ui: KPI cards (breaking-changes-30d, consumers-at-risk) | S | Sonnet | C-10 |
 | C-12 | Scalar Playground integration (service detail tab) — works in browser and Electron | M | Sonnet | C-9 |
 | C-13 | Sandbox environment config (pre-sales base URL + auth injection) | S | Sonnet | C-12 |
-| C-14 | PostgreSQL mode: drift-api `--db postgres://…` flag; Docker Compose for web self-host; migration parity test | M | Sonnet | A-8-T2 |
-| C-15 | Web deployment: drift-api serves Vite static bundle from `/app`; nginx reverse proxy config | S | Sonnet | C-14 |
-| C-16 | Design system token audit across drift-ui + Electron window chrome (§6 compliance) | S | Haiku | C-9–C-15 |
+| C-14 | PostgreSQL mode: radar-api `--db postgres://…` flag; Docker Compose for web self-host; migration parity test | M | Sonnet | A-8-T2 |
+| C-15 | Web deployment: radar-api serves Vite static bundle from `/app`; nginx reverse proxy config | S | Sonnet | C-14 |
+| C-16 | Design system token audit across radar-ui + Electron window chrome (§6 compliance) | S | Haiku | C-9–C-15 |
 
 ---
 
@@ -686,4 +686,4 @@ _Every task must pass before the story is considered complete._
 | Version | Date | Author | Change |
 |---|---|---|---|
 | 0.1 | 2026-05-17 | Yannick Verrydt | Initial development plan — Phase 0, EPIC A (full), EPIC B (full), EPIC C/D (outline); framework: GPM v2.1 + Backlog Builder v5.1 + Core Spec v1 |
-| 0.2 | 2026-05-17 | Yannick Verrydt | Electron + Web dual deployment: replaced Next.js with Vite 6; added drift-ui (shared renderer) and drift-desktop (Electron shell); added Story A-8 (Electron shell + SQLite mode); added ADR-007/008/009; added SQLite/PostgreSQL database abstraction (ADR-002 revised); expanded EPIC C with C-14/C-15/C-16; updated Architecture Memory, Glossary, and EPIC exit criteria |
+| 0.2 | 2026-05-17 | Yannick Verrydt | Electron + Web dual deployment: replaced Next.js with Vite 6; added radar-ui (shared renderer) and radar-desktop (Electron shell); added Story A-8 (Electron shell + SQLite mode); added ADR-007/008/009; added SQLite/PostgreSQL database abstraction (ADR-002 revised); expanded EPIC C with C-14/C-15/C-16; updated Architecture Memory, Glossary, and EPIC exit criteria |

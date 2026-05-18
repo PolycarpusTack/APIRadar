@@ -8,11 +8,11 @@ importers:
 
   .: {}
 
-  drift-desktop:
+  radar-desktop:
     dependencies:
-      drift-ui:
+      radar-ui:
         specifier: workspace:*
-        version: link:../drift-ui
+        version: link:../radar-ui
       electron-updater:
         specifier: ^6.1.0
         version: 6.8.3
@@ -63,7 +63,7 @@ importers:
         specifier: ^5.4.0
         version: 5.4.21(@types/node@20.19.41)
 
-  drift-ui:
+  radar-ui:
     dependencies:
       '@radix-ui/react-slot':
         specifier: ^1.1.0

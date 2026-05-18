@@ -1,12 +1,12 @@
 {
-  "name": "drift-monitor",
+  "name": "radar-monitor",
   "private": true,
   "scripts": {
-    "dev:ui": "pnpm --filter drift-ui dev",
-    "dev:desktop": "pnpm --filter drift-desktop dev",
-    "build:ui": "pnpm --filter drift-ui build",
-    "build:desktop": "pnpm --filter drift-desktop build",
-    "lint": "pnpm --filter drift-ui lint && pnpm --filter drift-desktop lint"
+    "dev:ui": "pnpm --filter radar-ui dev",
+    "dev:desktop": "pnpm --filter radar-desktop dev",
+    "build:ui": "pnpm --filter radar-ui build",
+    "build:desktop": "pnpm --filter radar-desktop build",
+    "lint": "pnpm --filter radar-ui lint && pnpm --filter radar-desktop lint"
   },
   "engines": {
     "node": ">=20",

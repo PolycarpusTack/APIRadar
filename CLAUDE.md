@@ -1,4 +1,4 @@
-# API Contract Drift Monitor — Claude Code Guide
+# API Contract Radar Monitor — Claude Code Guide
 
 ## Framework
 
@@ -29,12 +29,12 @@ Always use terms from the Domain Glossary in `DEVELOPMENT_PLAN.md`. Never use sy
 ## Workspace structure
 
 ```
-drift-core/       Shared Rust types (Change, Consumer, Diff, etc.)
-drift-cli/        CLI binary (clap 4)
-drift-api/        axum HTTP service; run with --db sqlite:PATH or --db postgres://...
-drift-scanner/    tree-sitter background worker
-drift-ui/         Vite 6 + React 19 web renderer (shared with desktop)
-drift-desktop/    Electron 33 shell (wraps drift-ui, spawns drift-api sidecar)
+radar-core/       Shared Rust types (Change, Consumer, Diff, etc.)
+radar-cli/        CLI binary (clap 4)
+radar-api/        axum HTTP service; run with --db sqlite:PATH or --db postgres://...
+radar-scanner/    tree-sitter background worker
+radar-ui/         Vite 6 + React 19 web renderer (shared with desktop)
+radar-desktop/    Electron 33 shell (wraps radar-ui, spawns radar-api sidecar)
 ```
 
 ---
@@ -53,9 +53,9 @@ cargo fmt --all                           # format
 ### Node / pnpm
 
 ```sh
-pnpm dev:ui                               # start drift-ui Vite dev server (localhost:5173)
-pnpm dev:desktop                          # start drift-desktop in Electron dev mode
-pnpm build:ui                             # build drift-ui static bundle
+pnpm dev:ui                               # start radar-ui Vite dev server (localhost:5173)
+pnpm dev:desktop                          # start radar-desktop in Electron dev mode
+pnpm build:ui                             # build radar-ui static bundle
 pnpm --recursive lint                     # lint all workspaces
 ```
 
@@ -72,7 +72,7 @@ pnpm --recursive lint                     # lint all workspaces
 Run migrations:
 
 ```sh
-sqlx migrate run --source drift-api/migrations
+sqlx migrate run --source radar-api/migrations
 ```
 
 Migration compatibility rules:
@@ -107,10 +107,10 @@ Every task must be labelled with exactly one hat before implementation begins:
 ## Security rules
 
 - All Electron `BrowserWindow` instances: `contextIsolation: true`, `nodeIntegration: false`
-- The `drift-api` sidecar must bind to `127.0.0.1` only (never `0.0.0.0`) in desktop mode
+- The `radar-api` sidecar must bind to `127.0.0.1` only (never `0.0.0.0`) in desktop mode
 - Never log tokens, passwords, or database credentials
 - `ANTHROPIC_API_KEY` comes from environment variables only — never hardcode or commit it
-- Treat `drift-desktop/src/main/` (Node process) as an untrusted boundary: validate all IPC messages
+- Treat `radar-desktop/src/main/` (Node process) as an untrusted boundary: validate all IPC messages
 
 ---
 

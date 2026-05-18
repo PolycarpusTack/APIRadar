@@ -1,0 +1,54 @@
+{
+  "appId": "com.radarmonitor.desktop",
+  "productName": "Radar Monitor",
+  "directories": {
+    "output": "dist",
+    "buildResources": "resources"
+  },
+  "files": [
+    "out/**/*",
+    "!node_modules/**/*"
+  ],
+  "extraResources": [
+    {
+      "from": "../../radar-api/target/release/radar-api",
+      "to": "radar-api",
+      "filter": ["**/*"]
+    },
+    {
+      "from": "../../radar-api/target/release/radar-api.exe",
+      "to": "radar-api.exe",
+      "filter": ["**/*"]
+    }
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ]
+  },
+  "mac": {
+    "target": [
+      {
+        "target": "dmg",
+        "arch": ["x64", "arm64"]
+      }
+    ],
+    "category": "public.app-category.developer-tools"
+  },
+  "linux": {
+    "target": [
+      {
+        "target": "AppImage",
+        "arch": ["x64"]
+      }
+    ],
+    "category": "Development"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true
+  }
+}

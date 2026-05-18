@@ -1,16 +1,16 @@
 openapi: "3.0.3"
 info:
-  title: Drift Monitor API
+  title: Radar Monitor API
   version: "0.1.0"
   description: |
-    API Contract Drift Monitor — blast-radius-aware schema diff service.
+    API Contract Radar Monitor — blast-radius-aware schema diff service.
 
-    Authentication: set `DRIFT_SERVICE_TOKEN` on the server and pass
+    Authentication: set `RADAR_SERVICE_TOKEN` on the server and pass
     `Authorization: Bearer <token>` on every `/v1/*` request.
-    When `DRIFT_JWT_SECRET` is set, HS256 JWTs are required instead; the
+    When `RADAR_JWT_SECRET` is set, HS256 JWTs are required instead; the
     JWT must contain `sub` and `org_id` claims.
   contact:
-    name: Drift Monitor
+    name: Radar Monitor
   license:
     name: MIT
 
@@ -250,7 +250,7 @@ paths:
   /v1/call-sites:
     post:
       tags: [scan]
-      summary: Upsert static call-site records from the drift-scanner
+      summary: Upsert static call-site records from the radar-scanner
       operationId: upsertCallSites
       requestBody:
         required: true

@@ -1,4 +1,4 @@
-# Drift Monitor — Runbook
+# Radar Monitor — Runbook
 
 > **Audience:** On-call engineers and DevOps.  
 > **Last updated:** 2026-05-18
@@ -23,15 +23,15 @@
 Browser / Electron
        │
        ▼
-drift-ui (Vite/React, static)
-       │  served by drift-api at /app
+radar-ui (Vite/React, static)
+       │  served by radar-api at /app
        ▼
-drift-api (axum, port 8080)
+radar-api (axum, port 8080)
        │
        ├── SQLite (Electron / local dev)  ← sqlite:drift.db
        └── PostgreSQL 16 (production)    ← postgres://…
               │
-              └── drift-scanner (background worker, reads source dirs)
+              └── radar-scanner (background worker, reads source dirs)
 ```
 
 Key env vars:
@@ -40,9 +40,9 @@ Key env vars:
 |---|---|---|
 | `DATABASE_URL` | DB connection string | `sqlite:drift.db` |
 | `BIND_ADDR` | Listen address | `0.0.0.0:8080` |
-| `STATIC_DIR` | Path to drift-ui `dist/` | _(none — UI not served)_ |
-| `DRIFT_SERVICE_TOKEN` | Static Bearer token for v1 routes | _(none — auth disabled)_ |
-| `DRIFT_JWT_SECRET` | HS256 secret for JWT auth (overrides static token) | _(none)_ |
+| `STATIC_DIR` | Path to radar-ui `dist/` | _(none — UI not served)_ |
+| `RADAR_SERVICE_TOKEN` | Static Bearer token for v1 routes | _(none — auth disabled)_ |
+| `RADAR_JWT_SECRET` | HS256 secret for JWT auth (overrides static token) | _(none)_ |
 | `RATE_LIMIT_PER_MINUTE` | Max requests/min per client IP (0 = off) | `300` |
 | `ANTHROPIC_API_KEY` | Enables Claude-powered release notes | _(none)_ |
 
@@ -63,18 +63,18 @@ curl http://localhost:8080/health
 
 ### Migrations (run automatically on start-up)
 
-Migrations live in `drift-api/migrations/` and are applied by sqlx on boot.  
+Migrations live in `radar-api/migrations/` and are applied by sqlx on boot.  
 To run manually:
 
 ```bash
-DATABASE_URL=postgres://drift:drift_dev@localhost/drift \
-  sqlx migrate run --source drift-api/migrations
+DATABASE_URL=postgres://drift:radar_dev@localhost/drift \
+  sqlx migrate run --source radar-api/migrations
 ```
 
 ### Binary (bare-metal)
 
 ```bash
-./drift-api \
+./radar-api \
   --db postgres://drift:secret@pg-host/drift \
   --static-dir /srv/ui/dist \
   --bind 0.0.0.0:8080 \
@@ -90,7 +90,7 @@ DATABASE_URL=postgres://drift:drift_dev@localhost/drift \
 ```bash
 # Pin to the previous image tag
 docker compose down
-sed -i 's/drift-api:latest/drift-api:v0.1.0/' docker-compose.yml
+sed -i 's/radar-api:latest/radar-api:v0.1.0/' docker-compose.yml
 docker compose up -d
 ```
 
@@ -131,7 +131,7 @@ psql $DATABASE_URL -c \
 
 | Alert | Threshold | Action |
 |---|---|---|
-| `drift-api` unreachable | `/health` returning non-200 for 2 min | Restart container; check DB connectivity |
+| `radar-api` unreachable | `/health` returning non-200 for 2 min | Restart container; check DB connectivity |
 | Error rate > 5 % | Monitor `5xx` responses | Check `RUST_LOG=error` output; possible DB connection exhaustion |
 | DB disk > 80 % | — | Enable TimescaleDB compression (see `docs/timescaledb.sql`) or increase retention |
 | High blast radius | > 20 consumers affected | Ping producer team's on-call channel |
@@ -140,19 +140,19 @@ psql $DATABASE_URL -c \
 
 ## 6. Common incidents
 
-### "drift-api won't start"
+### "radar-api won't start"
 
 1. Check DB connectivity: `psql $DATABASE_URL -c 'SELECT 1'`
-2. Check migration status: `sqlx migrate info --source drift-api/migrations`
+2. Check migration status: `sqlx migrate info --source radar-api/migrations`
 3. Check port conflict: `ss -tlnp | grep 8080`
 
 ### "CLI returns 401"
 
-1. Verify `DRIFT_SERVICE_TOKEN` matches the server-side value.
-2. If `DRIFT_JWT_SECRET` is set, the static token is ignored — use a valid HS256 JWT instead.
+1. Verify `RADAR_SERVICE_TOKEN` matches the server-side value.
+2. If `RADAR_JWT_SECRET` is set, the static token is ignored — use a valid HS256 JWT instead.
 3. Generate a test token (requires `jwt-cli`):
    ```bash
-   jwt encode --secret "$DRIFT_JWT_SECRET" '{"sub":"ops","org_id":"default","exp":9999999999}'
+   jwt encode --secret "$RADAR_JWT_SECRET" '{"sub":"ops","org_id":"default","exp":9999999999}'
    ```
 
 ### "Blast radius shows 0 consumers despite active consumers"
@@ -172,8 +172,8 @@ psql $DATABASE_URL -c \
 
 | Secret | Storage | Rotation |
 |---|---|---|
-| `DRIFT_SERVICE_TOKEN` | Environment variable / secret manager | Rotate quarterly |
-| `DRIFT_JWT_SECRET` | Environment variable / secret manager | Rotate on suspected compromise |
+| `RADAR_SERVICE_TOKEN` | Environment variable / secret manager | Rotate quarterly |
+| `RADAR_JWT_SECRET` | Environment variable / secret manager | Rotate on suspected compromise |
 | `ANTHROPIC_API_KEY` | Environment variable / secret manager | Rotate quarterly |
 | DB password | Environment variable / secret manager | Rotate quarterly |
 | `GITHUB_TOKEN` (CI) | GitHub Actions secret | Managed by GitHub org admins |
@@ -182,4 +182,4 @@ psql $DATABASE_URL -c \
 
 ---
 
-_Generated by Drift Monitor team. File issues at the internal issue tracker._
+_Generated by Radar Monitor team. File issues at the internal issue tracker._

@@ -1,4 +1,4 @@
-# API Contract Drift Monitor — Solution Design
+# API Contract Radar Monitor — Solution Design
 
 > **Template version:** 1.0 · Stub: section shape is final, contents are deliberately unfinished. Keep section order stable across the suite.
 
@@ -84,19 +84,19 @@ The interesting number isn't "what changed" — it's "who will break." Every spe
                       └─────────┬─────────┘
                                 │
 ┌──────────────┐      ┌─────────▼──────────────────────┐      ┌─────────────────┐
-│ Producer PR  │ ───▶ │ drift-cli (CI runner)           │ ───▶ │ PR comment bot  │
+│ Producer PR  │ ───▶ │ radar-cli (CI runner)           │ ───▶ │ PR comment bot  │
 │ (CI runner)  │      │                                 │      │ (GH/GL/BB)      │
 └──────────────┘      └─────────┬───────────────────────┘      └─────────────────┘
                                 │ HTTP
                       ┌─────────▼──────────────────────┐
-                      │ drift-api  (Rust/axum)          │
+                      │ radar-api  (Rust/axum)          │
                       │ SQLite mode  │  PostgreSQL mode  │
                       └──────┬───────────────┬──────────┘
                              │               │
                ┌─────────────▼──┐    ┌───────▼──────────────────┐
-               │ drift-desktop  │    │ Browser (web deployment)  │
+               │ radar-desktop  │    │ Browser (web deployment)  │
                │ (Electron)     │    │                           │
-               │ drift-ui inside│    │ drift-ui (Vite/React)     │
+               │ radar-ui inside│    │ radar-ui (Vite/React)     │
                │ SQLite on disk │    │ PostgreSQL on server      │
                └────────────────┘    └───────────────────────────┘
 
@@ -109,37 +109,37 @@ The interesting number isn't "what changed" — it's "who will break." Every spe
 ### 4.2 Components
 | Component | Responsibility | Tech |
 |---|---|---|
-| `drift-cli` | Local / CI diff runs; prints or posts results | Rust |
-| `drift-api` | Consumer registry, usage ingest, diff results store; serves `drift-ui` static assets in web mode | Rust (axum) |
-| `drift-scanner` | Worker: scans consumer repos for call sites | Rust + tree-sitter |
-| `drift-ui` | Shared renderer — cross-service dashboard, diff viewer, Playground; runs in browser or as Electron renderer | Vite 6 + React 19 + TypeScript + Tailwind |
-| `drift-desktop` | Electron shell — wraps `drift-ui`, spawns `drift-api` as a local sidecar, manages SQLite file lifecycle | Electron 33 + electron-vite |
+| `radar-cli` | Local / CI diff runs; prints or posts results | Rust |
+| `radar-api` | Consumer registry, usage ingest, diff results store; serves `radar-ui` static assets in web mode | Rust (axum) |
+| `radar-scanner` | Worker: scans consumer repos for call sites | Rust + tree-sitter |
+| `radar-ui` | Shared renderer — cross-service dashboard, diff viewer, Playground; runs in browser or as Electron renderer | Vite 6 + React 19 + TypeScript + Tailwind |
+| `radar-desktop` | Electron shell — wraps `radar-ui`, spawns `radar-api` as a local sidecar, manages SQLite file lifecycle | Electron 33 + electron-vite |
 | `drift-db` | Usage events, diffs, consumers, policies | SQLite (local / Electron default) · PostgreSQL 16 (web / production) |
 
 ### 4.3 Data flow
-1. Producer opens PR; CI runs `drift-cli check --base main --head HEAD`.
+1. Producer opens PR; CI runs `radar-cli check --base main --head HEAD`.
 2. CLI fetches old + new spec (from repo / registry), parses both, computes typed diff.
-3. For each breaking change, CLI calls `drift-api` with the (spec, field-path) pair.
-4. `drift-api` queries usage telemetry + latest scanner results for that spec's registered consumers.
+3. For each breaking change, CLI calls `radar-api` with the (spec, field-path) pair.
+4. `radar-api` queries usage telemetry + latest scanner results for that spec's registered consumers.
 5. Blast radius = union of (consumers who called it in last N days) + (consumers with static references).
 6. CLI renders PR comment with migration guide per affected consumer.
 7. CLI exits non-zero if policy says "block on active consumers affected."
-8. Dashboard receives the diff record for trend reporting — result visible in `drift-ui` (browser or Electron).
+8. Dashboard receives the diff record for trend reporting — result visible in `radar-ui` (browser or Electron).
 
 ### 4.4 Deployment topology
 
-Two deployment targets share the same `drift-ui` codebase and the same `drift-api` binary:
+Two deployment targets share the same `radar-ui` codebase and the same `radar-api` binary:
 
 **Desktop / local (Electron)**
-`drift-desktop` ships as a single installable (`.exe` / `.dmg` / `.AppImage`). On launch it spawns `drift-api` as a child process pointed at a local SQLite file. `drift-ui` loads inside the Electron renderer via `electron-vite`. No external infrastructure required — download and run.
+`radar-desktop` ships as a single installable (`.exe` / `.dmg` / `.AppImage`). On launch it spawns `radar-api` as a child process pointed at a local SQLite file. `radar-ui` loads inside the Electron renderer via `electron-vite`. No external infrastructure required — download and run.
 
 **Web / production**
-`drift-api` (PostgreSQL mode) + `drift-db` (PostgreSQL 16) deploy on a VM or container. `drift-api` serves the pre-built `drift-ui` static bundle from `/app`. `drift-scanner` runs as a cron job on the same host or a separate worker. HA deployment viable at scale by adding a read replica and a second API node behind a load balancer.
+`radar-api` (PostgreSQL mode) + `drift-db` (PostgreSQL 16) deploy on a VM or container. `radar-api` serves the pre-built `radar-ui` static bundle from `/app`. `radar-scanner` runs as a cron job on the same host or a separate worker. HA deployment viable at scale by adding a read replica and a second API node behind a load balancer.
 
 **CLI (CI)**
-`drift-cli` runs in any CI runner independently of both deployment targets. It calls `drift-api` over HTTPS for blast-radius lookups and diff persistence; for air-gapped runs it can operate locally against the SQLite file.
+`radar-cli` runs in any CI runner independently of both deployment targets. It calls `radar-api` over HTTPS for blast-radius lookups and diff persistence; for air-gapped runs it can operate locally against the SQLite file.
 
-Common to both: `drift-scanner` is always a background cron job, never per-PR (cost control).
+Common to both: `radar-scanner` is always a background cron job, never per-PR (cost control).
 
 ---
 
@@ -148,13 +148,13 @@ Common to both: `drift-scanner` is always a background cron job, never per-PR (c
 | Layer | Choice | Rationale / Constraint |
 |---|---|---|
 | Language(s) | Rust 1.80+ for CLI + services; TypeScript 5.x for UI | Fast parsing matters for per-PR runtime; Rust also gives shippable cross-platform binary |
-| Backend framework | axum (HTTP API); serves `drift-ui` static assets in web mode | Minimal footprint; single binary for both API and static file serving |
+| Backend framework | axum (HTTP API); serves `radar-ui` static assets in web mode | Minimal footprint; single binary for both API and static file serving |
 | Frontend | Vite 6 + React 19 + TypeScript + Tailwind + shadcn/ui | Vite works in both browser and Electron renderer; Next.js SSR is incompatible with Electron |
-| Desktop shell | Electron 33 + electron-vite | Single installable for Windows / macOS / Linux; same `drift-ui` renderer, no extra runtime |
-| State / Data | SQLite (local / Electron default) · PostgreSQL 16 (web / production); same sqlx migrations run on both | sqlx `AnyDatabase` lets `drift-api` compile once and target either engine via `--db sqlite:path` or `--db postgres://…` |
+| Desktop shell | Electron 33 + electron-vite | Single installable for Windows / macOS / Linux; same `radar-ui` renderer, no extra runtime |
+| State / Data | SQLite (local / Electron default) · PostgreSQL 16 (web / production); same sqlx migrations run on both | sqlx `AnyDatabase` lets `radar-api` compile once and target either engine via `--db sqlite:path` or `--db postgres://…` |
 | AI provider(s) | Claude for migration-guide prose and release-notes narrative generation | Deterministic diff stays rules-based; only the human-readable sections use LLM |
-| API Playground | Scalar (MIT, self-hosted) embedded in `drift-ui` | Zero per-seat cost vs Postman; renders directly from the OpenAPI spec already parsed for drift; works identically in browser and Electron |
-| Packaging | cargo (CLI + services) · electron-builder (desktop installers) · pnpm (UI) · Docker (web self-host) | Single pnpm workspace covers `drift-ui` and `drift-desktop` |
+| API Playground | Scalar (MIT, self-hosted) embedded in `radar-ui` | Zero per-seat cost vs Postman; renders directly from the OpenAPI spec already parsed for drift; works identically in browser and Electron |
+| Packaging | cargo (CLI + services) · electron-builder (desktop installers) · pnpm (UI) · Docker (web self-host) | Single pnpm workspace covers `radar-ui` and `radar-desktop` |
 | CI / Release | GitHub Actions | Suite convention |
 | Observability | OpenTelemetry → Prometheus / Loki | Suite convention |
 
@@ -211,7 +211,7 @@ Common options:
   --head REF              Git ref for candidate spec
   --spec PATH             Spec file(s); glob allowed
   --format openapi|graphql|proto
-  --policy FILE           Policy overrides (default .drift.yml)
+  --policy FILE           Policy overrides (default .radar.yml)
   --post-comment          Post to current PR
   --json                  Machine-readable output
   --no-color              Disable colour (also NO_COLOR)
@@ -230,7 +230,7 @@ OpenAPI spec shipped at `docs/openapi.yaml`.
 
 ### 7.3 Config schema
 ```yaml
-# .drift.yml
+# .radar.yml
 version: 1
 service: billing-api
 specs:
@@ -283,7 +283,7 @@ _Generated {date} · Diff #{diff.id} · {from_version} → {to_version}_
 - Action required: {claude_narrative: specific one-liner for this consumer}
 
 ---
-_Auto-generated by drift-cli {cli_version}. Review before publishing._
+_Auto-generated by radar-cli {cli_version}. Review before publishing._
 ```
 
 **Output options:**
@@ -300,7 +300,7 @@ Embedded Scalar instance in the service detail view of `drift-dashboard`. Design
 | Spec source | Same OpenAPI YAML already stored in `spec_version.spec_blob`; no re-fetch |
 | Base URL | Configurable per named environment (`production`, `staging`, `sandbox`) via the service's env config in the dashboard |
 | Auth | Bearer token / API key injected from the environment config; never stored in browser |
-| Request history | Local browser storage only; never sent to `drift-api` |
+| Request history | Local browser storage only; never sent to `radar-api` |
 | Export | One-click copy as `curl`, `fetch`, or language snippet (Python / Go / Rust) |
 | Branding | Scalar's default UI skinned with design-system tokens (`--bg-base`, `--cobalt` primary) |
 
@@ -336,7 +336,7 @@ PostgreSQL 16. `usage_event` can upgrade to TimescaleDB hypertable at scale; def
 - **Secrets handling:** service tokens in env or OS keychain for CLI; no tokens logged.
 - **AuthN / AuthZ:** service-token auth per producer; dashboard uses OIDC.
 - **PII:** none expected. Field paths are schema-only, not field values.
-- **Data leaves the machine?** Yes, per design — usage telemetry and diffs are sent to `drift-api`. Self-hosted by default.
+- **Data leaves the machine?** Yes, per design — usage telemetry and diffs are sent to `radar-api`. Self-hosted by default.
 - **Supply chain:** cargo lock + npm lock pinned; cosign-signed release binaries; SBOM via syft.
 
 ---
@@ -348,7 +348,7 @@ PostgreSQL 16. `usage_event` can upgrade to TimescaleDB hypertable at scale; def
 | Logs | `tracing` (Rust), `pino` (Node) | stdout -> Loki |
 | Metrics | OTLP | Prometheus |
 | Traces | OTLP | Tempo |
-| User events | drift-cli + dashboard | internal events table |
+| User events | radar-cli + dashboard | internal events table |
 
 Key SLIs: `check` p95 < 5s for specs under 1 MB; blast-radius query p95 < 300ms; false-positive rate on "breaking" below 2%.
 
@@ -358,9 +358,9 @@ Key SLIs: `check` p95 < 5s for specs under 1 MB; blast-radius query p95 < 300ms;
 
 | Phase | Weeks | Theme | Exit criteria |
 |---|---|---|---|
-| P0 | 1-3 | OpenAPI diff CLI + trivial PR comment, one producer; `drift-ui` + `drift-desktop` Electron shell (SQLite) | `drift check` runs in CI; Electron app launches and connects to local drift-api sidecar |
+| P0 | 1-3 | OpenAPI diff CLI + trivial PR comment, one producer; `radar-ui` + `radar-desktop` Electron shell (SQLite) | `drift check` runs in CI; Electron app launches and connects to local radar-api sidecar |
 | P1 | 4-7 | Consumer registry + usage ingest + blast radius on OpenAPI; release-notes template + `--release-notes` flag | Three consumers registered; PR comment names them; release notes generated from a real diff |
-| P2 | 8-10 | GraphQL + protobuf; tree-sitter scanner; full `drift-ui` dashboard + Scalar Playground; PostgreSQL mode for web deployment | Multi-format; static call-site refs in blast radius; pre-sales sandbox demo runnable from browser or Electron |
+| P2 | 8-10 | GraphQL + protobuf; tree-sitter scanner; full `radar-ui` dashboard + Scalar Playground; PostgreSQL mode for web deployment | Multi-format; static call-site refs in blast radius; pre-sales sandbox demo runnable from browser or Electron |
 | P3 | 11-14 | Migration-guide generator; policy engine; multi-org OIDC; release-notes → GitHub Release automation; signed installers + Docker image | Self-service onboarding; SaaS-viable web deploy; installable desktop app on all three platforms |
 
 ---
@@ -424,4 +424,4 @@ OSS core (CLI + single-repo use). Commercial tier for cross-service dashboard, c
 |---|---|---|---|
 | 0.1 | 2026-04-20 | Yannick Verrydt | Initial stub |
 | 0.2 | 2026-05-17 | Yannick Verrydt | Added API Release Notes generator (section 3.2, 7.4); added Interactive API Playground via Scalar for pre-sales sandbox demos (section 3.2, 7.5); updated tech stack and roadmap |
-| 0.3 | 2026-05-17 | Yannick Verrydt | Adopted Electron + Web dual-deployment: replaced Next.js with Vite 6; introduced `drift-ui` (shared renderer) and `drift-desktop` (Electron shell); added SQLite as local/default DB with PostgreSQL as production option; updated C4 diagram, components, deployment topology, tech stack, and roadmap |
+| 0.3 | 2026-05-17 | Yannick Verrydt | Adopted Electron + Web dual-deployment: replaced Next.js with Vite 6; introduced `radar-ui` (shared renderer) and `radar-desktop` (Electron shell); added SQLite as local/default DB with PostgreSQL as production option; updated C4 diagram, components, deployment topology, tech stack, and roadmap |

@@ -1,5 +1,5 @@
 [workspace]
-members = ["drift-core", "drift-cli", "drift-api", "drift-scanner"]
+members = ["radar-core", "radar-cli", "radar-api", "radar-scanner"]
 resolver = "2"
 
 [workspace.dependencies]

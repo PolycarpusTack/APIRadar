@@ -1,6 +1,6 @@
 packages:
-  - drift-ui
-  - drift-desktop
+  - radar-ui
+  - radar-desktop
 
 ignoredBuiltDependencies:
   - electron
