@@ -264,6 +264,8 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>) -> Router {
         .route("/usage/events", post(ingest_usage_event))
         .route("/call-sites", post(upsert_call_sites))
         .route("/summary", get(get_summary))
+        .route("/generate-tests", post(generate_tests))
+        .route("/generate-tests", get(list_test_suites))
         .layer(middleware::from_fn_with_state(pool.clone(), auth_middleware))
         .with_state(pool.clone());
 
@@ -1239,6 +1241,372 @@ async fn get_summary(
             "services_count":       services_count,
         })),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/generate-tests — generate a Postman Collection from a Jira ticket + spec
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct GenerateTestsBody {
+    /// OpenAPI YAML/JSON spec text. Required (spec is not stored server-side per service).
+    spec_yaml: String,
+    /// Jira ticket key (e.g. "PROJ-123"). Server reads JIRA_BASE_URL/JIRA_EMAIL/JIRA_TOKEN.
+    jira_key: Option<String>,
+    /// Paste the Jira ticket text directly (used when jira_key is absent or Jira is unreachable).
+    jira_text: Option<String>,
+    /// Optional service UUID to associate this suite with.
+    service_id: Option<String>,
+    /// Base URL inserted into generated requests (default: http://localhost:8080).
+    #[serde(default = "default_base_url")]
+    base_url: String,
+}
+
+fn default_base_url() -> String {
+    "http://localhost:8080".to_string()
+}
+
+async fn generate_tests(
+    State(pool): State<sqlx::AnyPool>,
+    Json(body): Json<GenerateTestsBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+
+    let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
+        ApiError::BadRequest("ANTHROPIC_API_KEY is not set on the server".to_string())
+    })?;
+
+    // Resolve Jira content.
+    let (jira_summary, jira_description) = match body.jira_key {
+        Some(ref key) => {
+            let result = fetch_jira_ticket(key).await;
+            match result {
+                Ok((s, d)) => (s, d),
+                Err(e) => {
+                    // Fall back to jira_text if Jira API fails.
+                    if let Some(text) = body.jira_text.clone() {
+                        let first = text.lines().next().unwrap_or("").to_string();
+                        (first, text)
+                    } else {
+                        return Err(ApiError::BadRequest(format!(
+                            "Jira fetch failed and no jira_text provided: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+        None => match body.jira_text.clone() {
+            Some(text) => {
+                let first = text.lines().next().unwrap_or("").to_string();
+                (first, text)
+            }
+            None => {
+                return Err(ApiError::BadRequest(
+                    "Provide either jira_key or jira_text".to_string(),
+                ))
+            }
+        },
+    };
+
+    // Call Claude to generate structured test cases then assemble the collection.
+    let collection_json =
+        call_claude_for_tests(&api_key, &jira_summary, &jira_description, &body.spec_yaml, &body.base_url)
+            .await
+            .map_err(|e| ApiError::BadRequest(format!("test generation failed: {e}")))?;
+
+    // Parse counts from the collection.
+    let items = collection_json["item"].as_array();
+    let test_count = items.map(|a| a.len()).unwrap_or(0) as i64;
+    let happy_count = items
+        .map(|a| a.iter().filter(|i| i["name"].as_str().unwrap_or("").starts_with("[HAPPY")).count())
+        .unwrap_or(0) as i64;
+    let negative_count = test_count - happy_count;
+    let collection_name = collection_json["info"]["name"].as_str().unwrap_or("Generated Tests").to_string();
+
+    // Persist.
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let collection_str = serde_json::to_string(&collection_json).unwrap_or_default();
+
+    sqlx::query(
+        r#"INSERT INTO generated_test_suite
+           (id, service_id, jira_key, jira_summary, collection_name, collection_json,
+            test_count, happy_count, negative_count, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+    )
+    .bind(&id)
+    .bind(&body.service_id)
+    .bind(&body.jira_key)
+    .bind(&jira_summary)
+    .bind(&collection_name)
+    .bind(&collection_str)
+    .bind(test_count)
+    .bind(happy_count)
+    .bind(negative_count)
+    .bind(&now)
+    .execute(&pool)
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id":              id,
+            "collection_name": collection_name,
+            "test_count":      test_count,
+            "happy_count":     happy_count,
+            "negative_count":  negative_count,
+            "collection_json": collection_json,
+            "created_at":      now,
+        })),
+    ))
+}
+
+// GET /v1/generate-tests — list previously generated test suites (newest 50)
+async fn list_test_suites(
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+
+    let rows = sqlx::query(
+        r#"SELECT id, service_id, jira_key, jira_summary, collection_name,
+                  test_count, happy_count, negative_count, created_at
+           FROM generated_test_suite
+           ORDER BY created_at DESC
+           LIMIT 50"#,
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id":              r.get::<String, _>("id"),
+                "service_id":      r.try_get::<Option<String>, _>("service_id").unwrap_or(None),
+                "jira_key":        r.try_get::<Option<String>, _>("jira_key").unwrap_or(None),
+                "jira_summary":    r.try_get::<Option<String>, _>("jira_summary").unwrap_or(None),
+                "collection_name": r.get::<String, _>("collection_name"),
+                "test_count":      r.try_get::<i64, _>("test_count").unwrap_or(0),
+                "happy_count":     r.try_get::<i64, _>("happy_count").unwrap_or(0),
+                "negative_count":  r.try_get::<i64, _>("negative_count").unwrap_or(0),
+                "created_at":      r.get::<String, _>("created_at"),
+            })
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(json!(items))))
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for generate-tests
+// ---------------------------------------------------------------------------
+
+async fn fetch_jira_ticket(key: &str) -> anyhow::Result<(String, String)> {
+    let base = std::env::var("JIRA_BASE_URL")
+        .map_err(|_| anyhow::anyhow!("JIRA_BASE_URL not set"))?;
+    let email = std::env::var("JIRA_EMAIL")
+        .map_err(|_| anyhow::anyhow!("JIRA_EMAIL not set"))?;
+    let token = std::env::var("JIRA_TOKEN")
+        .map_err(|_| anyhow::anyhow!("JIRA_TOKEN not set"))?;
+
+    let url = format!("{}/rest/api/2/issue/{}", base.trim_end_matches('/'), key);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .basic_auth(&email, Some(&token))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let body: Value = resp.json().await?;
+    let fields = &body["fields"];
+    let summary = fields["summary"].as_str().unwrap_or("").to_string();
+    let description = fields["description"].as_str().unwrap_or("").to_string();
+    Ok((summary, description))
+}
+
+async fn call_claude_for_tests(
+    api_key: &str,
+    jira_summary: &str,
+    jira_description: &str,
+    spec_yaml: &str,
+    base_url: &str,
+) -> anyhow::Result<Value> {
+    let spec_excerpt = if spec_yaml.len() > 40_000 {
+        &spec_yaml[..40_000]
+    } else {
+        spec_yaml
+    };
+
+    let prompt = format!(
+        r#"You are a QA engineer generating Postman API tests from a Jira ticket and an OpenAPI spec.
+
+## Jira Ticket
+Title: {jira_summary}
+Description:
+{jira_description}
+
+## OpenAPI Specification
+```yaml
+{spec_excerpt}
+```
+
+## Task
+Generate API test cases:
+1. Happy-path tests — valid inputs satisfying the ticket's acceptance criteria
+2. Negative tests — missing required fields (→ 400/422), wrong types (→ 400), unauthorized (→ 401), not-found (→ 404)
+
+Rules:
+- Use {{{{baseUrl}}}} as the host placeholder and {{{{authToken}}}} for bearer auth
+- Each assertion is a complete valid JavaScript pm.test() statement on a single line
+- Aim for 4–6 happy-path and 4–8 negative tests
+- Return ONLY valid JSON — no markdown fences, no surrounding text
+
+Required JSON format:
+{{
+  "collection_name": "TICKET-KEY — Short Title",
+  "test_cases": [
+    {{
+      "name": "Happy Path — create resource",
+      "category": "happy_path",
+      "method": "POST",
+      "path": "/v1/resource",
+      "path_params": {{}},
+      "query_params": {{}},
+      "body": {{"field": "value"}},
+      "expected_status": 201,
+      "assertions": [
+        "pm.test('Response has id', () => {{ pm.expect(pm.response.json()).to.have.property('id'); }});"
+      ]
+    }}
+  ]
+}}"#
+    );
+
+    let request_body = json!({
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 4096,
+        "messages": [{"role": "user", "content": prompt}]
+    });
+
+    let resp = reqwest::Client::new()
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&request_body)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("Claude API error {status}: {err}"));
+    }
+
+    let claude_resp: Value = resp.json().await?;
+    let raw_text = claude_resp["content"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|b| b["text"].as_str())
+        .ok_or_else(|| anyhow::anyhow!("unexpected Claude response format"))?;
+
+    // Extract JSON object from Claude's response.
+    let start = raw_text.find('{').ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
+    let end = raw_text.rfind('}').ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
+    let json_str = &raw_text[start..=end];
+
+    let suite: Value = serde_json::from_str(json_str)?;
+    Ok(assemble_postman_collection(suite, base_url))
+}
+
+fn assemble_postman_collection(suite: Value, base_url: &str) -> Value {
+    let collection_name = suite["collection_name"].as_str().unwrap_or("Generated Tests").to_string();
+    let empty = vec![];
+    let test_cases = suite["test_cases"].as_array().unwrap_or(&empty);
+
+    let items: Vec<Value> = test_cases.iter().map(|tc| {
+        let category = tc["category"].as_str().unwrap_or("test");
+        let name = tc["name"].as_str().unwrap_or("Test");
+        let method = tc["method"].as_str().unwrap_or("GET").to_uppercase();
+        let path = tc["path"].as_str().unwrap_or("/");
+        let expected_status = tc["expected_status"].as_u64().unwrap_or(200);
+
+        let path_segs: Vec<Value> = path.trim_start_matches('/').split('/').filter(|s| !s.is_empty())
+            .map(|s| Value::String(s.to_string())).collect();
+
+        let mut assertions = vec![
+            format!("pm.test('Status is {expected_status}', () => pm.response.to.have.status({expected_status}));"),
+        ];
+        if let Some(arr) = tc["assertions"].as_array() {
+            for a in arr {
+                if let Some(s) = a.as_str() {
+                    if !s.contains("have.status") {
+                        assertions.push(s.to_string());
+                    }
+                }
+            }
+        }
+
+        let has_body = !tc["body"].is_null() && tc["body"].is_object();
+        let mut headers = vec![
+            json!({"key": "Authorization", "value": "Bearer {{authToken}}", "type": "text"}),
+        ];
+        if has_body {
+            headers.push(json!({"key": "Content-Type", "value": "application/json", "type": "text"}));
+        }
+
+        let body_json = if has_body {
+            json!({
+                "mode": "raw",
+                "raw": serde_json::to_string_pretty(&tc["body"]).unwrap_or_default(),
+                "options": {"raw": {"language": "json"}}
+            })
+        } else {
+            Value::Null
+        };
+
+        let label = format!("[{}] {}", category.replace('_', " ").to_uppercase(), name);
+
+        let mut item = json!({
+            "name": label,
+            "event": [{
+                "listen": "test",
+                "script": {
+                    "type": "text/javascript",
+                    "exec": assertions
+                }
+            }],
+            "request": {
+                "method": method,
+                "header": headers,
+                "url": {
+                    "raw": format!("{{{{baseUrl}}}}{path}"),
+                    "host": ["{{baseUrl}}"],
+                    "path": path_segs,
+                    "query": []
+                }
+            }
+        });
+
+        if !body_json.is_null() {
+            item["request"]["body"] = body_json;
+        }
+
+        item
+    }).collect();
+
+    json!({
+        "info": {
+            "name": collection_name,
+            "_postman_id": Uuid::new_v4().to_string(),
+            "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+        },
+        "item": items,
+        "variable": [
+            {"key": "baseUrl", "value": base_url, "type": "string"},
+            {"key": "authToken", "value": "", "type": "string"}
+        ]
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ serde_yaml = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -8,9 +8,12 @@ mod api_client;
 mod claude;
 mod explain;
 mod github;
+mod jira;
 mod policy;
+mod postman;
 mod register;
 mod render;
+mod test_gen;
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -129,6 +132,33 @@ enum Commands {
         /// Optional bearer token for the radar-api server.
         #[arg(long, env = "RADAR_SERVICE_TOKEN")]
         token: Option<String>,
+    },
+
+    /// Generate Postman test cases from a Jira ticket and an OpenAPI spec.
+    GenerateTests {
+        /// Jira ticket key (e.g. PROJ-123). Reads JIRA_BASE_URL, JIRA_EMAIL, JIRA_TOKEN.
+        #[arg(long)]
+        jira: Option<String>,
+
+        /// Paste Jira ticket text directly (fallback when --jira or Jira credentials are absent).
+        #[arg(long)]
+        jira_text: Option<String>,
+
+        /// Path to the OpenAPI YAML/JSON spec file.
+        #[arg(long)]
+        spec: Option<std::path::PathBuf>,
+
+        /// Base URL inserted into every generated request (default: http://localhost:8080).
+        #[arg(long, default_value = "http://localhost:8080")]
+        base_url: String,
+
+        /// Write the Postman Collection JSON to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Push the collection to this Postman workspace ID (requires POSTMAN_API_KEY).
+        #[arg(long)]
+        postman_workspace: Option<String>,
     },
 
     /// Explain the impact of a diff and optionally generate release notes.
@@ -332,6 +362,77 @@ async fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
+        Commands::GenerateTests {
+            jira,
+            jira_text,
+            spec,
+            base_url,
+            out,
+            postman_workspace,
+        } => {
+            // Resolve Jira content: API first, then --jira-text fallback.
+            let (jira_summary, jira_description) = if let Some(ref key) = jira {
+                let jira_base = std::env::var("JIRA_BASE_URL")
+                    .map_err(|_| anyhow::anyhow!("JIRA_BASE_URL is not set"))?;
+                let email = std::env::var("JIRA_EMAIL")
+                    .map_err(|_| anyhow::anyhow!("JIRA_EMAIL is not set"))?;
+                let token = std::env::var("JIRA_TOKEN")
+                    .map_err(|_| anyhow::anyhow!("JIRA_TOKEN is not set"))?;
+                let ticket = jira::fetch_ticket(&jira_base, &email, &token, key).await?;
+                (ticket.summary, ticket.description)
+            } else if let Some(text) = jira_text {
+                let first_line = text.lines().next().unwrap_or("").to_string();
+                (first_line, text)
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Provide either --jira PROJ-123 or --jira-text \"<ticket text>\""
+                ));
+            };
+
+            // Resolve spec.
+            let spec_yaml = match spec {
+                Some(path) => std::fs::read_to_string(&path)
+                    .map_err(|e| anyhow::anyhow!("cannot read spec '{}': {e}", path.display()))?,
+                None => return Err(anyhow::anyhow!("--spec <path> is required")),
+            };
+
+            eprintln!("Generating tests for: {jira_summary}");
+            let collection = test_gen::generate_test_collection(
+                &jira_summary,
+                &jira_description,
+                &spec_yaml,
+                &base_url,
+            )
+            .await?;
+
+            let happy = collection.item.iter().filter(|i| i.name.starts_with("[HAPPY")).count();
+            let negative = collection.item.len() - happy;
+            eprintln!(
+                "Generated {} test(s): {} happy-path, {} negative.",
+                collection.item.len(),
+                happy,
+                negative
+            );
+
+            let json_str = serde_json::to_string_pretty(&collection)?;
+
+            match out {
+                Some(ref path) => {
+                    std::fs::write(path, &json_str)?;
+                    eprintln!("Collection written to {}", path.display());
+                }
+                None => println!("{json_str}"),
+            }
+
+            if let Some(ref workspace_id) = postman_workspace {
+                let api_key = std::env::var("POSTMAN_API_KEY")
+                    .map_err(|_| anyhow::anyhow!("POSTMAN_API_KEY is not set"))?;
+                let url =
+                    postman::push_collection(&api_key, Some(workspace_id), &collection).await?;
+                eprintln!("Collection pushed to Postman: {url}");
+            }
+        }
+
         Commands::Register {
             api_url,
             service_id,
