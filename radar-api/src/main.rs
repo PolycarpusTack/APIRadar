@@ -27,6 +27,10 @@ struct Args {
     /// Maximum requests per minute per client IP (0 = unlimited).
     #[arg(long, env = "RATE_LIMIT_PER_MINUTE", default_value_t = 300)]
     rate_limit: u32,
+
+    /// Maximum request body size in megabytes.
+    #[arg(long, env = "MAX_BODY_SIZE_MB", default_value_t = 4)]
+    max_body_size_mb: u32,
 }
 
 #[tokio::main]
@@ -64,5 +68,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    radar_api::run(db_url, static_dir, bind_addr, args.rate_limit).await
+    let max_body_bytes = args.max_body_size_mb as usize * 1024 * 1024;
+    radar_api::run(db_url, static_dir, bind_addr, args.rate_limit, max_body_bytes).await
 }

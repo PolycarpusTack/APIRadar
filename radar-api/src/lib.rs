@@ -1,6 +1,6 @@
 use anyhow::Result;
 use axum::{
-    extract::{Path, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use sqlx::any::AnyPoolOptions;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
+use tower_http::{cors::{AllowOrigin, Any, CorsLayer}, services::ServeDir, trace::TraceLayer};
 use tracing::info;
 use uuid::Uuid;
 
@@ -141,6 +141,48 @@ impl IntoResponse for ApiError {
 }
 
 // ---------------------------------------------------------------------------
+// Prometheus metrics handle (initialized once, shared via OnceLock)
+// ---------------------------------------------------------------------------
+
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use std::sync::OnceLock;
+
+static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
+
+fn get_prometheus_handle() -> &'static PrometheusHandle {
+    PROMETHEUS.get_or_init(|| {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::set_global_recorder(recorder).ok();
+        handle
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Request-ID middleware
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct RequestId(String);
+
+async fn request_id_middleware(mut req: Request, next: Next) -> Response {
+    let id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    req.extensions_mut().insert(RequestId(id.clone()));
+
+    let mut res = next.run(req).await;
+    if let Ok(val) = id.parse::<axum::http::HeaderValue>() {
+        res.headers_mut().insert("x-request-id", val);
+    }
+    res
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -149,6 +191,7 @@ pub async fn run(
     static_dir: Option<&str>,
     bind_addr: &str,
     rate_limit_per_minute: u32,
+    max_body_bytes: usize,
 ) -> Result<()> {
     sqlx::any::install_default_drivers();
 
@@ -162,7 +205,7 @@ pub async fn run(
     info!("migrations applied");
 
     let limiter = Arc::new(RateLimiter::new(rate_limit_per_minute));
-    let app = build_router(pool, static_dir);
+    let app = build_router(pool, static_dir, max_body_bytes);
 
     // D-7: Add rate limiting as the outermost layer so it wraps the entire app.
     let app = app.layer(middleware::from_fn(move |req: Request, next: Next| {
@@ -170,6 +213,7 @@ pub async fn run(
         async move {
             let key = client_key(&req);
             if !lim.check_and_record(&key) {
+                metrics::counter!("radar_rate_limit_rejections_total").increment(1);
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
                     Json(json!({"error": "rate limit exceeded, please retry later"})),
@@ -251,9 +295,10 @@ async fn auth_middleware(
 // Router
 // ---------------------------------------------------------------------------
 
-pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>) -> Router {
+pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_bytes: usize) -> Router {
     let v1 = Router::new()
-        .route("/services", get(list_services))
+        .route("/services", get(list_services).post(create_service))
+        .route("/services/:id", get(get_service))
         .route("/services/:id/diffs", get(list_diffs).post(create_diff))
         .route("/services/:id/consumers", get(list_consumers))
         .route("/services/:id/subscriptions", post(create_subscription))
@@ -266,14 +311,55 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>) -> Router {
         .route("/summary", get(get_summary))
         .route("/generate-tests", post(generate_tests))
         .route("/generate-tests", get(list_test_suites))
+        .route("/generate-tests/:id", get(get_test_suite))
         .layer(middleware::from_fn_with_state(pool.clone(), auth_middleware))
         .with_state(pool.clone());
 
+    let cors = {
+        let origins = std::env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default();
+        if origins.is_empty() {
+            CorsLayer::permissive()
+        } else {
+            let list: Vec<axum::http::HeaderValue> = origins
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            if list.is_empty() {
+                CorsLayer::permissive()
+            } else {
+                CorsLayer::new()
+                    .allow_origin(AllowOrigin::list(list))
+                    .allow_methods(Any)
+                    .allow_headers(Any)
+            }
+        }
+    };
+
+    // Ensure the recorder is installed before any request arrives.
+    get_prometheus_handle();
+
     let mut app = Router::new()
         .route("/health", get(health))
+        .route("/metrics", get(metrics_handler))
         .nest("/v1", v1)
-        .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive());
+        .layer(DefaultBodyLimit::max(max_body_bytes))
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|req: &Request| {
+                let id = req
+                    .extensions()
+                    .get::<RequestId>()
+                    .map(|r| r.0.clone())
+                    .unwrap_or_else(|| Uuid::new_v4().to_string());
+                tracing::info_span!(
+                    "request",
+                    method = %req.method(),
+                    uri = %req.uri(),
+                    request_id = %id,
+                )
+            }),
+        )
+        .layer(middleware::from_fn(request_id_middleware))
+        .layer(cors);
 
     if let Some(dir) = static_dir {
         app = app.nest_service("/app", ServeDir::new(dir));
@@ -305,6 +391,27 @@ struct ChangeInput {
     kind: String,
     severity: String,
     description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PaginationParams {
+    #[serde(default = "default_page_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+}
+
+fn default_page_limit() -> i64 {
+    50
+}
+
+#[derive(Deserialize)]
+struct CreateServiceBody {
+    id: Option<String>,
+    name: String,
+    repo_url: String,
+    owner_team: String,
+    spec_format: String,
 }
 
 #[derive(Deserialize)]
@@ -359,6 +466,15 @@ fn spec_version_id(service_id: &str, git_ref: &str) -> String {
 
 async fn health() -> Json<Value> {
     Json(json!({"status": "ok", "version": "0.1.0"}))
+}
+
+// GET /metrics — Prometheus text exposition
+async fn metrics_handler() -> impl IntoResponse {
+    let body = get_prometheus_handle().render();
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
 }
 
 // GET /v1/services/:id/diffs
@@ -517,6 +633,8 @@ async fn create_diff(
         .await?;
     }
 
+    metrics::counter!("radar_diffs_created_total").increment(1);
+
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -591,6 +709,8 @@ async fn create_consumer(
     .bind(&body.contact)
     .execute(&pool)
     .await?;
+
+    metrics::counter!("radar_consumers_created_total").increment(1);
 
     Ok((
         StatusCode::CREATED,
@@ -1074,11 +1194,15 @@ fn call_site_id(
     .to_string()
 }
 
-// GET /v1/diffs — all diffs across all services (last 100, newest first)
+// GET /v1/diffs — all diffs across all services, paginated (?limit=50&offset=0)
 async fn list_all_diffs(
     State(pool): State<sqlx::AnyPool>,
+    Query(page): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
+
+    let limit = page.limit.clamp(1, 200);
+    let offset = page.offset.max(0);
 
     let rows = sqlx::query(
         r#"
@@ -1098,9 +1222,11 @@ async fn list_all_diffs(
         JOIN spec_version sv_to   ON sv_to.id   = d.to_version
         JOIN service s            ON s.id        = sv_to.service_id
         ORDER BY d.created_at DESC
-        LIMIT 100
+        LIMIT ? OFFSET ?
         "#,
     )
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await?;
 
@@ -1123,6 +1249,75 @@ async fn list_all_diffs(
         .collect();
 
     Ok((StatusCode::OK, Json(json!(items))))
+}
+
+// POST /v1/services — explicitly register a Producer service
+async fn create_service(
+    State(pool): State<sqlx::AnyPool>,
+    Json(body): Json<CreateServiceBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    if body.name.is_empty() {
+        return Err(ApiError::BadRequest("name is required".into()));
+    }
+    let id = body.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    sqlx::query(
+        r#"
+        INSERT INTO service (id, name, repo_url, owner_team, spec_format)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            name        = excluded.name,
+            repo_url    = excluded.repo_url,
+            owner_team  = excluded.owner_team,
+            spec_format = excluded.spec_format
+        "#,
+    )
+    .bind(&id)
+    .bind(&body.name)
+    .bind(&body.repo_url)
+    .bind(&body.owner_team)
+    .bind(&body.spec_format)
+    .execute(&pool)
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id":          id,
+            "name":        body.name,
+            "repo_url":    body.repo_url,
+            "owner_team":  body.owner_team,
+            "spec_format": body.spec_format,
+        })),
+    ))
+}
+
+// GET /v1/services/:id — fetch a single Producer service by ID
+async fn get_service(
+    Path(service_id): Path<String>,
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+
+    let row = sqlx::query(
+        "SELECT id, name, repo_url, owner_team, spec_format FROM service WHERE id = ?",
+    )
+    .bind(&service_id)
+    .fetch_optional(&pool)
+    .await?;
+
+    match row {
+        None => Err(ApiError::NotFound(format!("service {service_id} not found"))),
+        Some(r) => Ok((
+            StatusCode::OK,
+            Json(json!({
+                "id":          r.get::<String, _>("id"),
+                "name":        r.get::<String, _>("name"),
+                "repo_url":    r.get::<String, _>("repo_url"),
+                "owner_team":  r.get::<String, _>("owner_team"),
+                "spec_format": r.get::<String, _>("spec_format"),
+            })),
+        )),
+    }
 }
 
 // GET /v1/services — list all registered Producer services
@@ -1270,8 +1465,6 @@ async fn generate_tests(
     State(pool): State<sqlx::AnyPool>,
     Json(body): Json<GenerateTestsBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    use sqlx::Row;
-
     let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
         ApiError::BadRequest("ANTHROPIC_API_KEY is not set on the server".to_string())
     })?;
@@ -1347,6 +1540,8 @@ async fn generate_tests(
     .execute(&pool)
     .await?;
 
+    metrics::counter!("radar_test_suites_created_total").increment(1);
+
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -1361,19 +1556,25 @@ async fn generate_tests(
     ))
 }
 
-// GET /v1/generate-tests — list previously generated test suites (newest 50)
+// GET /v1/generate-tests — list previously generated test suites, paginated
 async fn list_test_suites(
     State(pool): State<sqlx::AnyPool>,
+    Query(page): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
+
+    let limit = page.limit.clamp(1, 200);
+    let offset = page.offset.max(0);
 
     let rows = sqlx::query(
         r#"SELECT id, service_id, jira_key, jira_summary, collection_name,
                   test_count, happy_count, negative_count, created_at
            FROM generated_test_suite
            ORDER BY created_at DESC
-           LIMIT 50"#,
+           LIMIT ? OFFSET ?"#,
     )
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await?;
 
@@ -1395,6 +1596,50 @@ async fn list_test_suites(
         .collect();
 
     Ok((StatusCode::OK, Json(json!(items))))
+}
+
+// GET /v1/generate-tests/:id — fetch a single test suite with full collection JSON
+async fn get_test_suite(
+    Path(suite_id): Path<String>,
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+
+    let row = sqlx::query(
+        r#"SELECT id, service_id, jira_key, jira_summary, collection_name,
+                  collection_json, test_count, happy_count, negative_count, created_at
+           FROM generated_test_suite
+           WHERE id = ?"#,
+    )
+    .bind(&suite_id)
+    .fetch_optional(&pool)
+    .await?;
+
+    match row {
+        None => Err(ApiError::NotFound(format!("test suite {suite_id} not found"))),
+        Some(r) => {
+            let collection_json: Value = r
+                .try_get::<String, _>("collection_json")
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(Value::Null);
+            Ok((
+                StatusCode::OK,
+                Json(json!({
+                    "id":              r.get::<String, _>("id"),
+                    "service_id":      r.try_get::<Option<String>, _>("service_id").unwrap_or(None),
+                    "jira_key":        r.try_get::<Option<String>, _>("jira_key").unwrap_or(None),
+                    "jira_summary":    r.try_get::<Option<String>, _>("jira_summary").unwrap_or(None),
+                    "collection_name": r.get::<String, _>("collection_name"),
+                    "collection_json": collection_json,
+                    "test_count":      r.try_get::<i64, _>("test_count").unwrap_or(0),
+                    "happy_count":     r.try_get::<i64, _>("happy_count").unwrap_or(0),
+                    "negative_count":  r.try_get::<i64, _>("negative_count").unwrap_or(0),
+                    "created_at":      r.get::<String, _>("created_at"),
+                })),
+            ))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1685,7 +1930,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None);
+        let app = build_router(pool, None, 4 * 1024 * 1024);
 
         let body = serde_json::json!([
             {
@@ -1718,7 +1963,7 @@ mod tests {
     #[tokio::test]
     async fn test_ingest_too_large_batch_rejected() {
         let pool = test_pool().await;
-        let app = build_router(pool, None);
+        let app = build_router(pool, None, 4 * 1024 * 1024);
 
         // Build a batch of 501 events.
         let events: Vec<serde_json::Value> = (0..501)
@@ -1842,7 +2087,7 @@ mod tests {
     #[tokio::test]
     async fn test_blast_radius_404_for_unknown_diff() {
         let pool = test_pool().await;
-        let app = build_router(pool, None);
+        let app = build_router(pool, None, 4 * 1024 * 1024);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -1932,7 +2177,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None);
+        let app = build_router(pool, None, 4 * 1024 * 1024);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2067,7 +2312,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None);
+        let app = build_router(pool, None, 4 * 1024 * 1024);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2171,7 +2416,7 @@ mod tests {
         .bind("GET /invoices").bind("src/api.rs").bind(42i64).bind(&now)
         .execute(&pool).await.unwrap();
 
-        let app = build_router(pool, None);
+        let app = build_router(pool, None, 4 * 1024 * 1024);
         let req = HttpRequest::builder()
             .method("GET")
             .uri(format!("/v1/diffs/{diff_id}/blast-radius"))
@@ -2192,7 +2437,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_consumer_returns_201() {
         let pool = test_pool().await;
-        let app = build_router(pool, None);
+        let app = build_router(pool, None, 4 * 1024 * 1024);
 
         let body = serde_json::json!({
             "name": "billing-svc",
@@ -2220,7 +2465,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_consumer_validates_name() {
         let pool = test_pool().await;
-        let app = build_router(pool, None);
+        let app = build_router(pool, None, 4 * 1024 * 1024);
 
         let body = serde_json::json!({
             "name": "",
@@ -2258,7 +2503,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None);
+        let app = build_router(pool, None, 4 * 1024 * 1024);
 
         // 1. Create consumer.
         let consumer_body = serde_json::json!({
@@ -2339,7 +2584,7 @@ mod tests {
             .bind(Uuid::new_v4().to_string()).bind(&diff_id).bind("GET /items → response.name").bind("field_added").bind("safe").bind::<Option<String>>(None)
             .execute(&pool).await.unwrap();
 
-        let app = build_router(pool, None);
+        let app = build_router(pool, None, 4 * 1024 * 1024);
 
         let req = HttpRequest::builder()
             .method("GET").uri("/v1/diffs").body(Body::empty()).unwrap();
@@ -2387,7 +2632,7 @@ mod tests {
                 .execute(&pool).await.unwrap();
         }
 
-        let app = build_router(pool, None);
+        let app = build_router(pool, None, 4 * 1024 * 1024);
 
         let req = HttpRequest::builder()
             .method("GET").uri("/v1/summary").body(Body::empty()).unwrap();
@@ -2400,5 +2645,103 @@ mod tests {
         assert_eq!(json["breaking_changes_30d"], 2);
         assert_eq!(json["services_count"], 1);
         assert_eq!(json["consumers_at_risk"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_create_service_returns_201() {
+        let pool = test_pool().await;
+        let app = build_router(pool, None, 4 * 1024 * 1024);
+
+        let body = serde_json::json!({
+            "name": "payments-api",
+            "repo_url": "https://github.com/acme/payments",
+            "owner_team": "payments",
+            "spec_format": "openapi"
+        });
+
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/v1/services")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["name"], "payments-api");
+        assert!(json["id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_create_service_with_explicit_id_then_get() {
+        let pool = test_pool().await;
+        let app = build_router(pool, None, 4 * 1024 * 1024);
+
+        let id = Uuid::new_v4().to_string();
+        let body = serde_json::json!({
+            "id": id,
+            "name": "orders-api",
+            "repo_url": "https://github.com/acme/orders",
+            "owner_team": "commerce",
+            "spec_format": "openapi"
+        });
+
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/v1/services")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Fetch by ID.
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("/v1/services/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["id"], id);
+        assert_eq!(json["name"], "orders-api");
+    }
+
+    #[tokio::test]
+    async fn test_get_service_404_for_unknown() {
+        let pool = test_pool().await;
+        let app = build_router(pool, None, 4 * 1024 * 1024);
+
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri("/v1/services/does-not-exist")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_list_diffs_pagination_params_accepted() {
+        let pool = test_pool().await;
+        let app = build_router(pool, None, 4 * 1024 * 1024);
+
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri("/v1/diffs?limit=10&offset=0")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json.is_array());
     }
 }
