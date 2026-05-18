@@ -11,9 +11,81 @@ use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::any::AnyPoolOptions;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing::info;
 use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// D-7: Per-IP sliding-window rate limiter
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct RateLimiter {
+    // key (client IP or "unknown") → (request count, window start)
+    state: Arc<Mutex<HashMap<String, (u32, std::time::Instant)>>>,
+    max_per_minute: u32,
+}
+
+impl RateLimiter {
+    fn new(max_per_minute: u32) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+            max_per_minute,
+        }
+    }
+
+    /// Returns `true` if the request is allowed; `false` if the limit is exceeded.
+    fn check_and_record(&self, key: &str) -> bool {
+        if self.max_per_minute == 0 {
+            return true; // unlimited
+        }
+        let mut state = self.state.lock().unwrap();
+        let now = std::time::Instant::now();
+        let entry = state.entry(key.to_string()).or_insert((0, now));
+        if now.duration_since(entry.1) >= std::time::Duration::from_secs(60) {
+            *entry = (1, now);
+            true
+        } else if entry.0 < self.max_per_minute {
+            entry.0 += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn client_key(req: &Request) -> String {
+    req.headers()
+        .get("x-forwarded-for")
+        .or_else(|| req.headers().get("x-real-ip"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// D-4: JWT claims (HS256) for org-scoped tokens
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct JwtClaims {
+    pub sub: String,
+    pub org_id: String,
+    pub exp: usize,
+}
+
+/// Validate an HS256 JWT using DRIFT_JWT_SECRET. Returns claims on success.
+fn validate_jwt(token: &str, secret: &str) -> Option<JwtClaims> {
+    use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+    let key = DecodingKey::from_secret(secret.as_bytes());
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = true;
+    decode::<JwtClaims>(token, &key, &validation)
+        .ok()
+        .map(|d| d.claims)
+}
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -72,7 +144,12 @@ impl IntoResponse for ApiError {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub async fn run(db_url: &str, static_dir: Option<&str>, bind_addr: &str) -> Result<()> {
+pub async fn run(
+    db_url: &str,
+    static_dir: Option<&str>,
+    bind_addr: &str,
+    rate_limit_per_minute: u32,
+) -> Result<()> {
     sqlx::any::install_default_drivers();
 
     let pool = AnyPoolOptions::new()
@@ -84,10 +161,31 @@ pub async fn run(db_url: &str, static_dir: Option<&str>, bind_addr: &str) -> Res
 
     info!("migrations applied");
 
+    let limiter = Arc::new(RateLimiter::new(rate_limit_per_minute));
     let app = build_router(pool, static_dir);
 
+    // D-7: Add rate limiting as the outermost layer so it wraps the entire app.
+    let app = app.layer(middleware::from_fn(move |req: Request, next: Next| {
+        let lim = limiter.clone();
+        async move {
+            let key = client_key(&req);
+            if !lim.check_and_record(&key) {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({"error": "rate limit exceeded, please retry later"})),
+                )
+                    .into_response();
+            }
+            next.run(req).await
+        }
+    }));
+
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-    info!("listening on {}", listener.local_addr()?);
+    info!(
+        bind = %listener.local_addr()?,
+        rate_limit = rate_limit_per_minute,
+        "drift-api listening"
+    );
 
     axum::serve(listener, app).await?;
 
@@ -100,7 +198,7 @@ pub async fn run(db_url: &str, static_dir: Option<&str>, bind_addr: &str) -> Res
 
 async fn auth_middleware(
     State(pool): State<sqlx::AnyPool>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
     // Only protect /v1/* routes — /health is always accessible.
@@ -109,21 +207,40 @@ async fn auth_middleware(
         return next.run(req).await;
     }
 
-    let token = std::env::var("DRIFT_SERVICE_TOKEN").unwrap_or_default();
-    if token.is_empty() {
-        // No token configured → auth disabled.
-        return next.run(req).await;
-    }
-
     let auth_header = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
 
-    let expected = format!("Bearer {token}");
+    // D-4: JWT validation — when DRIFT_JWT_SECRET is set, Bearer tokens must be valid JWTs.
+    let jwt_secret = std::env::var("DRIFT_JWT_SECRET").unwrap_or_default();
+    if !jwt_secret.is_empty() {
+        let bearer = auth_header.strip_prefix("Bearer ").unwrap_or("");
+        match validate_jwt(bearer, &jwt_secret) {
+            Some(claims) => {
+                // Inject org_id into request extensions for downstream handlers.
+                req.extensions_mut().insert(claims);
+            }
+            None => {
+                drop(pool);
+                return ApiError::Unauthorized.into_response();
+            }
+        }
+        return next.run(req).await;
+    }
+
+    // Legacy static token auth (backwards-compatible when DRIFT_JWT_SECRET is not set).
+    let service_token = std::env::var("DRIFT_SERVICE_TOKEN").unwrap_or_default();
+    if service_token.is_empty() {
+        // No auth configured → open access.
+        return next.run(req).await;
+    }
+
+    let expected = format!("Bearer {service_token}");
     if auth_header != expected {
-        drop(pool); // keep borrow happy
+        drop(pool);
         return ApiError::Unauthorized.into_response();
     }
 

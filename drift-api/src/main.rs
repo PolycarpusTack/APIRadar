@@ -23,6 +23,10 @@ struct Args {
     /// Socket address to listen on. Use 127.0.0.1:8080 in desktop sidecar mode.
     #[arg(long, env = "BIND_ADDR", default_value = "0.0.0.0:8080")]
     bind: String,
+
+    /// Maximum requests per minute per client IP (0 = unlimited).
+    #[arg(long, env = "RATE_LIMIT_PER_MINUTE", default_value_t = 300)]
+    rate_limit: u32,
 }
 
 #[tokio::main]
@@ -60,5 +64,5 @@ async fn main() -> Result<()> {
         }
     });
 
-    drift_api::run(db_url, static_dir, bind_addr).await
+    drift_api::run(db_url, static_dir, bind_addr, args.rate_limit).await
 }

@@ -295,6 +295,135 @@ pub async fn post_or_update_comment(ctx: &GithubContext, body: &str) -> Result<S
 }
 
 // ---------------------------------------------------------------------------
+// D-2: Label check
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct LabelItem {
+    name: String,
+}
+
+/// Return true if the PR has a label with the given exact name.
+/// Silently returns false on any network/parse error.
+pub async fn pr_has_label(ctx: &GithubContext, label: &str) -> bool {
+    let mut default_headers = HeaderMap::new();
+    default_headers.insert(USER_AGENT, HeaderValue::from_static("drift-monitor/0.1"));
+
+    let client = match reqwest::Client::builder()
+        .default_headers(default_headers)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let auth_value = format!("Bearer {}", ctx.token);
+    let auth_header = match HeaderValue::from_str(&auth_value) {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/issues/{}/labels",
+        ctx.owner, ctx.repo, ctx.pr_number
+    );
+
+    let resp = match client
+        .get(&url)
+        .header(AUTHORIZATION, auth_header)
+        .header(ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+
+    if !resp.status().is_success() {
+        return false;
+    }
+
+    let labels: Vec<LabelItem> = match resp.json().await {
+        Ok(l) => l,
+        Err(_) => return false,
+    };
+
+    labels.iter().any(|l| l.name == label)
+}
+
+// ---------------------------------------------------------------------------
+// D-3: GitHub Release posting
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct CreateReleaseBody<'a> {
+    tag_name: &'a str,
+    name: &'a str,
+    body: &'a str,
+    draft: bool,
+    prerelease: bool,
+}
+
+#[derive(Deserialize)]
+struct ReleaseResponse {
+    html_url: String,
+}
+
+/// Create a GitHub Release tagged `tag_name` with the given body.
+/// Returns the release URL on success.
+pub async fn post_release(
+    ctx: &GithubContext,
+    tag_name: &str,
+    title: &str,
+    body: &str,
+) -> Result<String> {
+    let mut default_headers = HeaderMap::new();
+    default_headers.insert(USER_AGENT, HeaderValue::from_static("drift-monitor/0.1"));
+
+    let client = reqwest::Client::builder()
+        .default_headers(default_headers)
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let auth_value = format!("Bearer {}", ctx.token);
+    let auth_header =
+        HeaderValue::from_str(&auth_value).context("invalid GITHUB_TOKEN value")?;
+
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/releases",
+        ctx.owner, ctx.repo
+    );
+
+    let resp = client
+        .post(&url)
+        .header(AUTHORIZATION, auth_header)
+        .header(ACCEPT, "application/vnd.github+json")
+        .json(&CreateReleaseBody {
+            tag_name,
+            name: title,
+            body,
+            draft: false,
+            prerelease: false,
+        })
+        .send()
+        .await
+        .context("failed to create GitHub Release")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_else(|_| "<unreadable>".into());
+        bail!("GitHub API error creating release: {} — {}", status, text);
+    }
+
+    let release: ReleaseResponse = resp
+        .json()
+        .await
+        .context("failed to parse release response")?;
+
+    Ok(release.html_url)
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 

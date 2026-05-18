@@ -65,6 +65,8 @@ pub async fn run(
     api_url: &str,
     diff_id: &str,
     release_notes: bool,
+    migration_guide: bool,
+    post_github_release: bool,
     out: Option<&Path>,
     token: Option<&str>,
 ) -> Result<()> {
@@ -102,12 +104,55 @@ pub async fn run(
         .await
         .unwrap_or(BlastRadius { entries: vec![] });
 
-    if release_notes {
-        // 3. Optionally call Claude for a narrative.
+    if release_notes || migration_guide {
+        // 3. Call Claude for a global narrative.
         let changes_summary = changes_to_summary(&diff.changes);
         let narrative = claude::generate_narrative(&changes_summary).await;
 
-        let notes = build_release_notes(&diff, &blast, narrative.as_deref());
+        // D-1: per-consumer narratives when --migration-guide is set.
+        let per_consumer: Vec<Option<String>> = if migration_guide {
+            let breaking_summary = breaking_changes_summary(&diff.changes);
+            let mut narratives = Vec::new();
+            for entry in &blast.entries {
+                let n = claude::generate_consumer_narrative(
+                    &entry.consumer.name,
+                    &entry.consumer.owner_team,
+                    &breaking_summary,
+                )
+                .await;
+                narratives.push(n);
+            }
+            narratives
+        } else {
+            blast.entries.iter().map(|_| None).collect()
+        };
+
+        let notes =
+            build_release_notes(&diff, &blast, narrative.as_deref(), &per_consumer);
+
+        // D-3: post as GitHub Release when flag is set.
+        if post_github_release {
+            match crate::github::GithubContext::from_env() {
+                Some(ctx) => {
+                    let tag = format!("drift-{}", &diff.id[..8]);
+                    let title = format!(
+                        "API diff {to} — {n} breaking change(s)",
+                        to = diff.to_git_ref,
+                        n = diff.changes.iter().filter(|c| c.severity == "breaking").count()
+                    );
+                    match crate::github::post_release(&ctx, &tag, &title, &notes).await {
+                        Ok(url) => println!("GitHub Release created: {url}"),
+                        Err(e) => eprintln!("Warning: failed to post GitHub Release: {e}"),
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "Warning: --post-github-release set but GITHUB_TOKEN or repo context \
+                         not found. Skipping."
+                    );
+                }
+            }
+        }
 
         match out {
             Some(path) => {
@@ -143,7 +188,21 @@ fn changes_to_summary(changes: &[ChangeRow]) -> String {
         .join("\n")
 }
 
-fn build_release_notes(diff: &DiffDetail, blast: &BlastRadius, narrative: Option<&str>) -> String {
+fn breaking_changes_summary(changes: &[ChangeRow]) -> String {
+    changes
+        .iter()
+        .filter(|c| c.severity == "breaking")
+        .map(|c| format!("- [{}] {} ({})", c.severity, c.path, c.kind))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn build_release_notes(
+    diff: &DiffDetail,
+    blast: &BlastRadius,
+    narrative: Option<&str>,
+    per_consumer: &[Option<String>],
+) -> String {
     let today = chrono::Utc::now().format("%Y-%m-%d");
 
     let mut md = String::new();
@@ -231,22 +290,38 @@ fn build_release_notes(diff: &DiffDetail, blast: &BlastRadius, narrative: Option
     if blast.entries.is_empty() {
         md.push_str("_No consumers registered._\n\n");
     } else {
-        for entry in &blast.entries {
+        for (entry, narrative) in blast.entries.iter().zip(
+            per_consumer
+                .iter()
+                .chain(std::iter::repeat(&None)),
+        ) {
             md.push_str(&format!(
                 "### {name}\n\
                  - **Team**: {team}\n\
                  - **Contact**: {contact}\n\
                  - **Confidence**: {confidence}\n\
-                 - **Last seen**: {last_seen}\n\n\
-                 - [ ] Review breaking changes above\n\
-                 - [ ] Update integration\n\
-                 - [ ] Test against new API version\n\n",
+                 - **Last seen**: {last_seen}\n\n",
                 name = entry.consumer.name,
                 team = entry.consumer.owner_team,
                 contact = entry.consumer.contact,
                 confidence = entry.confidence,
                 last_seen = entry.last_seen,
             ));
+
+            match narrative {
+                Some(text) => md.push_str(&format!("> {text}\n\n")),
+                None => {
+                    md.push_str(
+                        "> [per-consumer guide unavailable — set ANTHROPIC_API_KEY and pass --migration-guide]\n\n",
+                    );
+                }
+            }
+
+            md.push_str(
+                "- [ ] Review breaking changes above\n\
+                 - [ ] Update integration\n\
+                 - [ ] Test against new API version\n\n",
+            );
         }
     }
 
@@ -285,7 +360,7 @@ mod tests {
     #[test]
     fn release_notes_contain_header() {
         let blast = BlastRadius { entries: vec![] };
-        let notes = build_release_notes(&sample_diff(), &blast, None);
+        let notes = build_release_notes(&sample_diff(), &blast, None, &[]);
         assert!(notes.contains("Release Notes"));
         assert!(notes.contains("abc123"));
     }
@@ -293,7 +368,7 @@ mod tests {
     #[test]
     fn release_notes_contain_breaking_section() {
         let blast = BlastRadius { entries: vec![] };
-        let notes = build_release_notes(&sample_diff(), &blast, None);
+        let notes = build_release_notes(&sample_diff(), &blast, None, &[]);
         assert!(notes.contains("Breaking Changes"));
         assert!(notes.contains("GET /users"));
     }
@@ -301,14 +376,38 @@ mod tests {
     #[test]
     fn release_notes_placeholder_when_no_api_key() {
         let blast = BlastRadius { entries: vec![] };
-        let notes = build_release_notes(&sample_diff(), &blast, None);
+        let notes = build_release_notes(&sample_diff(), &blast, None, &[]);
         assert!(notes.contains("ANTHROPIC_API_KEY"));
     }
 
     #[test]
     fn release_notes_embed_narrative_when_provided() {
         let blast = BlastRadius { entries: vec![] };
-        let notes = build_release_notes(&sample_diff(), &blast, Some("Custom narrative here."));
+        let notes =
+            build_release_notes(&sample_diff(), &blast, Some("Custom narrative here."), &[]);
         assert!(notes.contains("Custom narrative here."));
+    }
+
+    #[test]
+    fn release_notes_per_consumer_narrative() {
+        let blast = BlastRadius {
+            entries: vec![BlastEntry {
+                consumer: ConsumerInfo {
+                    name: "payment-svc".into(),
+                    owner_team: "Payments".into(),
+                    contact: "pay@example.com".into(),
+                },
+                confidence: "high".into(),
+                last_seen: "2026-05-18T00:00:00Z".into(),
+            }],
+        };
+        let notes = build_release_notes(
+            &sample_diff(),
+            &blast,
+            None,
+            &[Some("Please update your GET /users calls.".into())],
+        );
+        assert!(notes.contains("payment-svc"));
+        assert!(notes.contains("Please update your GET /users calls."));
     }
 }

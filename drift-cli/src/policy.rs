@@ -60,14 +60,23 @@ pub fn load_config(path: Option<&std::path::Path>) -> anyhow::Result<DriftConfig
 }
 
 /// Determine the process exit code given the changes and policy.
-/// Returns 0 (clean), 1 (blocking), or keeps 0 when policy says never/active_consumers with no registered consumers.
+///
+/// `has_label_override` should be `true` when `policy.allow_override_with` is configured and
+/// the matching label was found on the PR — this forces exit code 0 regardless of breaks.
 pub fn exit_code(
     changes: &[drift_core::diff::DiffChange],
     policy: &PolicyConfig,
     has_active_consumers: bool,
+    has_label_override: bool,
 ) -> i32 {
     use drift_core::models::Severity;
     let has_breaking = changes.iter().any(|c| c.severity == Severity::Breaking);
+
+    // D-2: configured label on the PR overrides any blocking policy.
+    if has_label_override && policy.allow_override_with.is_some() {
+        return 0;
+    }
+
     match &policy.block_on {
         BlockOn::Never => 0,
         BlockOn::AnyBreak => {
@@ -111,7 +120,7 @@ mod tests {
             lookback_days: 30,
             allow_override_with: None,
         };
-        assert_eq!(exit_code(&[breaking()], &p, true), 0);
+        assert_eq!(exit_code(&[breaking()], &p, true, false), 0);
     }
 
     #[test]
@@ -120,7 +129,7 @@ mod tests {
             block_on: BlockOn::AnyBreak,
             ..Default::default()
         };
-        assert_eq!(exit_code(&[breaking()], &p, false), 1);
+        assert_eq!(exit_code(&[breaking()], &p, false, false), 1);
     }
 
     #[test]
@@ -129,7 +138,31 @@ mod tests {
             block_on: BlockOn::ActiveConsumers,
             ..Default::default()
         };
-        assert_eq!(exit_code(&[breaking()], &p, false), 0); // no consumers yet
-        assert_eq!(exit_code(&[breaking()], &p, true), 1);
+        assert_eq!(exit_code(&[breaking()], &p, false, false), 0);
+        assert_eq!(exit_code(&[breaking()], &p, true, false), 1);
+    }
+
+    #[test]
+    fn label_override_bypasses_any_block_policy() {
+        let p = PolicyConfig {
+            block_on: BlockOn::AnyBreak,
+            allow_override_with: Some("label:drift-ack".to_string()),
+            ..Default::default()
+        };
+        // Without override label → blocks
+        assert_eq!(exit_code(&[breaking()], &p, false, false), 1);
+        // With override label → passes
+        assert_eq!(exit_code(&[breaking()], &p, false, true), 0);
+    }
+
+    #[test]
+    fn label_override_ignored_when_not_configured() {
+        let p = PolicyConfig {
+            block_on: BlockOn::AnyBreak,
+            allow_override_with: None,
+            ..Default::default()
+        };
+        // has_label_override=true but no override configured → still blocks
+        assert_eq!(exit_code(&[breaking()], &p, false, true), 1);
     }
 }

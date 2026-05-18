@@ -1,0 +1,561 @@
+openapi: "3.0.3"
+info:
+  title: Drift Monitor API
+  version: "0.1.0"
+  description: |
+    API Contract Drift Monitor — blast-radius-aware schema diff service.
+
+    Authentication: set `DRIFT_SERVICE_TOKEN` on the server and pass
+    `Authorization: Bearer <token>` on every `/v1/*` request.
+    When `DRIFT_JWT_SECRET` is set, HS256 JWTs are required instead; the
+    JWT must contain `sub` and `org_id` claims.
+  contact:
+    name: Drift Monitor
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: health
+  - name: services
+  - name: consumers
+  - name: diffs
+  - name: blast-radius
+  - name: usage
+  - name: scan
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      operationId: health
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /v1/services:
+    get:
+      tags: [services]
+      summary: List all producer services
+      operationId: listServices
+      responses:
+        "200":
+          description: Array of services
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Service"
+
+  /v1/services/{serviceId}/diffs:
+    parameters:
+      - $ref: "#/components/parameters/serviceId"
+    get:
+      tags: [diffs]
+      summary: List diffs for a service
+      operationId: listDiffs
+      responses:
+        "200":
+          description: Array of diffs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DiffSummary"
+    post:
+      tags: [diffs]
+      summary: Create a new diff (post spec changes)
+      operationId: createDiff
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDiffRequest"
+      responses:
+        "201":
+          description: Diff created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Diff"
+
+  /v1/services/{serviceId}/consumers:
+    parameters:
+      - $ref: "#/components/parameters/serviceId"
+    get:
+      tags: [consumers]
+      summary: List consumers subscribed to a service
+      operationId: listServiceConsumers
+      responses:
+        "200":
+          description: Array of consumers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Consumer"
+
+  /v1/services/{serviceId}/subscriptions:
+    parameters:
+      - $ref: "#/components/parameters/serviceId"
+    post:
+      tags: [consumers]
+      summary: Subscribe a consumer to a service
+      operationId: createSubscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [consumer_id]
+              properties:
+                consumer_id:
+                  type: string
+                  format: uuid
+      responses:
+        "201":
+          description: Subscription created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+
+  /v1/consumers:
+    get:
+      tags: [consumers]
+      summary: List all consumers
+      operationId: listAllConsumers
+      responses:
+        "200":
+          description: Array of consumers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Consumer"
+    post:
+      tags: [consumers]
+      summary: Register a new consumer
+      operationId: createConsumer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateConsumerRequest"
+      responses:
+        "201":
+          description: Consumer created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Consumer"
+
+  /v1/diffs:
+    get:
+      tags: [diffs]
+      summary: List all diffs across all services (newest 100)
+      operationId: listAllDiffs
+      responses:
+        "200":
+          description: Array of diffs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DiffSummary"
+
+  /v1/diffs/{diffId}:
+    parameters:
+      - $ref: "#/components/parameters/diffId"
+    get:
+      tags: [diffs]
+      summary: Get a diff with its changes
+      operationId: getDiff
+      responses:
+        "200":
+          description: Diff detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiffDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/diffs/{diffId}/blast-radius:
+    parameters:
+      - $ref: "#/components/parameters/diffId"
+    get:
+      tags: [blast-radius]
+      summary: Get the blast radius (affected consumers) for a diff
+      operationId: getBlastRadius
+      responses:
+        "200":
+          description: Blast radius report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlastRadius"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/usage/events:
+    post:
+      tags: [usage]
+      summary: Ingest runtime usage events from consumers
+      operationId: ingestUsageEvents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              maxItems: 500
+              items:
+                $ref: "#/components/schemas/UsageEvent"
+      responses:
+        "202":
+          description: Events accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: integer
+
+  /v1/call-sites:
+    post:
+      tags: [scan]
+      summary: Upsert static call-site records from the drift-scanner
+      operationId: upsertCallSites
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              maxItems: 5000
+              items:
+                $ref: "#/components/schemas/CallSite"
+      responses:
+        "202":
+          description: Call sites accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: integer
+
+  /v1/summary:
+    get:
+      tags: [services]
+      summary: Get dashboard KPI summary
+      operationId: getSummary
+      responses:
+        "200":
+          description: Summary stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Summary"
+
+components:
+  parameters:
+    serviceId:
+      name: serviceId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    diffId:
+      name: diffId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+
+  schemas:
+    Service:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        repo_url:
+          type: string
+        owner_team:
+          type: string
+        spec_format:
+          type: string
+          enum: [openapi, graphql, protobuf]
+        org_id:
+          type: string
+
+    Consumer:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        repo_url:
+          type: string
+        owner_team:
+          type: string
+        contact:
+          type: string
+        org_id:
+          type: string
+
+    CreateConsumerRequest:
+      type: object
+      required: [name, repo_url, owner_team, contact]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        repo_url:
+          type: string
+        owner_team:
+          type: string
+        contact:
+          type: string
+
+    CreateDiffRequest:
+      type: object
+      required: [service_name, repo_url, owner_team, from_git_ref, to_git_ref, spec_format]
+      properties:
+        service_name:
+          type: string
+        repo_url:
+          type: string
+        owner_team:
+          type: string
+        from_git_ref:
+          type: string
+        to_git_ref:
+          type: string
+        pr_url:
+          type: string
+          nullable: true
+        spec_format:
+          type: string
+          enum: [openapi, graphql, protobuf]
+        changes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChangeInput"
+
+    ChangeInput:
+      type: object
+      required: [path, kind, severity]
+      properties:
+        path:
+          type: string
+        kind:
+          type: string
+          enum: [field_removed, field_added, type_changed, required_changed, operation_removed, operation_added]
+        severity:
+          type: string
+          enum: [breaking, non_breaking_risky, safe]
+        description:
+          type: string
+          nullable: true
+
+    DiffSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+        service_name:
+          type: string
+        from_git_ref:
+          type: string
+        to_git_ref:
+          type: string
+        pr_url:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        breaking_count:
+          type: integer
+        risky_count:
+          type: integer
+        safe_count:
+          type: integer
+
+    Diff:
+      allOf:
+        - $ref: "#/components/schemas/DiffSummary"
+        - type: object
+          properties:
+            changes:
+              type: array
+              items:
+                $ref: "#/components/schemas/Change"
+
+    DiffDetail:
+      type: object
+      properties:
+        id:
+          type: string
+        from_git_ref:
+          type: string
+        to_git_ref:
+          type: string
+        pr_url:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+        changes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Change"
+
+    Change:
+      type: object
+      properties:
+        path:
+          type: string
+        kind:
+          type: string
+        severity:
+          type: string
+        description:
+          type: string
+          nullable: true
+
+    BlastRadius:
+      type: object
+      properties:
+        diff_id:
+          type: string
+        service_id:
+          type: string
+        lookback_days:
+          type: integer
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/BlastEntry"
+
+    BlastEntry:
+      type: object
+      properties:
+        consumer:
+          $ref: "#/components/schemas/Consumer"
+        confidence:
+          type: string
+          enum: [high, medium, low]
+        last_seen:
+          type: string
+          format: date-time
+        has_runtime_usage:
+          type: boolean
+        has_call_site:
+          type: boolean
+
+    UsageEvent:
+      type: object
+      required: [consumer_id, service_id, operation]
+      properties:
+        consumer_id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        operation:
+          type: string
+          example: "GET /users"
+        field_path:
+          type: string
+          default: ""
+
+    CallSite:
+      type: object
+      required: [consumer_id, service_id, file_path, line_number, field_path]
+      properties:
+        consumer_id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        operation:
+          type: string
+          default: ""
+        file_path:
+          type: string
+        line_number:
+          type: integer
+        field_path:
+          type: string
+
+    Summary:
+      type: object
+      properties:
+        services_count:
+          type: integer
+        consumers_count:
+          type: integer
+        breaking_changes_30d:
+          type: integer
+        consumers_at_risk:
+          type: integer
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+security:
+  - bearerAuth: []

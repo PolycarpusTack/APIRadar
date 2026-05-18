@@ -29,6 +29,56 @@ struct ContentBlock {
     text: Option<String>,
 }
 
+/// D-1: Generate a targeted, per-consumer migration guide.
+/// Returns None if ANTHROPIC_API_KEY is not set (graceful degradation).
+pub async fn generate_consumer_narrative(
+    consumer_name: &str,
+    owner_team: &str,
+    breaking_changes: &str,
+) -> Option<String> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY").ok()?;
+
+    let prompt = format!(
+        "You are a technical writer for an API platform team. \
+         Write a targeted, actionable migration guide (3-5 sentences) for the team '{owner_team}' \
+         that maintains the service '{consumer_name}'. They consume an API that has the following \
+         breaking changes and must update their integration.\n\n\
+         Breaking changes:\n{breaking_changes}\n\n\
+         Be specific: describe exactly what they need to change in their code, what new fields or \
+         endpoints to use, and any backwards-compatibility workarounds available."
+    );
+
+    let client = Client::new();
+    let body = ClaudeRequest {
+        model: MODEL,
+        max_tokens: 512,
+        messages: vec![ClaudeMessage {
+            role: "user",
+            content: &prompt,
+        }],
+    };
+
+    let resp = client
+        .post(CLAUDE_API_URL)
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let data: ClaudeResponse = resp.json().await.ok()?;
+    data.content
+        .into_iter()
+        .find(|b| b.block_type == "text")
+        .and_then(|b| b.text)
+}
+
 /// Generate a plain-language explanation of a set of breaking API changes.
 /// Returns None if ANTHROPIC_API_KEY is not set (graceful degradation).
 pub async fn generate_narrative(changes_summary: &str) -> Option<String> {

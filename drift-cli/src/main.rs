@@ -137,9 +137,17 @@ enum Commands {
         #[arg(long)]
         diff_id: String,
 
-        /// Generate human-readable release notes.
+        /// Generate human-readable release notes (Markdown).
         #[arg(long, default_value_t = false)]
         release_notes: bool,
+
+        /// Generate per-consumer migration guides using Claude (requires ANTHROPIC_API_KEY).
+        #[arg(long, default_value_t = false)]
+        migration_guide: bool,
+
+        /// Post the release notes as a GitHub Release (requires GITHUB_TOKEN).
+        #[arg(long, default_value_t = false)]
+        post_github_release: bool,
 
         /// Write output to this file instead of stdout.
         #[arg(long)]
@@ -264,6 +272,7 @@ async fn main() -> Result<()> {
             }
 
             // Post diff and fetch blast radius when api_url and service_id are both set.
+            let mut has_active_consumers = false;
             if let (Some(ref url), Some(ref svc_id)) = (&api_url, &service_id) {
                 let token_ref = token.as_deref();
                 match api_client::post_diff(
@@ -287,6 +296,7 @@ async fn main() -> Result<()> {
                         }
                         match api_client::get_blast_radius(url, &diff_id, token_ref).await {
                             Ok(br) => {
+                                has_active_consumers = !br.entries.is_empty();
                                 if !json {
                                     render::print_blast_radius(&br, use_color);
                                 }
@@ -302,8 +312,22 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // P0: no consumer registry yet → has_active_consumers = false
-            let code = policy::exit_code(&changes, &pol, false);
+            // D-2: check if the PR carries the configured label override.
+            let has_label_override =
+                if let Some(ref override_cfg) = pol.allow_override_with {
+                    if let Some(label) = override_cfg.strip_prefix("label:") {
+                        match github::GithubContext::from_env() {
+                            Some(ctx) => github::pr_has_label(&ctx, label).await,
+                            None => false,
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+            let code = policy::exit_code(&changes, &pol, has_active_consumers, has_label_override);
             if code != 0 {
                 std::process::exit(code);
             }
@@ -368,6 +392,8 @@ async fn main() -> Result<()> {
         Commands::Explain {
             diff_id,
             release_notes,
+            migration_guide,
+            post_github_release,
             out,
             api_url,
         } => {
@@ -375,6 +401,8 @@ async fn main() -> Result<()> {
                 &api_url,
                 &diff_id,
                 release_notes,
+                migration_guide,
+                post_github_release,
                 out.as_deref(),
                 std::env::var("DRIFT_SERVICE_TOKEN").ok().as_deref(),
             )
