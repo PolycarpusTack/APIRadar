@@ -1,9 +1,10 @@
+/// <reference types="vite/client" />
 import { useState, useEffect } from 'react'
 import { FlaskConical, Download, ChevronDown, ChevronUp, Clock } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
 
-const API = (import.meta.env.VITE_API_URL ?? 'http://localhost:8080') + '/v1'
+const API = ((import.meta as { env?: { VITE_API_URL?: string } }).env?.VITE_API_URL ?? '') + '/v1'
 
 interface Suite {
   id: string
@@ -112,9 +113,9 @@ export default function GenerateTestsPage() {
   return (
     <div className="p-8 max-w-5xl mx-auto space-y-8">
       <PageHeader
-        icon={FlaskConical}
-        title="Generate Postman Tests"
-        subtitle="Generate happy-path and negative test cases from a Jira ticket and OpenAPI spec"
+        tag="Testing"
+        title="Generate Tests"
+        description="Generate happy-path and negative test cases from a Jira ticket and OpenAPI spec"
       />
 
       {/* ------------------------------------------------------------------ */}
@@ -241,8 +242,8 @@ export default function GenerateTestsPage() {
                 {result.collection_name}
               </p>
               <div className="flex gap-2 mt-1.5">
-                <Badge variant="success">{result.happy_count} happy-path</Badge>
-                <Badge variant="danger">{result.negative_count} negative</Badge>
+                <Badge variant="ok">{result.happy_count} happy-path</Badge>
+                <Badge variant="err">{result.negative_count} negative</Badge>
                 <Badge>{result.test_count} total</Badge>
               </div>
             </div>
@@ -291,8 +292,8 @@ export default function GenerateTestsPage() {
                     <td className="px-4 py-3" style={{ color: 'var(--text-2)' }}>{s.jira_key ?? '—'}</td>
                     <td className="px-4 py-3">
                       <div className="flex gap-1.5">
-                        <Badge variant="success">{s.happy_count}✓</Badge>
-                        <Badge variant="danger">{s.negative_count}✗</Badge>
+                        <Badge variant="ok">{s.happy_count}✓</Badge>
+                        <Badge variant="err">{s.negative_count}✗</Badge>
                       </div>
                     </td>
                     <td className="px-4 py-3 flex items-center gap-1" style={{ color: 'var(--text-3)' }}>

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Users } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
@@ -24,7 +25,7 @@ function formatDate(iso: string) {
   }
 }
 
-function ConsumerTable({ rows }: { rows: ConsumerRow[] }) {
+function ConsumerTable({ rows, onSelect }: { rows: ConsumerRow[]; onSelect: (id: string) => void }) {
   if (rows.length === 0) {
     return (
       <EmptyState
@@ -66,7 +67,7 @@ function ConsumerTable({ rows }: { rows: ConsumerRow[] }) {
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={row.id} className="group transition-colors" style={{ borderBottom: '1px solid var(--border)' }}>
+            <tr key={row.id} className="group cursor-pointer transition-colors" style={{ borderBottom: '1px solid var(--border)' }} onClick={() => onSelect(row.id)}>
               <td className="px-3 py-2.5 font-medium group-hover:bg-[var(--bg-hover)]" style={{ fontSize: '12.5px', color: 'var(--text-1)' }}>
                 <div>{row.name}</div>
                 {row.repo_url && (
@@ -102,6 +103,7 @@ function ConsumerTable({ rows }: { rows: ConsumerRow[] }) {
 }
 
 export default function ConsumersPage() {
+  const navigate = useNavigate()
   const [rows, setRows] = useState<ConsumerRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -137,7 +139,7 @@ export default function ConsumersPage() {
               Failed to load consumers: {error}
             </div>
           ) : (
-            <ConsumerTable rows={rows} />
+            <ConsumerTable rows={rows} onSelect={(id) => navigate(`/consumers/${id}`)} />
           )}
         </div>
       </div>

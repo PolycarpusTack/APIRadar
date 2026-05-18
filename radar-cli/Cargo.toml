@@ -11,6 +11,7 @@ path = "src/main.rs"
 radar-core = { path = "../radar-core" }
 radar-scanner = { path = "../radar-scanner" }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

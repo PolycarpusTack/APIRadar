@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use radar_core::models::Severity;
 
 mod api_client;
@@ -159,6 +160,13 @@ enum Commands {
         /// Push the collection to this Postman workspace ID (requires POSTMAN_API_KEY).
         #[arg(long)]
         postman_workspace: Option<String>,
+    },
+
+    /// Print shell completion script to stdout.
+    Completions {
+        /// Shell to generate completions for: bash, zsh, fish, powershell, elvish.
+        #[arg(value_enum)]
+        shell: Shell,
     },
 
     /// Explain the impact of a diff and optionally generate release notes.
@@ -361,6 +369,9 @@ async fn main() -> Result<()> {
             if code != 0 {
                 std::process::exit(code);
             }
+        }
+        Commands::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "radar", &mut std::io::stdout());
         }
         Commands::GenerateTests {
             jira,

@@ -90,9 +90,9 @@ export default function HelpPage() {
   return (
     <div className="p-8 max-w-4xl mx-auto space-y-10">
       <PageHeader
-        icon={HelpCircle}
+        tag="Help"
         title="Help & Reference"
-        subtitle="Command reference, environment variables, and feature walkthroughs for APIRadar"
+        description="Command reference, environment variables, and feature walkthroughs for APIRadar"
       />
 
       {/* ------------------------------------------------------------------ */}
@@ -246,7 +246,7 @@ radar generate-tests \\
             </p>
             <div className="space-y-1.5 pt-1">
               <Flag name="--jira <key>"              desc="Jira ticket key e.g. PROJ-123 (uses JIRA_BASE_URL / JIRA_EMAIL / JIRA_TOKEN)" />
-              <Flag name="--jira-text \"...\""        desc="Paste ticket text directly (fallback when Jira credentials are absent)" />
+              <Flag name={'--jira-text "..."'}         desc="Paste ticket text directly (fallback when Jira credentials are absent)" />
               <Flag name="--spec <path>"             desc="Path to the OpenAPI YAML/JSON spec file (required)" />
               <Flag name="--base-url <url>"          desc="API base URL inserted into every generated request (default: http://localhost:8080)" />
               <Flag name="--out <path>"              desc="Write the Postman Collection JSON to a file (default: stdout)" />

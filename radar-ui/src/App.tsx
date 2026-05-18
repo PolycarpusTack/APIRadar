@@ -1,9 +1,11 @@
 import { NavLink, Routes, Route } from 'react-router-dom'
-import { LayoutDashboard, GitCompare, Users, FileText, Telescope, FlaskConical, HelpCircle, Settings } from 'lucide-react'
+import { LayoutDashboard, GitCompare, Users, FileText, Telescope, FlaskConical, HelpCircle, Settings, Server } from 'lucide-react'
 import HomePage from './pages/HomePage'
 import DiffsPage from './pages/DiffsPage'
 import DiffDetailPage from './pages/DiffDetailPage'
 import ConsumersPage from './pages/ConsumersPage'
+import ConsumerDetailPage from './pages/ConsumerDetailPage'
+import ServicesPage from './pages/ServicesPage'
 import ReleaseNotesPage from './pages/ReleaseNotesPage'
 import PlaygroundPage from './pages/PlaygroundPage'
 import GenerateTestsPage from './pages/GenerateTestsPage'
@@ -20,6 +22,7 @@ const NAV = [
   {
     label: 'Registry',
     items: [
+      { to: '/services', label: 'Services', icon: Server },
       { to: '/consumers', label: 'Consumers', icon: Users },
     ],
   },
@@ -163,7 +166,9 @@ export default function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/diffs" element={<DiffsPage />} />
           <Route path="/diffs/:id" element={<DiffDetailPage />} />
+          <Route path="/services" element={<ServicesPage />} />
           <Route path="/consumers" element={<ConsumersPage />} />
+          <Route path="/consumers/:id" element={<ConsumerDetailPage />} />
           <Route path="/release-notes" element={<ReleaseNotesPage />} />
           <Route path="/playground" element={<PlaygroundPage />} />
           <Route path="/generate-tests" element={<GenerateTestsPage />} />
