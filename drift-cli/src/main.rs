@@ -114,9 +114,21 @@ enum Commands {
         #[arg(long)]
         consumer_id: String,
 
+        /// UUID of the producer service whose fields to track.
+        #[arg(long)]
+        service_id: String,
+
+        /// Directory to scan for TypeScript, Python, and Go source files.
+        #[arg(long)]
+        source_dir: PathBuf,
+
         /// Base URL of the drift-api server.
         #[arg(long, env = "DRIFT_API_URL")]
         api_url: String,
+
+        /// Optional bearer token for the drift-api server.
+        #[arg(long, env = "DRIFT_SERVICE_TOKEN")]
+        token: Option<String>,
     },
 
     /// Explain the impact of a diff and optionally generate release notes.
@@ -159,7 +171,7 @@ async fn main() -> Result<()> {
             base,
             head,
             spec: _spec,
-            format: _format,
+            format,
             policy,
             post_comment,
             json,
@@ -172,18 +184,42 @@ async fn main() -> Result<()> {
             let config = policy::load_config(policy.as_deref())?;
             let pol = config.policy();
 
-            // Read specs — for P0, --base and --head are file paths
+            // Read specs — --base and --head are file paths
             let base_content = std::fs::read_to_string(&base)
                 .map_err(|e| anyhow::anyhow!("cannot read base spec '{}': {e}", base))?;
             let head_content = std::fs::read_to_string(&head)
                 .map_err(|e| anyhow::anyhow!("cannot read head spec '{}': {e}", head))?;
 
-            let base_spec = drift_core::diff::parse_openapi(&base_content)
-                .map_err(|e| anyhow::anyhow!("parse error in base spec: {e}"))?;
-            let head_spec = drift_core::diff::parse_openapi(&head_content)
-                .map_err(|e| anyhow::anyhow!("parse error in head spec: {e}"))?;
+            // Detect format: explicit flag wins, then file extension of head path
+            let detected = format
+                .as_deref()
+                .map(|s| s.to_lowercase())
+                .unwrap_or_else(|| detect_format(&head));
 
-            let changes = drift_core::diff::diff_openapi(&base_spec, &head_spec);
+            let changes = match detected.as_str() {
+                "graphql" | "gql" => {
+                    let base_map = drift_core::graphql::parse_graphql(&base_content)
+                        .map_err(|e| anyhow::anyhow!("parse error in base spec: {e}"))?;
+                    let head_map = drift_core::graphql::parse_graphql(&head_content)
+                        .map_err(|e| anyhow::anyhow!("parse error in head spec: {e}"))?;
+                    drift_core::graphql::diff_graphql(&base_map, &head_map)
+                }
+                "protobuf" | "proto" => {
+                    let base_schema = drift_core::proto::parse_proto(&base_content)
+                        .map_err(|e| anyhow::anyhow!("parse error in base spec: {e}"))?;
+                    let head_schema = drift_core::proto::parse_proto(&head_content)
+                        .map_err(|e| anyhow::anyhow!("parse error in head spec: {e}"))?;
+                    drift_core::proto::diff_proto(&base_schema, &head_schema)
+                }
+                _ => {
+                    // Default: OpenAPI
+                    let base_spec = drift_core::diff::parse_openapi(&base_content)
+                        .map_err(|e| anyhow::anyhow!("parse error in base spec: {e}"))?;
+                    let head_spec = drift_core::diff::parse_openapi(&head_content)
+                        .map_err(|e| anyhow::anyhow!("parse error in head spec: {e}"))?;
+                    drift_core::diff::diff_openapi(&base_spec, &head_spec)
+                }
+            };
 
             let use_color = !no_color && std::env::var("NO_COLOR").is_err();
 
@@ -292,8 +328,42 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::Scan { .. } => {
-            println!("Not yet implemented: scan");
+        Commands::Scan {
+            consumer_id,
+            service_id,
+            source_dir,
+            api_url,
+            token,
+        } => {
+            println!("Scanning {}…", source_dir.display());
+            let records = drift_scanner::scan_directory(&source_dir);
+            println!("Found {} property accesses.", records.len());
+
+            if records.is_empty() {
+                return Ok(());
+            }
+
+            let sites: Vec<api_client::CallSiteBody> = records
+                .into_iter()
+                .map(|r| api_client::CallSiteBody {
+                    consumer_id: consumer_id.clone(),
+                    service_id: service_id.clone(),
+                    operation: String::new(),
+                    file_path: r.file_path,
+                    line_number: r.line_number as i64,
+                    field_path: r.field_path,
+                })
+                .collect();
+
+            // Post in chunks of 500 to stay within server limit.
+            let mut total = 0usize;
+            for chunk in sites.chunks(500) {
+                match api_client::post_call_sites(&api_url, chunk, token.as_deref()).await {
+                    Ok(n) => total += n,
+                    Err(e) => eprintln!("Warning: failed to post call sites: {e}"),
+                }
+            }
+            println!("Posted {total} call site record(s) to {api_url}.");
         }
         Commands::Explain {
             diff_id,
@@ -313,4 +383,22 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Format auto-detection
+// ---------------------------------------------------------------------------
+
+fn detect_format(path: &str) -> String {
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
+        "graphql" | "gql" => "graphql".to_string(),
+        "proto" => "protobuf".to_string(),
+        _ => "openapi".to_string(),
+    }
 }

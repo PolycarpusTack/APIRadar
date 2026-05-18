@@ -145,6 +145,7 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>) -> Router {
         .route("/diffs/:id", get(get_diff))
         .route("/diffs/:id/blast-radius", get(blast_radius))
         .route("/usage/events", post(ingest_usage_event))
+        .route("/call-sites", post(upsert_call_sites))
         .route("/summary", get(get_summary))
         .layer(middleware::from_fn_with_state(pool.clone(), auth_middleware))
         .with_state(pool.clone());
@@ -206,6 +207,17 @@ struct UsageEventRequest {
     service_id: String,
     operation: String,
     #[serde(default)]
+    field_path: String,
+}
+
+#[derive(Deserialize)]
+struct CallSiteInput {
+    consumer_id: String,
+    service_id: String,
+    #[serde(default)]
+    operation: String,
+    file_path: String,
+    line_number: i64,
     field_path: String,
 }
 
@@ -747,24 +759,42 @@ async fn blast_radius(
             }
         }
 
-        // Query call_site for static references matching changed operations.
+        // Query call_site for static references matching changed operations or field paths.
         let mut call_site_last_seen: Option<String> = None;
 
-        if !changed_ops.is_empty() {
+        // Unique field names from changed_fields (for field_path matching in call_site).
+        let changed_field_paths: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            changed_fields
+                .iter()
+                .map(|(_, fp)| fp.clone())
+                .filter(|fp| !fp.is_empty() && seen.insert(fp.clone()))
+                .collect()
+        };
+
+        if !changed_ops.is_empty() || !changed_field_paths.is_empty() {
             let mut sql = String::from(
                 "SELECT last_seen_at FROM call_site WHERE consumer_id = ? AND service_id = ? AND (",
             );
-            for (i, _op) in changed_ops.iter().enumerate() {
-                if i > 0 {
-                    sql.push_str(" OR ");
-                }
+            let mut first = true;
+            for _ in &changed_ops {
+                if !first { sql.push_str(" OR "); }
                 sql.push_str("operation = ?");
+                first = false;
+            }
+            for _ in &changed_field_paths {
+                if !first { sql.push_str(" OR "); }
+                sql.push_str("field_path = ?");
+                first = false;
             }
             sql.push_str(") ORDER BY last_seen_at DESC LIMIT 1");
 
             let mut q = sqlx::query(&sql).bind(&consumer_id).bind(&service_id);
             for op in &changed_ops {
                 q = q.bind(op);
+            }
+            for fp in &changed_field_paths {
+                q = q.bind(fp);
             }
 
             if let Some(row) = q.fetch_optional(&pool).await? {
@@ -854,6 +884,75 @@ async fn ingest_usage_event(
     }
 
     Ok((StatusCode::ACCEPTED, Json(json!({"accepted": count}))))
+}
+
+// POST /v1/call-sites — upsert static call site records from the drift-scanner.
+async fn upsert_call_sites(
+    State(pool): State<sqlx::AnyPool>,
+    Json(sites): Json<Vec<CallSiteInput>>,
+) -> Result<impl IntoResponse, ApiError> {
+    if sites.len() > 5000 {
+        return Err(ApiError::TooManyRequests(
+            "batch too large, max 5000".to_string(),
+        ));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let count = sites.len();
+
+    for site in &sites {
+        let id = call_site_id(
+            &site.consumer_id,
+            &site.service_id,
+            &site.file_path,
+            site.line_number,
+            &site.field_path,
+        );
+
+        // UPDATE first; INSERT when the record did not exist yet.
+        let updated = sqlx::query(
+            "UPDATE call_site SET last_seen_at = ?, operation = ? WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(&site.operation)
+        .bind(&id)
+        .execute(&pool)
+        .await?;
+
+        if updated.rows_affected() == 0 {
+            sqlx::query(
+                r#"INSERT INTO call_site
+                   (id, consumer_id, service_id, operation, file_path, line_number, field_path, last_seen_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
+            )
+            .bind(&id)
+            .bind(&site.consumer_id)
+            .bind(&site.service_id)
+            .bind(&site.operation)
+            .bind(&site.file_path)
+            .bind(site.line_number)
+            .bind(&site.field_path)
+            .bind(&now)
+            .execute(&pool)
+            .await?;
+        }
+    }
+
+    Ok((StatusCode::ACCEPTED, Json(json!({"accepted": count}))))
+}
+
+fn call_site_id(
+    consumer_id: &str,
+    service_id: &str,
+    file_path: &str,
+    line_number: i64,
+    field_path: &str,
+) -> String {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("{consumer_id}/{service_id}/{file_path}/{line_number}/{field_path}").as_bytes(),
+    )
+    .to_string()
 }
 
 // GET /v1/diffs — all diffs across all services (last 100, newest first)

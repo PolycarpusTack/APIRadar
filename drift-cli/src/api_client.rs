@@ -7,6 +7,16 @@ use drift_core::models::{ChangeKind, Severity};
 
 use crate::render::BlastRadiusResponse;
 
+#[derive(Serialize)]
+pub struct CallSiteBody {
+    pub consumer_id: String,
+    pub service_id: String,
+    pub operation: String,
+    pub file_path: String,
+    pub line_number: i64,
+    pub field_path: String,
+}
+
 // ---------------------------------------------------------------------------
 // Request body types
 // ---------------------------------------------------------------------------
@@ -146,6 +156,37 @@ pub async fn post_diff(api_url: &str, p: PostDiffParams<'_>) -> Result<String> {
         .to_string();
 
     Ok(diff_id)
+}
+
+/// POST /v1/call-sites — upsert a batch of call site records.
+pub async fn post_call_sites(
+    api_url: &str,
+    sites: &[CallSiteBody],
+    token: Option<&str>,
+) -> Result<usize> {
+    let (client, headers) = build_client(token)?;
+
+    let url = format!("{api_url}/v1/call-sites");
+    let resp = client
+        .post(&url)
+        .headers(headers)
+        .json(sites)
+        .send()
+        .await
+        .context("failed to POST call-sites")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_else(|_| "<unreadable>".into());
+        bail!("API error posting call-sites: {} — {}", status, text);
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .context("failed to parse POST call-sites response")?;
+    let accepted = json["accepted"].as_u64().unwrap_or(0) as usize;
+    Ok(accepted)
 }
 
 /// GET /v1/diffs/{diff_id}/blast-radius — returns the parsed blast radius response.

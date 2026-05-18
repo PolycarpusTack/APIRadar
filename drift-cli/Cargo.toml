@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 drift-core = { path = "../drift-core" }
+drift-scanner = { path = "../drift-scanner" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
