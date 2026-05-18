@@ -40,7 +40,7 @@ function DiffTable({ rows, onSelect }: { rows: DiffSummary[]; onSelect: (id: str
       <EmptyState
         icon={GitCompare}
         title="No diffs recorded yet"
-        description="Run drift check --api-url … to post your first schema diff and see it here."
+        description="Run radar check --base old.yaml --head new.yaml --api-url … to post your first schema diff and see it here."
       />
     )
   }

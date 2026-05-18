@@ -27,7 +27,7 @@ export default function ReleaseNotesPage() {
           <EmptyState
             icon={FileText}
             title="No release notes yet"
-            description="Run drift explain --diff-id <id> to generate release notes for a diff and see them here."
+            description="Run radar explain --diff-id <id> --release-notes to generate release notes for a diff and see them here."
           />
         </div>
       </div>

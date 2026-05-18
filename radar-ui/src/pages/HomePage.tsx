@@ -68,17 +68,19 @@ function ApiStatusBadge() {
 
 function CodeExample() {
   const lines = [
-    { type: 'comment', text: '# Compare two git refs and post to radar-api' },
-    { type: 'cmd',     text: 'drift check \\' },
-    { type: 'arg',     text: '  --base main --head HEAD \\' },
+    { type: 'comment', text: '# Compare two spec files and post to radar-api' },
+    { type: 'cmd',     text: 'radar check \\' },
+    { type: 'arg',     text: '  --base old.yaml --head new.yaml \\' },
     { type: 'arg',     text: '  --api-url http://localhost:8080 \\' },
-    { type: 'arg',     text: '  --service-id my-service' },
+    { type: 'arg',     text: '  --service-id <uuid>' },
     { type: 'blank',   text: '' },
-    { type: 'comment', text: '# Register a consumer service' },
-    { type: 'cmd',     text: 'drift register \\' },
+    { type: 'comment', text: '# Register a consumer and subscribe it to a service' },
+    { type: 'cmd',     text: 'radar register \\' },
     { type: 'arg',     text: '  --api-url http://localhost:8080 \\' },
-    { type: 'arg',     text: '  --service-id my-service \\' },
-    { type: 'arg',     text: '  --consumer-name checkout-service' },
+    { type: 'arg',     text: '  --service-id <uuid> \\' },
+    { type: 'arg',     text: '  --consumer-name checkout-svc \\' },
+    { type: 'arg',     text: '  --repo-url https://github.com/org/checkout \\' },
+    { type: 'arg',     text: '  --owner-team payments --contact ops@example.com' },
   ]
 
   return (
@@ -188,7 +190,7 @@ export default function HomePage() {
                 fontFamily: 'var(--font-mono)',
               }}
             >
-              drift check
+              radar check
             </code>{' '}
             on any pull request to automatically detect schema drift and notify affected consumers.
           </p>

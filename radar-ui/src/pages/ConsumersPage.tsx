@@ -41,7 +41,7 @@ function ConsumerTable({ rows }: { rows: ConsumerRow[] }) {
               fontFamily: 'var(--font-mono)',
             }}
           >
-            drift register --service-id &lt;id&gt; --consumer-name &lt;name&gt;
+            radar register --service-id &lt;id&gt; --consumer-name &lt;name&gt; --repo-url &lt;url&gt; --owner-team &lt;team&gt; --contact &lt;email&gt;
           </code>
         }
       />
