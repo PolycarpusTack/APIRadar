@@ -239,6 +239,24 @@ radar generate-tests \\
             </div>
           </Card>
 
+          {/* radar completions */}
+          <Card>
+            <p className="text-[12.5px] font-semibold" style={{ color: 'var(--text-1)' }}>
+              <Code>radar completions &lt;shell&gt;</Code> — Print shell completion script to stdout
+            </p>
+            <p className="text-[12.5px] pt-1" style={{ color: 'var(--text-3)' }}>
+              Supported shells: <Code>bash</Code>, <Code>zsh</Code>, <Code>fish</Code>, <Code>powershell</Code>, <Code>elvish</Code>.
+            </p>
+            <Block>{`# bash
+radar completions bash >> ~/.bash_completion
+
+# zsh (oh-my-zsh)
+radar completions zsh > ~/.oh-my-zsh/completions/_radar
+
+# fish
+radar completions fish > ~/.config/fish/completions/radar.fish`}</Block>
+          </Card>
+
           {/* radar generate-tests */}
           <Card>
             <p className="text-[12.5px] font-semibold" style={{ color: 'var(--text-1)' }}>
@@ -321,8 +339,11 @@ radar generate-tests \\
               <p className="text-[10.5px] font-semibold uppercase tracking-wider pb-2 pt-3" style={{ color: 'var(--text-dim)' }}>
                 Server tuning
               </p>
-              <EnvVar name="RATE_LIMIT_PER_MINUTE" desc="Max requests per IP per minute (default 300, 0 = unlimited)" />
-              <EnvVar name="DATABASE_URL"           desc="sqlx connection string: sqlite:radar.db or postgres://user:pass@host/db" />
+              <EnvVar name="RATE_LIMIT_PER_MINUTE"  desc="Max requests per IP per minute (default 300, 0 = unlimited)" />
+              <EnvVar name="MAX_BODY_SIZE_MB"        desc="Maximum request body size in megabytes (default 4 MB)" />
+              <EnvVar name="CORS_ALLOWED_ORIGINS"    desc="Comma-separated list of allowed CORS origins. Omit for permissive (dev). Example: https://app.example.com" />
+              <EnvVar name="DATABASE_URL"            desc="sqlx connection string: sqlite:radar.db or postgres://user:pass@host/db" />
+              <EnvVar name="BIND_ADDR"               desc="Socket address to listen on (default 0.0.0.0:8080; use 127.0.0.1:8080 in desktop sidecar mode)" />
             </div>
           </div>
         </Card>

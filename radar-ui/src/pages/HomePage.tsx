@@ -117,14 +117,133 @@ function CodeExample() {
   )
 }
 
+interface DiffEntry {
+  created_at: string
+  breaking_count: number
+  risky_count: number
+  safe_count: number
+}
+
+function DiffTimeline({ diffs }: { diffs: DiffEntry[] }) {
+  const DAYS = 30
+  const today = new Date()
+  today.setHours(23, 59, 59, 999)
+
+  // Build a bucket per day label → { breaking, risky, safe }
+  const buckets: Record<string, { breaking: number; risky: number; safe: number }> = {}
+  for (let i = DAYS - 1; i >= 0; i--) {
+    const d = new Date(today)
+    d.setDate(d.getDate() - i)
+    const key = d.toISOString().slice(0, 10)
+    buckets[key] = { breaking: 0, risky: 0, safe: 0 }
+  }
+
+  for (const diff of diffs) {
+    const day = diff.created_at.slice(0, 10)
+    if (buckets[day]) {
+      buckets[day].breaking += diff.breaking_count
+      buckets[day].risky += diff.risky_count
+      buckets[day].safe += diff.safe_count
+    }
+  }
+
+  const keys = Object.keys(buckets)
+  const maxTotal = Math.max(1, ...keys.map(k => buckets[k].breaking + buckets[k].risky + buckets[k].safe))
+
+  const W = 600
+  const H = 72
+  const barW = (W / DAYS) * 0.6
+  const gap = (W / DAYS) * 0.4
+
+  return (
+    <div>
+      <p className="mb-2 text-[9.5px] font-semibold uppercase tracking-[1.2px]" style={{ color: 'var(--text-dim)' }}>
+        Diff activity — last 30 days
+      </p>
+      <div
+        className="rounded-lg px-4 pt-4 pb-3 overflow-hidden"
+        style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}
+      >
+        <svg viewBox={`0 0 ${W} ${H + 18}`} className="w-full" style={{ height: 90 }}>
+          {keys.map((day, i) => {
+            const { breaking, risky, safe } = buckets[day]
+            const total = breaking + risky + safe
+            const x = i * (W / DAYS) + gap / 2
+            const totalH = (total / maxTotal) * H
+            const breakH = (breaking / Math.max(1, total)) * totalH
+            const riskyH = (risky / Math.max(1, total)) * totalH
+            const safeH = totalH - breakH - riskyH
+
+            const isMonday = new Date(day).getDay() === 1
+            const isFirst = i === 0
+            const labelDay = i % 5 === 0 || isFirst
+
+            return (
+              <g key={day}>
+                {/* safe (bottom) */}
+                {safe > 0 && (
+                  <rect x={x} y={H - totalH} width={barW} height={safeH}
+                    fill="var(--teal)" opacity="0.7" rx={1} />
+                )}
+                {/* risky (middle) */}
+                {risky > 0 && (
+                  <rect x={x} y={H - totalH + safeH} width={barW} height={riskyH}
+                    fill="var(--amber)" opacity="0.85" rx={1} />
+                )}
+                {/* breaking (top) */}
+                {breaking > 0 && (
+                  <rect x={x} y={H - totalH + safeH + riskyH} width={barW} height={breakH}
+                    fill="var(--red)" opacity="0.9" rx={1} />
+                )}
+                {/* monday line */}
+                {isMonday && (
+                  <line x1={x - gap / 2} y1={0} x2={x - gap / 2} y2={H}
+                    stroke="var(--border)" strokeWidth="0.5" />
+                )}
+                {/* day label every 5 */}
+                {labelDay && (
+                  <text x={x + barW / 2} y={H + 14}
+                    textAnchor="middle" fontSize="8"
+                    fill="var(--text-dim)"
+                    fontFamily="var(--font-mono)"
+                  >
+                    {day.slice(5)}
+                  </text>
+                )}
+              </g>
+            )
+          })}
+        </svg>
+        <div className="flex items-center gap-4 mt-1" style={{ fontSize: '10px', fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--red)', opacity: 0.9, display: 'inline-block' }} /> breaking
+          </span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--amber)', opacity: 0.85, display: 'inline-block' }} /> risky
+          </span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--teal)', opacity: 0.7, display: 'inline-block' }} /> safe
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function HomePage() {
   const [summary, setSummary] = useState<Summary | null>(null)
+  const [diffs, setDiffs] = useState<DiffEntry[]>([])
 
   useEffect(() => {
     fetch('/v1/summary')
       .then((r) => r.ok ? r.json() as Promise<Summary> : Promise.reject())
       .then(setSummary)
       .catch(() => { /* server may not be reachable yet — KPIs stay as — */ })
+
+    fetch('/v1/diffs?limit=200')
+      .then((r) => r.ok ? r.json() as Promise<DiffEntry[]> : Promise.reject())
+      .then(setDiffs)
+      .catch(() => { /* non-fatal */ })
   }, [])
 
   const fmt = (n: number | undefined) => n === undefined ? '—' : String(n)
@@ -170,6 +289,9 @@ export default function HomePage() {
             />
           </div>
         </section>
+
+        {/* Timeline */}
+        <DiffTimeline diffs={diffs} />
 
         {/* Quick start */}
         <section>
