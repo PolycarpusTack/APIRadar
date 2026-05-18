@@ -381,6 +381,7 @@ struct CreateDiffBody {
     to_git_ref: String,
     pr_url: Option<String>,
     spec_format: String,
+    spec_yaml: Option<String>,
     #[serde(default)]
     changes: Vec<ChangeInput>,
 }
@@ -564,7 +565,7 @@ async fn create_diff(
     .execute(&pool)
     .await?;
 
-    // 2. Upsert from_version spec_version row.
+    // 2. Upsert from_version spec_version row (no spec_yaml — the base spec is historical).
     let from_version_id = spec_version_id(&service_id, &body.from_git_ref);
     sqlx::query(
         r#"
@@ -581,13 +582,14 @@ async fn create_diff(
     .execute(&pool)
     .await?;
 
-    // 3. Upsert to_version spec_version row.
+    // 3. Upsert to_version spec_version row, storing spec_yaml if provided.
     let to_version_id = spec_version_id(&service_id, &body.to_git_ref);
     sqlx::query(
         r#"
-        INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO NOTHING
+        INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            spec_yaml = COALESCE(excluded.spec_yaml, spec_version.spec_yaml)
         "#,
     )
     .bind(&to_version_id)
@@ -595,10 +597,36 @@ async fn create_diff(
     .bind(&body.to_git_ref)
     .bind(&now)
     .bind(&body.spec_format)
+    .bind(&body.spec_yaml)
     .execute(&pool)
     .await?;
 
-    // 4. Insert diff row.
+    // 4. Deduplication: return cached diff if this exact transition already exists.
+    {
+        use sqlx::Row;
+        let existing = sqlx::query(
+            "SELECT id FROM diff WHERE from_version = ? AND to_version = ?",
+        )
+        .bind(&from_version_id)
+        .bind(&to_version_id)
+        .fetch_optional(&pool)
+        .await?;
+
+        if let Some(row) = existing {
+            let existing_id: String = row.try_get("id").map_err(ApiError::Db)?;
+            return Ok((
+                StatusCode::OK,
+                Json(json!({
+                    "id":           existing_id,
+                    "from_version": from_version_id,
+                    "to_version":   to_version_id,
+                    "cached":       true,
+                })),
+            ));
+        }
+    }
+
+    // 5. Insert diff row.
     let diff_id = Uuid::new_v4().to_string();
     sqlx::query(
         r#"
@@ -614,7 +642,7 @@ async fn create_diff(
     .execute(&pool)
     .await?;
 
-    // 5. Insert change rows.
+    // 6. Insert change rows.
     for change in &body.changes {
         let change_id = Uuid::new_v4().to_string();
         sqlx::query(
@@ -808,7 +836,7 @@ async fn get_diff(
     let row = sqlx::query(
         r#"
         SELECT d.id, sv_from.git_ref AS from_git_ref, sv_to.git_ref AS to_git_ref,
-               d.pr_url, d.created_at
+               d.pr_url, d.created_at, sv_to.spec_yaml
         FROM diff d
         JOIN spec_version sv_from ON sv_from.id = d.from_version
         JOIN spec_version sv_to   ON sv_to.id   = d.to_version
@@ -857,6 +885,7 @@ async fn get_diff(
             "to_git_ref":   row.get::<String, _>("to_git_ref"),
             "pr_url":       row.try_get::<Option<String>, _>("pr_url").unwrap_or(None),
             "created_at":   row.get::<String, _>("created_at"),
+            "spec_yaml":    row.try_get::<Option<String>, _>("spec_yaml").unwrap_or(None),
             "changes":      changes,
         })),
     ))
@@ -1444,8 +1473,11 @@ async fn get_summary(
 
 #[derive(Deserialize)]
 struct GenerateTestsBody {
-    /// OpenAPI YAML/JSON spec text. Required (spec is not stored server-side per service).
-    spec_yaml: String,
+    /// OpenAPI YAML/JSON spec text. Either this or diff_id is required.
+    spec_yaml: Option<String>,
+    /// Diff ID — if provided and spec_yaml is absent, the spec is loaded from the stored
+    /// spec_version for this diff's to_version.
+    diff_id: Option<String>,
     /// Jira ticket key (e.g. "PROJ-123"). Server reads JIRA_BASE_URL/JIRA_EMAIL/JIRA_TOKEN.
     jira_key: Option<String>,
     /// Paste the Jira ticket text directly (used when jira_key is absent or Jira is unreachable).
@@ -1501,9 +1533,38 @@ async fn generate_tests(
         },
     };
 
+    // Resolve spec_yaml: use explicit value, or fall back to stored spec from the diff.
+    let spec_yaml = match body.spec_yaml {
+        Some(s) => s,
+        None => {
+            match body.diff_id {
+                Some(ref did) => {
+                    use sqlx::Row;
+                    let row = sqlx::query(
+                        r#"SELECT sv.spec_yaml FROM diff d
+                           JOIN spec_version sv ON sv.id = d.to_version
+                           WHERE d.id = ?"#,
+                    )
+                    .bind(did)
+                    .fetch_optional(&pool)
+                    .await?;
+                    match row.and_then(|r| r.try_get::<Option<String>, _>("spec_yaml").ok().flatten()) {
+                        Some(yaml) => yaml,
+                        None => return Err(ApiError::BadRequest(
+                            "No stored spec found for this diff. Supply spec_yaml directly.".to_string()
+                        )),
+                    }
+                }
+                None => return Err(ApiError::BadRequest(
+                    "Provide either spec_yaml or diff_id".to_string()
+                )),
+            }
+        }
+    };
+
     // Call Claude to generate structured test cases then assemble the collection.
     let collection_json =
-        call_claude_for_tests(&api_key, &jira_summary, &jira_description, &body.spec_yaml, &body.base_url)
+        call_claude_for_tests(&api_key, &jira_summary, &jira_description, &spec_yaml, &body.base_url)
             .await
             .map_err(|e| ApiError::BadRequest(format!("test generation failed: {e}")))?;
 
@@ -2743,5 +2804,50 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(json.is_array());
+    }
+
+    #[tokio::test]
+    async fn test_diff_deduplication_returns_cached() {
+        let pool = test_pool().await;
+        let app = build_router(pool, None, 4 * 1024 * 1024);
+
+        let svc_id = Uuid::new_v4().to_string();
+        let diff_body = serde_json::json!({
+            "service_name": "dedup-svc",
+            "repo_url": "",
+            "owner_team": "",
+            "from_git_ref": "aaa",
+            "to_git_ref": "bbb",
+            "spec_format": "openapi",
+            "changes": []
+        });
+
+        // First submission — creates the diff (201).
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("/v1/services/{svc_id}/diffs"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&diff_body).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let first: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        // Second submission — same transition returns cached (200).
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("/v1/services/{svc_id}/diffs"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&diff_body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let second: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        // Same diff ID returned.
+        assert_eq!(first["id"], second["id"]);
+        assert_eq!(second["cached"], true);
     }
 }
