@@ -225,7 +225,11 @@ async fn oidc_login() -> Response {
         return (StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error": "OIDC not configured — set RADAR_OIDC_PROVIDER_URL, RADAR_OIDC_CLIENT_ID, RADAR_OIDC_CLIENT_SECRET"}))).into_response();
     };
-    let jwt_secret = std::env::var("RADAR_JWT_SECRET").unwrap_or_else(|_| "oidc-state-key".to_string());
+    let jwt_secret = match std::env::var("RADAR_JWT_SECRET").ok().filter(|s| !s.is_empty()) {
+        Some(s) => s,
+        None => return (StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "RADAR_JWT_SECRET must be set to use OIDC login"}))).into_response(),
+    };
     let disc = match fetch_discovery(&cfg.provider_url).await {
         Ok(d) => d,
         Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("OIDC discovery failed: {e}")}))).into_response(),
@@ -261,7 +265,11 @@ async fn oidc_callback(Query(params): Query<HashMap<String, String>>, req: Reque
     let Some(cfg) = OidcConfig::from_env() else {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "OIDC not configured"}))).into_response();
     };
-    let jwt_secret = std::env::var("RADAR_JWT_SECRET").unwrap_or_else(|_| "oidc-state-key".to_string());
+    let jwt_secret = match std::env::var("RADAR_JWT_SECRET").ok().filter(|s| !s.is_empty()) {
+        Some(s) => s,
+        None => return (StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "RADAR_JWT_SECRET must be set to use OIDC"}))).into_response(),
+    };
 
     // Verify CSRF state
     let state_param = params.get("state").cloned().unwrap_or_default();
