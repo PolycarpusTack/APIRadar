@@ -135,6 +135,12 @@ enum Commands {
         /// Optional bearer token for the radar-api server.
         #[arg(long, env = "RADAR_SERVICE_TOKEN")]
         token: Option<String>,
+
+        /// Map property names to API operations for blast-radius evidence.
+        /// Format: "field=METHOD /path" — can be repeated.
+        /// Example: --operation-map "userId=GET /users" --operation-map "email=GET /users"
+        #[arg(long, value_name = "FIELD=OP")]
+        operation_map: Vec<String>,
     },
 
     /// Generate Postman test cases from a Jira ticket and an OpenAPI spec.
@@ -472,7 +478,22 @@ async fn main() -> Result<()> {
             source_dir,
             api_url,
             token,
+            operation_map,
         } => {
+            // Parse --operation-map "field=METHOD /path" pairs into a lookup table.
+            let op_map: std::collections::HashMap<String, String> = operation_map
+                .iter()
+                .filter_map(|s| {
+                    let (field, op) = s.split_once('=')?;
+                    Some((field.to_string(), op.to_string()))
+                })
+                .collect();
+
+            if op_map.is_empty() {
+                eprintln!("Note: no --operation-map provided — field-path-only matching will be used for blast-radius evidence.");
+                eprintln!("      Use --operation-map \"field=METHOD /path\" to tie fields to concrete API operations.");
+            }
+
             println!("Scanning {}…", source_dir.display());
             let records = radar_scanner::scan_directory(&source_dir);
             println!("Found {} property accesses.", records.len());
@@ -481,17 +502,18 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            eprintln!("Note: call sites posted without operation context — field-path-only matching will be used for blast radius.");
-
             let sites: Vec<api_client::CallSiteBody> = records
                 .into_iter()
-                .map(|r| api_client::CallSiteBody {
-                    consumer_id: consumer_id.clone(),
-                    service_id: service_id.clone(),
-                    operation: String::new(),
-                    file_path: r.file_path,
-                    line_number: r.line_number as i64,
-                    field_path: r.field_path,
+                .map(|r| {
+                    let operation = op_map.get(&r.field_path).cloned().unwrap_or_default();
+                    api_client::CallSiteBody {
+                        consumer_id: consumer_id.clone(),
+                        service_id: service_id.clone(),
+                        operation,
+                        file_path: r.file_path,
+                        line_number: r.line_number as i64,
+                        field_path: r.field_path,
+                    }
                 })
                 .collect();
 

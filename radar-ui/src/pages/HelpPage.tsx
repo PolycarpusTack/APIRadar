@@ -838,9 +838,13 @@ function CliReference() {
   --consumer-id <uuid> \\
   --service-id <uuid> \\
   --source-dir ./checkout-svc \\
-  --api-url http://localhost:8081`}</Block>
+  --api-url http://localhost:8081 \\
+  --operation-map "userId=GET /users" \\
+  --operation-map "email=GET /users"`}</Block>
               <p className="text-[12px]" style={{ color: 'var(--text-3)' }}>
-                Uses tree-sitter to find field accesses in TypeScript, Python, Go, Rust, and Java.
+                Uses tree-sitter to find field accesses in TypeScript, Python, and Go.
+                Use <Code>--operation-map field=METHOD /path</Code> to tie fields to concrete API
+                operations for richer blast-radius evidence. Omit to fall back to field-path-only matching.
               </p>
             </Step>
 
@@ -904,11 +908,12 @@ radar generate-tests \\
               <Code>radar scan</Code> — Extract API call sites from consumer source code
             </p>
             <div className="space-y-1.5 pt-1">
-              <Flag name="--consumer-id <uuid>" desc="UUID of the consumer to scan" />
-              <Flag name="--service-id <uuid>"  desc="UUID of the producer whose fields to track" />
-              <Flag name="--source-dir <path>"  desc="Root directory to scan (TypeScript, Python, Go, Rust, Java)" />
-              <Flag name="--api-url <url>"      desc="radar-api base URL" />
-              <Flag name="--token <token>"      desc="Bearer token for the API" />
+              <Flag name="--consumer-id <uuid>"       desc="UUID of the consumer to scan" />
+              <Flag name="--service-id <uuid>"        desc="UUID of the producer whose fields to track" />
+              <Flag name="--source-dir <path>"        desc="Root directory to scan (TypeScript, Python, Go)" />
+              <Flag name="--api-url <url>"            desc="radar-api base URL" />
+              <Flag name="--token <token>"            desc="Bearer token for the API" />
+              <Flag name="--operation-map field=OP"   desc='Map a field name to an API operation e.g. "userId=GET /users". Repeat for multiple fields.' />
             </div>
             <p className="text-[11.5px] pt-1" style={{ color: 'var(--text-3)' }}>
               Uses tree-sitter grammars. Results posted to <Code>POST /v1/call-sites</Code> in batches of 500.
