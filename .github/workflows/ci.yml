@@ -163,6 +163,15 @@ jobs:
         run: pnpm build:ui
         # Note: Electron/desktop build is skipped in CI — requires signing certs.
 
+      # D-8: Playwright E2E smoke tests (UI only, no API required)
+      - name: Install Playwright browsers
+        run: pnpm --filter radar-ui exec playwright install --with-deps chromium
+
+      - name: Run E2E smoke tests
+        run: pnpm --filter radar-ui test:e2e
+        env:
+          CI: true
+
   # ---------------------------------------------------------------------------
   # Docker: build radar-api image (push to main only)
   # ---------------------------------------------------------------------------
