@@ -24,6 +24,7 @@ interface GenerateResult {
   happy_count: number
   negative_count: number
   collection_json: object
+  apitesting_yaml: string | null
   created_at: string
 }
 
@@ -106,6 +107,16 @@ export default function GenerateTestsPage() {
     const a = document.createElement('a')
     a.href = url
     a.download = `${name.replace(/[^a-z0-9]/gi, '_')}.postman_collection.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function downloadApiTesting(yaml: string, name: string) {
+    const blob = new Blob([yaml], { type: 'text/yaml' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${name.replace(/[^a-z0-9]/gi, '_')}.api-testing.yaml`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -247,14 +258,26 @@ export default function GenerateTestsPage() {
                 <Badge>{result.test_count} total</Badge>
               </div>
             </div>
-            <button
-              onClick={() => downloadCollection(result.collection_json, result.collection_name)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium shrink-0"
-              style={{ background: 'var(--bg-hover)', color: 'var(--text-1)', border: '1px solid var(--border)' }}
-            >
-              <Download className="h-3.5 w-3.5" />
-              Download Collection
-            </button>
+            <div className="flex gap-2 shrink-0">
+              <button
+                onClick={() => downloadCollection(result.collection_json, result.collection_name)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium"
+                style={{ background: 'var(--bg-hover)', color: 'var(--text-1)', border: '1px solid var(--border)' }}
+              >
+                <Download className="h-3.5 w-3.5" />
+                Postman JSON
+              </button>
+              {result.apitesting_yaml && (
+                <button
+                  onClick={() => downloadApiTesting(result.apitesting_yaml!, result.collection_name)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium"
+                  style={{ background: 'var(--bg-hover)', color: 'var(--text-1)', border: '1px solid var(--border)' }}
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  api-testing YAML
+                </button>
+              )}
+            </div>
           </div>
           <CollapsibleJson label="Preview collection JSON" json={result.collection_json} />
         </div>

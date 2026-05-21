@@ -169,6 +169,13 @@ fn kind_label(kind: &radar_core::models::ChangeKind) -> &'static str {
         ChangeKind::RequiredChanged => "required_changed",
         ChangeKind::OperationRemoved => "operation_removed",
         ChangeKind::OperationAdded => "operation_added",
+        ChangeKind::ParameterRemoved => "parameter_removed",
+        ChangeKind::ResponseRemoved => "response_removed",
+        ChangeKind::EnumValueRemoved => "enum_value_removed",
+        ChangeKind::EnumValueAdded => "enum_value_added",
+        ChangeKind::NullabilityChanged => "nullability_changed",
+        ChangeKind::RequestBodyAdded => "request_body_added",
+        ChangeKind::RequestBodyRemoved => "request_body_removed",
     }
 }
 

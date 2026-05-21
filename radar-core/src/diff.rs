@@ -1,12 +1,49 @@
 use indexmap::IndexMap;
 use openapiv3::{
-    OpenAPI, Parameter, PathItem, ReferenceOr, Schema, SchemaKind, StatusCode, Type,
+    OpenAPI, Parameter, PathItem, ReferenceOr, RequestBody, Response, Schema, SchemaKind,
+    StatusCode, Type,
 };
 
 use crate::{
     error::DriftError,
     models::{ChangeKind, Severity},
 };
+
+// ---------------------------------------------------------------------------
+// $ref resolvers — only local component refs (#/components/…) are supported
+// ---------------------------------------------------------------------------
+
+fn resolve_schema<'a>(spec: &'a OpenAPI, reference: &str) -> Option<&'a Schema> {
+    let name = reference.strip_prefix("#/components/schemas/")?;
+    match spec.components.as_ref()?.schemas.get(name)? {
+        ReferenceOr::Item(s) => Some(s),
+        ReferenceOr::Reference { .. } => None,
+    }
+}
+
+fn resolve_response<'a>(spec: &'a OpenAPI, reference: &str) -> Option<&'a Response> {
+    let name = reference.strip_prefix("#/components/responses/")?;
+    match spec.components.as_ref()?.responses.get(name)? {
+        ReferenceOr::Item(r) => Some(r),
+        ReferenceOr::Reference { .. } => None,
+    }
+}
+
+fn resolve_parameter<'a>(spec: &'a OpenAPI, reference: &str) -> Option<&'a Parameter> {
+    let name = reference.strip_prefix("#/components/parameters/")?;
+    match spec.components.as_ref()?.parameters.get(name)? {
+        ReferenceOr::Item(p) => Some(p),
+        ReferenceOr::Reference { .. } => None,
+    }
+}
+
+fn resolve_request_body<'a>(spec: &'a OpenAPI, reference: &str) -> Option<&'a RequestBody> {
+    let name = reference.strip_prefix("#/components/requestBodies/")?;
+    match spec.components.as_ref()?.request_bodies.get(name)? {
+        ReferenceOr::Item(r) => Some(r),
+        ReferenceOr::Reference { .. } => None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -57,7 +94,7 @@ pub fn diff_openapi(base: &OpenAPI, head: &OpenAPI) -> Vec<DiffChange> {
             });
         } else {
             let head_op = &head_ops[key];
-            diff_operation(key, base_op, head_op, &mut changes);
+            diff_operation(key, base_op, head_op, base, head, &mut changes);
         }
     }
 
@@ -114,10 +151,13 @@ fn diff_operation(
     op_path: &str,
     base_op: &openapiv3::Operation,
     head_op: &openapiv3::Operation,
+    base_spec: &OpenAPI,
+    head_spec: &OpenAPI,
     changes: &mut Vec<DiffChange>,
 ) {
-    diff_parameters(op_path, base_op, head_op, changes);
-    diff_responses(op_path, base_op, head_op, changes);
+    diff_parameters(op_path, base_op, head_op, base_spec, head_spec, changes);
+    diff_request_body(op_path, base_op, head_op, base_spec, head_spec, changes);
+    diff_responses(op_path, base_op, head_op, base_spec, head_spec, changes);
 }
 
 // ---------------------------------------------------------------------------
@@ -153,8 +193,8 @@ fn param_required(p: &Parameter) -> bool {
     p.parameter_data_ref().required
 }
 
-/// Collect resolved parameters from an operation, skipping $refs.
-fn resolved_params(op: &openapiv3::Operation) -> IndexMap<ParamKey, Parameter> {
+/// Collect resolved parameters from an operation, resolving component $refs.
+fn resolved_params(op: &openapiv3::Operation, spec: &OpenAPI) -> IndexMap<ParamKey, Parameter> {
     let mut map = IndexMap::new();
     for param_ref in &op.parameters {
         match param_ref {
@@ -162,10 +202,11 @@ fn resolved_params(op: &openapiv3::Operation) -> IndexMap<ParamKey, Parameter> {
                 map.insert(param_key(p), p.clone());
             }
             ReferenceOr::Reference { reference } => {
-                eprintln!(
-                    "warn: skipping $ref parameter '{}' (full $ref resolution deferred)",
-                    reference
-                );
+                if let Some(p) = resolve_parameter(spec, reference) {
+                    map.insert(param_key(p), p.clone());
+                } else {
+                    eprintln!("warn: could not resolve $ref parameter '{reference}'");
+                }
             }
         }
     }
@@ -176,10 +217,12 @@ fn diff_parameters(
     op_path: &str,
     base_op: &openapiv3::Operation,
     head_op: &openapiv3::Operation,
+    base_spec: &OpenAPI,
+    head_spec: &OpenAPI,
     changes: &mut Vec<DiffChange>,
 ) {
-    let base_params = resolved_params(base_op);
-    let head_params = resolved_params(head_op);
+    let base_params = resolved_params(base_op, base_spec);
+    let head_params = resolved_params(head_op, head_spec);
 
     // Required param added in head → Breaking RequiredChanged
     for (key, head_p) in &head_params {
@@ -192,6 +235,29 @@ fn diff_parameters(
                     "Required {} parameter '{}' was added",
                     key.location, key.name
                 )),
+            });
+        }
+    }
+
+    // Param removed from head → ParameterRemoved
+    for (key, base_p) in &base_params {
+        if !head_params.contains_key(key) {
+            let (severity, description) = if param_required(base_p) {
+                (
+                    Severity::Breaking,
+                    format!("Required {} parameter '{}' was removed", key.location, key.name),
+                )
+            } else {
+                (
+                    Severity::NonBreakingRisky,
+                    format!("Optional {} parameter '{}' was removed", key.location, key.name),
+                )
+            };
+            changes.push(DiffChange {
+                path: format!("{} \u{2192} param.{}", op_path, key.name),
+                kind: ChangeKind::ParameterRemoved,
+                severity,
+                description: Some(description),
             });
         }
     }
@@ -232,6 +298,117 @@ fn param_type_label(p: &Parameter) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Request body diffing
+// ---------------------------------------------------------------------------
+
+fn diff_request_body(
+    op_path: &str,
+    base_op: &openapiv3::Operation,
+    head_op: &openapiv3::Operation,
+    base_spec: &OpenAPI,
+    head_spec: &OpenAPI,
+    changes: &mut Vec<DiffChange>,
+) {
+    let base_rb: Option<&RequestBody> = match base_op.request_body.as_ref() {
+        None => None,
+        Some(ReferenceOr::Item(rb)) => Some(rb),
+        Some(ReferenceOr::Reference { reference }) => {
+            if let Some(rb) = resolve_request_body(base_spec, reference) {
+                Some(rb)
+            } else {
+                eprintln!("warn: could not resolve $ref requestBody '{reference}'");
+                None
+            }
+        }
+    };
+    let head_rb: Option<&RequestBody> = match head_op.request_body.as_ref() {
+        None => None,
+        Some(ReferenceOr::Item(rb)) => Some(rb),
+        Some(ReferenceOr::Reference { reference }) => {
+            if let Some(rb) = resolve_request_body(head_spec, reference) {
+                Some(rb)
+            } else {
+                eprintln!("warn: could not resolve $ref requestBody '{reference}'");
+                None
+            }
+        }
+    };
+
+    match (base_rb, head_rb) {
+        (None, None) => {}
+        (Some(_), None) => {
+            changes.push(DiffChange {
+                path: format!("{} \u{2192} request_body", op_path),
+                kind: ChangeKind::RequestBodyRemoved,
+                severity: Severity::Breaking,
+                description: Some("Request body was removed".to_string()),
+            });
+        }
+        (None, Some(head)) => {
+            let severity = if head.required { Severity::Breaking } else { Severity::Safe };
+            changes.push(DiffChange {
+                path: format!("{} \u{2192} request_body", op_path),
+                kind: ChangeKind::RequestBodyAdded,
+                severity,
+                description: Some(if head.required {
+                    "Required request body was added".to_string()
+                } else {
+                    "Optional request body was added".to_string()
+                }),
+            });
+        }
+        (Some(base), Some(head)) => {
+            if let (Some(base_media), Some(head_media)) = (
+                base.content.get("application/json"),
+                head.content.get("application/json"),
+            ) {
+                if let (Some(base_schema_ref), Some(head_schema_ref)) =
+                    (&base_media.schema, &head_media.schema)
+                {
+                    let base_schema: &Schema = match base_schema_ref {
+                        ReferenceOr::Item(s) => s,
+                        ReferenceOr::Reference { reference } => {
+                            match resolve_schema(base_spec, reference) {
+                                Some(s) => s,
+                                None => {
+                                    eprintln!(
+                                        "warn: could not resolve $ref schema '{reference}'"
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                    };
+                    let head_schema: &Schema = match head_schema_ref {
+                        ReferenceOr::Item(s) => s,
+                        ReferenceOr::Reference { reference } => {
+                            match resolve_schema(head_spec, reference) {
+                                Some(s) => s,
+                                None => {
+                                    eprintln!(
+                                        "warn: could not resolve $ref schema '{reference}'"
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                    };
+                    diff_schema_properties(
+                        op_path,
+                        "request_body",
+                        base_schema,
+                        head_schema,
+                        base_spec,
+                        head_spec,
+                        changes,
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Response schema diffing
 // ---------------------------------------------------------------------------
 
@@ -239,6 +416,8 @@ fn diff_responses(
     op_path: &str,
     base_op: &openapiv3::Operation,
     head_op: &openapiv3::Operation,
+    base_spec: &OpenAPI,
+    head_spec: &OpenAPI,
     changes: &mut Vec<DiffChange>,
 ) {
     let base_responses = &base_op.responses.responses;
@@ -249,27 +428,42 @@ fn diff_responses(
             continue;
         }
 
-        let base_resp = match base_resp_ref {
+        let base_resp: &Response = match base_resp_ref {
             ReferenceOr::Item(r) => r,
             ReferenceOr::Reference { reference } => {
-                eprintln!(
-                    "warn: skipping $ref response '{}' (full $ref resolution deferred)",
-                    reference
-                );
-                continue;
+                match resolve_response(base_spec, reference) {
+                    Some(r) => r,
+                    None => {
+                        eprintln!("warn: could not resolve $ref response '{reference}'");
+                        continue;
+                    }
+                }
             }
         };
 
-        let head_resp = match head_responses.get(status) {
+        let head_resp: &Response = match head_responses.get(status) {
             Some(ReferenceOr::Item(r)) => r,
             Some(ReferenceOr::Reference { reference }) => {
-                eprintln!(
-                    "warn: skipping $ref response '{}' (full $ref resolution deferred)",
-                    reference
-                );
+                match resolve_response(head_spec, reference) {
+                    Some(r) => r,
+                    None => {
+                        eprintln!("warn: could not resolve $ref response '{reference}'");
+                        continue;
+                    }
+                }
+            }
+            None => {
+                changes.push(DiffChange {
+                    path: format!("{} \u{2192} response.{}", op_path, status_code_str(status)),
+                    kind: ChangeKind::ResponseRemoved,
+                    severity: Severity::Breaking,
+                    description: Some(format!(
+                        "Response status {} was removed",
+                        status_code_str(status)
+                    )),
+                });
                 continue;
             }
-            None => continue,
         };
 
         // Compare application/json content schemas
@@ -280,28 +474,34 @@ fn diff_responses(
             if let (Some(base_schema_ref), Some(head_schema_ref)) =
                 (&base_media.schema, &head_media.schema)
             {
-                let base_schema = match base_schema_ref {
+                let base_schema: &Schema = match base_schema_ref {
                     ReferenceOr::Item(s) => s,
                     ReferenceOr::Reference { reference } => {
-                        eprintln!(
-                            "warn: skipping $ref schema '{}' (full $ref resolution deferred)",
-                            reference
-                        );
-                        continue;
+                        match resolve_schema(base_spec, reference) {
+                            Some(s) => s,
+                            None => {
+                                eprintln!("warn: could not resolve $ref schema '{reference}'");
+                                continue;
+                            }
+                        }
                     }
                 };
-                let head_schema = match head_schema_ref {
+                let head_schema: &Schema = match head_schema_ref {
                     ReferenceOr::Item(s) => s,
                     ReferenceOr::Reference { reference } => {
-                        eprintln!(
-                            "warn: skipping $ref schema '{}' (full $ref resolution deferred)",
-                            reference
-                        );
-                        continue;
+                        match resolve_schema(head_spec, reference) {
+                            Some(s) => s,
+                            None => {
+                                eprintln!("warn: could not resolve $ref schema '{reference}'");
+                                continue;
+                            }
+                        }
                     }
                 };
 
-                diff_schema_properties(op_path, "response", base_schema, head_schema, changes);
+                diff_schema_properties(
+                    op_path, "response", base_schema, head_schema, base_spec, head_spec, changes,
+                );
             }
         }
     }
@@ -311,6 +511,13 @@ fn is_2xx(status: &StatusCode) -> bool {
     match status {
         StatusCode::Code(n) => *n >= 200 && *n < 300,
         StatusCode::Range(n) => *n == 2,
+    }
+}
+
+fn status_code_str(status: &StatusCode) -> String {
+    match status {
+        StatusCode::Code(n) => n.to_string(),
+        StatusCode::Range(n) => format!("{n}XX"),
     }
 }
 
@@ -326,11 +533,37 @@ fn diff_schema_properties(
     prefix: &str,
     base_schema: &Schema,
     head_schema: &Schema,
+    base_spec: &OpenAPI,
+    head_spec: &OpenAPI,
     changes: &mut Vec<DiffChange>,
 ) {
+    // Nullable changes — applies to any schema kind
+    let base_nullable = base_schema.schema_data.nullable;
+    let head_nullable = head_schema.schema_data.nullable;
+    if base_nullable != head_nullable {
+        changes.push(DiffChange {
+            path: format!("{} \u{2192} {}", op_path, prefix),
+            kind: ChangeKind::NullabilityChanged,
+            severity: if base_nullable && !head_nullable {
+                Severity::Breaking // nullable → non-nullable breaks consumers that send null
+            } else {
+                Severity::Safe // non-nullable → nullable is more permissive
+            },
+            description: Some(format!(
+                "'{}' changed from {} to {}",
+                prefix,
+                if base_nullable { "nullable" } else { "non-nullable" },
+                if head_nullable { "nullable" } else { "non-nullable" },
+            )),
+        });
+    }
+
+    // Enum value changes — applies to string/integer schemas
+    diff_enum_values(op_path, prefix, base_schema, head_schema, changes);
+
     let (base_obj, head_obj) = match (&base_schema.schema_kind, &head_schema.schema_kind) {
         (SchemaKind::Type(Type::Object(b)), SchemaKind::Type(Type::Object(h))) => (b, h),
-        _ => return, // Only handle pure Object types for now
+        _ => return,
     };
 
     // Properties removed → FieldRemoved (Breaking)
@@ -366,23 +599,23 @@ fn diff_schema_properties(
 
         let base_prop_schema: &Schema = match base_prop_ref {
             ReferenceOr::Item(s) => s,
-            ReferenceOr::Reference { reference } => {
-                eprintln!(
-                    "warn: skipping $ref property schema '{}' (full $ref resolution deferred)",
-                    reference
-                );
-                continue;
-            }
+            ReferenceOr::Reference { reference } => match resolve_schema(base_spec, reference) {
+                Some(s) => s,
+                None => {
+                    eprintln!("warn: could not resolve $ref property schema '{reference}'");
+                    continue;
+                }
+            },
         };
         let head_prop_schema: &Schema = match head_prop_ref {
             ReferenceOr::Item(s) => s,
-            ReferenceOr::Reference { reference } => {
-                eprintln!(
-                    "warn: skipping $ref property schema '{}' (full $ref resolution deferred)",
-                    reference
-                );
-                continue;
-            }
+            ReferenceOr::Reference { reference } => match resolve_schema(head_spec, reference) {
+                Some(s) => s,
+                None => {
+                    eprintln!("warn: could not resolve $ref property schema '{reference}'");
+                    continue;
+                }
+            },
         };
 
         // Type changed? → Breaking TypeChanged
@@ -438,26 +671,87 @@ fn diff_schema_properties(
             &nested_prefix,
             base_prop_schema,
             head_prop_schema,
+            base_spec,
+            head_spec,
             changes,
         );
     }
 }
 
+fn diff_enum_values(
+    op_path: &str,
+    prefix: &str,
+    base_schema: &Schema,
+    head_schema: &Schema,
+    changes: &mut Vec<DiffChange>,
+) {
+    let base_enums = extract_enum_values(base_schema);
+    let head_enums = extract_enum_values(head_schema);
+
+    if base_enums.is_empty() && head_enums.is_empty() {
+        return;
+    }
+
+    for v in &base_enums {
+        if !head_enums.contains(v) {
+            changes.push(DiffChange {
+                path: format!("{} \u{2192} {}", op_path, prefix),
+                kind: ChangeKind::EnumValueRemoved,
+                severity: Severity::Breaking,
+                description: Some(format!("Enum value '{}' was removed from '{}'", v, prefix)),
+            });
+        }
+    }
+
+    for v in &head_enums {
+        if !base_enums.contains(v) {
+            changes.push(DiffChange {
+                path: format!("{} \u{2192} {}", op_path, prefix),
+                kind: ChangeKind::EnumValueAdded,
+                severity: Severity::NonBreakingRisky,
+                description: Some(format!("Enum value '{}' was added to '{}'", v, prefix)),
+            });
+        }
+    }
+}
+
+fn extract_enum_values(schema: &Schema) -> Vec<String> {
+    match &schema.schema_kind {
+        SchemaKind::Type(Type::String(s)) => s
+            .enumeration
+            .iter()
+            .filter_map(|v| v.as_deref().map(String::from))
+            .collect(),
+        SchemaKind::Type(Type::Integer(i)) => {
+            i.enumeration.iter().filter_map(|v| *v).map(|v| v.to_string()).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Return a short string describing the primitive type of a schema kind.
+/// For arrays, includes the item type: "array<string>", "array<integer>", etc.
 /// Returns `None` for complex/compound kinds.
 fn type_label_from_kind(kind: &SchemaKind) -> Option<String> {
     match kind {
-        SchemaKind::Type(t) => Some(
-            match t {
-                Type::String(_) => "string",
-                Type::Number(_) => "number",
-                Type::Integer(_) => "integer",
-                Type::Boolean(_) => "boolean",
-                Type::Array(_) => "array",
-                Type::Object(_) => "object",
+        SchemaKind::Type(t) => Some(match t {
+            Type::String(_) => "string".to_string(),
+            Type::Number(_) => "number".to_string(),
+            Type::Integer(_) => "integer".to_string(),
+            Type::Boolean(_) => "boolean".to_string(),
+            Type::Object(_) => "object".to_string(),
+            Type::Array(a) => {
+                let item_label = a
+                    .items
+                    .as_ref()
+                    .and_then(|items_ref| match items_ref {
+                        ReferenceOr::Item(s) => type_label_from_kind(&s.schema_kind),
+                        ReferenceOr::Reference { .. } => None,
+                    })
+                    .unwrap_or_else(|| "any".to_string());
+                format!("array<{item_label}>")
             }
-            .to_string(),
-        ),
+        }),
         _ => None,
     }
 }
@@ -759,6 +1053,733 @@ paths:
             required_changed[0].path.contains("filter"),
             "Expected path to mention 'filter', got: {}",
             required_changed[0].path
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. Required parameter removed → Breaking ParameterRemoved
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_required_parameter_removed_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      parameters:
+        - name: filter
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::ParameterRemoved && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(removed.len(), 1, "Expected 1 ParameterRemoved/Breaking, got: {:?}", changes);
+        assert!(removed[0].path.contains("filter"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. Optional parameter removed → NonBreakingRisky ParameterRemoved
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_optional_parameter_removed_is_risky() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      parameters:
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| {
+                c.kind == ChangeKind::ParameterRemoved
+                    && c.severity == Severity::NonBreakingRisky
+            })
+            .collect();
+        assert_eq!(
+            removed.len(),
+            1,
+            "Expected 1 ParameterRemoved/NonBreakingRisky, got: {:?}",
+            changes
+        );
+        assert!(removed[0].path.contains("sort"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. 2xx status code removed from head → Breaking ResponseRemoved
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_status_code_removed_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /items:
+    post:
+      responses:
+        '200':
+          description: updated
+        '201':
+          description: created
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /items:
+    post:
+      responses:
+        '200':
+          description: updated
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::ResponseRemoved && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(removed.len(), 1, "Expected 1 ResponseRemoved/Breaking, got: {:?}", changes);
+        assert!(
+            removed[0].path.contains("201"),
+            "Expected path to mention '201', got: {}",
+            removed[0].path
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. Required request body added → Breaking RequestBodyAdded
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_required_request_body_added_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /items:
+    post:
+      responses:
+        '201':
+          description: created
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /items:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '201':
+          description: created
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let added: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::RequestBodyAdded && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(added.len(), 1, "Expected 1 RequestBodyAdded/Breaking, got: {:?}", changes);
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. Optional request body added → Safe RequestBodyAdded
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_optional_request_body_added_is_safe() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /items:
+    post:
+      responses:
+        '201':
+          description: created
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /items:
+    post:
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '201':
+          description: created
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let added: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::RequestBodyAdded && c.severity == Severity::Safe)
+            .collect();
+        assert_eq!(added.len(), 1, "Expected 1 RequestBodyAdded/Safe, got: {:?}", changes);
+    }
+
+    // -----------------------------------------------------------------------
+    // 13. Request body removed → Breaking RequestBodyRemoved
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_request_body_removed_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /items:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+      responses:
+        '201':
+          description: created
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /items:
+    post:
+      responses:
+        '201':
+          description: created
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| {
+                c.kind == ChangeKind::RequestBodyRemoved && c.severity == Severity::Breaking
+            })
+            .collect();
+        assert_eq!(removed.len(), 1, "Expected 1 RequestBodyRemoved/Breaking, got: {:?}", changes);
+    }
+
+    // -----------------------------------------------------------------------
+    // 14. Request body field removed → Breaking FieldRemoved
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_request_body_field_removed_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /items:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                tags:
+                  type: string
+      responses:
+        '201':
+          description: created
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /items:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+      responses:
+        '201':
+          description: created
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::FieldRemoved && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(removed.len(), 1, "Expected 1 FieldRemoved/Breaking, got: {:?}", changes);
+        assert!(
+            removed[0].path.contains("tags"),
+            "Expected path to mention 'tags', got: {}",
+            removed[0].path
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 15. Enum value removed → Breaking EnumValueRemoved
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_enum_value_removed_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [active, inactive, suspended]
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [active, inactive]
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::EnumValueRemoved && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(removed.len(), 1, "Expected 1 EnumValueRemoved/Breaking, got: {:?}", changes);
+        assert!(
+            removed[0]
+                .description
+                .as_deref()
+                .unwrap_or("")
+                .contains("suspended"),
+            "Expected description to mention 'suspended', got: {:?}",
+            removed[0].description
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 16. Enum value added → NonBreakingRisky EnumValueAdded
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_enum_value_added_is_risky() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [active, inactive]
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [active, inactive, pending]
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let added: Vec<_> = changes
+            .iter()
+            .filter(|c| {
+                c.kind == ChangeKind::EnumValueAdded && c.severity == Severity::NonBreakingRisky
+            })
+            .collect();
+        assert_eq!(added.len(), 1, "Expected 1 EnumValueAdded/NonBreakingRisky, got: {:?}", changes);
+        assert!(
+            added[0]
+                .description
+                .as_deref()
+                .unwrap_or("")
+                .contains("pending"),
+            "Expected description to mention 'pending', got: {:?}",
+            added[0].description
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 17. Nullable true→false → Breaking NullabilityChanged
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_nullable_removed_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nickname:
+                    type: string
+                    nullable: true
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nickname:
+                    type: string
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let changed: Vec<_> = changes
+            .iter()
+            .filter(|c| {
+                c.kind == ChangeKind::NullabilityChanged && c.severity == Severity::Breaking
+            })
+            .collect();
+        assert_eq!(
+            changed.len(),
+            1,
+            "Expected 1 NullabilityChanged/Breaking, got: {:?}",
+            changes
+        );
+        assert!(changed[0].path.contains("nickname"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 18. Nullable false→true → Safe NullabilityChanged
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_nullable_added_is_safe() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nickname:
+                    type: string
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nickname:
+                    type: string
+                    nullable: true
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let changed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::NullabilityChanged && c.severity == Severity::Safe)
+            .collect();
+        assert_eq!(changed.len(), 1, "Expected 1 NullabilityChanged/Safe, got: {:?}", changes);
+        assert!(changed[0].path.contains("nickname"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 19. Array item type changed → Breaking TypeChanged
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_array_item_type_changed_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ids:
+                    type: array
+                    items:
+                      type: string
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ids:
+                    type: array
+                    items:
+                      type: integer
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let type_changed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(type_changed.len(), 1, "Expected 1 TypeChanged/Breaking, got: {:?}", changes);
+        assert!(type_changed[0].path.contains("ids"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 20. $ref component schema — field removal detected through reference
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_ref_component_schema_field_removal_detected() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users/{id}:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+components:
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users/{id}:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+components:
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::FieldRemoved && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(removed.len(), 1, "Expected 1 FieldRemoved through $ref, got: {:?}", changes);
+        assert!(
+            removed[0].path.contains("phone"),
+            "Expected path to mention 'phone', got: {}",
+            removed[0].path
         );
     }
 

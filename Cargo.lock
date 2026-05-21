@@ -1851,6 +1851,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sqlx",
  "thiserror 1.0.69",
  "tokio",

@@ -5,7 +5,9 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use radar_core::models::Severity;
 
+mod ai_provider;
 mod api_client;
+mod apitesting;
 mod claude;
 mod explain;
 mod github;
@@ -478,6 +480,8 @@ async fn main() -> Result<()> {
             if records.is_empty() {
                 return Ok(());
             }
+
+            eprintln!("Note: call sites posted without operation context — field-path-only matching will be used for blast radius.");
 
             let sites: Vec<api_client::CallSiteBody> = records
                 .into_iter()

@@ -1,14 +1,24 @@
 openapi: "3.0.3"
 info:
   title: Radar Monitor API
-  version: "0.1.0"
+  version: "0.2.0"
   description: |
     API Contract Radar Monitor — blast-radius-aware schema diff service.
 
-    Authentication: set `RADAR_SERVICE_TOKEN` on the server and pass
-    `Authorization: Bearer <token>` on every `/v1/*` request.
-    When `RADAR_JWT_SECRET` is set, HS256 JWTs are required instead; the
-    JWT must contain `sub` and `org_id` claims.
+    **Authentication**
+
+    Two modes (configure on the server, not both at once):
+
+    - **JWT mode** — set `RADAR_JWT_SECRET` on the server. Clients must pass an HS256 JWT
+      with `sub` and `org_id` claims in `Authorization: Bearer <token>`.
+      The `org_id` claim scopes all service/consumer reads and writes to that organisation.
+
+    - **Service-token mode** — set `RADAR_SERVICE_TOKEN` on the server. Clients must pass
+      `Authorization: Bearer <token>` where the token matches exactly.
+
+    When neither env var is set, authentication is **optional** (dev mode).
+    Set `RADAR_REQUIRE_AUTH=true` to force rejection of unauthenticated requests
+    even without a token configured.
   contact:
     name: Radar Monitor
   license:
@@ -16,7 +26,9 @@ info:
 
 servers:
   - url: http://localhost:8080
-    description: Local development
+    description: Local development (Vite proxy or direct)
+  - url: http://localhost:8080/app
+    description: Docker / web self-host (UI served from /app)
 
 tags:
   - name: health
@@ -26,31 +38,42 @@ tags:
   - name: blast-radius
   - name: usage
   - name: scan
+  - name: release-notes
+  - name: generate-tests
+  - name: playground
+  - name: settings
+  - name: spec-versions
 
 paths:
   /health:
     get:
       tags: [health]
-      summary: Health check
+      summary: Health check — probes DB connectivity
       operationId: health
       security: []
       responses:
         "200":
-          description: Service is healthy
+          description: Service is healthy and DB is reachable
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: ok
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Service is degraded (DB unreachable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
 
   /v1/services:
     get:
       tags: [services]
       summary: List all producer services
       operationId: listServices
+      description: |
+        When authenticated with a JWT, only services whose `org_id` matches
+        the caller's JWT `org_id` claim are returned. Without a JWT all
+        services are listed.
       responses:
         "200":
           description: Array of services
@@ -60,6 +83,44 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Service"
+    post:
+      tags: [services]
+      summary: Register a producer service
+      operationId: createService
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateServiceRequest"
+      responses:
+        "201":
+          description: Service created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Service"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/services/{serviceId}:
+    parameters:
+      - $ref: "#/components/parameters/serviceId"
+    get:
+      tags: [services]
+      summary: Get a producer service by ID
+      operationId: getService
+      responses:
+        "200":
+          description: Service detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Service"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/services/{serviceId}/diffs:
     parameters:
@@ -79,7 +140,7 @@ paths:
                   $ref: "#/components/schemas/DiffSummary"
     post:
       tags: [diffs]
-      summary: Create a new diff (post spec changes)
+      summary: Create a new diff (post spec changes from CI)
       operationId: createDiff
       requestBody:
         required: true
@@ -146,6 +207,9 @@ paths:
       tags: [consumers]
       summary: List all consumers
       operationId: listAllConsumers
+      description: |
+        When authenticated with a JWT, only consumers whose `org_id` matches
+        the caller's JWT `org_id` claim are returned.
       responses:
         "200":
           description: Array of consumers
@@ -172,15 +236,29 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Consumer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
 
   /v1/diffs:
     get:
       tags: [diffs]
       summary: List all diffs across all services (newest 100)
       operationId: listAllDiffs
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
       responses:
         "200":
-          description: Array of diffs
+          description: Array of diffs with change counts
           content:
             application/json:
               schema:
@@ -210,7 +288,15 @@ paths:
       - $ref: "#/components/parameters/diffId"
     get:
       tags: [blast-radius]
-      summary: Get the blast radius (affected consumers) for a diff
+      summary: Get blast radius (affected consumers) for a diff
+      description: |
+        Returns one entry per subscribed consumer that has evidence of using
+        any field touched by a breaking change in this diff.
+
+        Confidence levels:
+        - **high** — runtime usage event within the last 7 days
+        - **medium** — runtime usage event within the last 30 days
+        - **low** — call-site from static scan only (no runtime event)
       operationId: getBlastRadius
       responses:
         "200":
@@ -221,6 +307,286 @@ paths:
                 $ref: "#/components/schemas/BlastRadius"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /v1/diffs/{diffId}/release-notes:
+    parameters:
+      - $ref: "#/components/parameters/diffId"
+    post:
+      tags: [release-notes]
+      summary: Store AI-generated release notes for a diff
+      operationId: createReleaseNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  description: Markdown release notes content
+      responses:
+        "201":
+          description: Release note created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReleaseNote"
+
+  /v1/release-notes:
+    get:
+      tags: [release-notes]
+      summary: List all stored release notes
+      operationId: listReleaseNotes
+      responses:
+        "200":
+          description: Array of release note rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReleaseNoteRow"
+
+  /v1/release-notes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [release-notes]
+      summary: Get a release note with full markdown content
+      operationId: getReleaseNote
+      responses:
+        "200":
+          description: Release note detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReleaseNote"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/spec-versions:
+    get:
+      tags: [spec-versions]
+      summary: List all stored spec versions
+      operationId: listSpecVersions
+      responses:
+        "200":
+          description: Array of spec version summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SpecVersionSummary"
+
+  /v1/spec-versions/{id}/raw:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [spec-versions]
+      summary: Get the raw spec YAML for a stored spec version
+      operationId: getSpecVersionRaw
+      responses:
+        "200":
+          description: Raw YAML content
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/generate-tests:
+    get:
+      tags: [generate-tests]
+      summary: List previously generated test suites
+      operationId: listTestSuites
+      responses:
+        "200":
+          description: Array of test suite summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TestSuiteSummary"
+    post:
+      tags: [generate-tests]
+      summary: Generate a Postman Collection and api-testing YAML from a Jira ticket + spec
+      operationId: generateTests
+      description: |
+        Uses the configured AI provider (ANTHROPIC_API_KEY, OPENAI_API_KEY, or
+        GITHUB_COPILOT_TOKEN) to generate test cases from a Jira ticket description
+        and an OpenAPI spec. Either `jira_key` (fetched from Jira) or
+        `jira_summary` + `jira_description` must be provided.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateTestsRequest"
+      responses:
+        "201":
+          description: Test suite generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestSuiteDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          description: No AI provider configured
+
+  /v1/generate-tests/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [generate-tests]
+      summary: Get a generated test suite with full collection JSON and api-testing YAML
+      operationId: getTestSuite
+      responses:
+        "200":
+          description: Test suite detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestSuiteDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/sandbox-envs:
+    get:
+      tags: [playground]
+      summary: List shared sandbox environments for the API Playground
+      operationId: listSandboxEnvs
+      description: Bearer tokens are masked in the response — only the last 4 characters are shown.
+      responses:
+        "200":
+          description: Array of sandbox environments
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SandboxEnv"
+    post:
+      tags: [playground]
+      summary: Create a sandbox environment
+      operationId: createSandboxEnv
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSandboxEnvRequest"
+      responses:
+        "201":
+          description: Sandbox environment created (bearer_token is masked in response)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxEnv"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /v1/sandbox-envs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    put:
+      tags: [playground]
+      summary: Update a sandbox environment
+      operationId: updateSandboxEnv
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSandboxEnvRequest"
+      responses:
+        "200":
+          description: Sandbox environment updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxEnv"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [playground]
+      summary: Delete a sandbox environment
+      operationId: deleteSandboxEnv
+      responses:
+        "204":
+          description: Deleted
+
+  /v1/settings:
+    get:
+      tags: [settings]
+      summary: Get application settings
+      operationId: getSettings
+      responses:
+        "200":
+          description: Current settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppSettings"
+    put:
+      tags: [settings]
+      summary: Update application settings
+      operationId: updateSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppSettings"
+      responses:
+        "200":
+          description: Settings updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppSettings"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /v1/settings/integrations:
+    get:
+      tags: [settings]
+      summary: Get integration status (read-only, reflects server env vars)
+      operationId: getIntegrations
+      responses:
+        "200":
+          description: Integration configuration status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntegrationStatus"
 
   /v1/usage/events:
     post:
@@ -308,12 +674,39 @@ components:
       content:
         application/json:
           schema:
-            type: object
-            properties:
-              error:
-                type: string
+            $ref: "#/components/schemas/ErrorResponse"
+    BadRequest:
+      description: Invalid request body or parameters
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Resource already exists
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
 
   schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        db:
+          type: string
+          enum: [ok, unreachable]
+        version:
+          type: string
+
     Service:
       type: object
       properties:
@@ -331,6 +724,25 @@ components:
           enum: [openapi, graphql, protobuf]
         org_id:
           type: string
+          description: Populated from JWT org_id claim on create; empty string for unauthenticated creates.
+
+    CreateServiceRequest:
+      type: object
+      required: [name, spec_format]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        repo_url:
+          type: string
+          default: ""
+        owner_team:
+          type: string
+          default: ""
+        spec_format:
+          type: string
+          enum: [openapi, graphql, protobuf]
+          default: openapi
 
     Consumer:
       type: object
@@ -383,6 +795,9 @@ components:
         spec_format:
           type: string
           enum: [openapi, graphql, protobuf]
+        spec_yaml:
+          type: string
+          description: Full spec YAML for the head version; stored for Playground use.
         changes:
           type: array
           items:
@@ -396,7 +811,25 @@ components:
           type: string
         kind:
           type: string
-          enum: [field_removed, field_added, type_changed, required_changed, operation_removed, operation_added]
+          enum:
+            - field_removed
+            - field_added
+            - type_changed
+            - required_changed
+            - operation_removed
+            - operation_added
+            - enum_value_removed
+            - enum_value_added
+            - nullable_removed
+            - nullable_added
+            - required_field_added
+            - optional_request_body_added
+            - required_request_body_added
+            - request_body_removed
+            - request_body_field_removed
+            - response_field_removed
+            - response_field_added
+            - status_code_removed
         severity:
           type: string
           enum: [breaking, non_breaking_risky, safe]
@@ -498,9 +931,223 @@ components:
         last_seen:
           type: string
           format: date-time
+          nullable: true
         has_runtime_usage:
           type: boolean
         has_call_site:
+          type: boolean
+        evidence:
+          type: array
+          description: Up to 5 evidence items explaining why this consumer is affected.
+          items:
+            $ref: "#/components/schemas/EvidenceItem"
+
+    EvidenceItem:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [runtime_usage, call_site]
+        operation:
+          type: string
+        field_path:
+          type: string
+        recorded_at:
+          type: string
+          description: Present for kind=runtime_usage
+        file_path:
+          type: string
+          description: Present for kind=call_site
+        line_number:
+          type: integer
+          description: Present for kind=call_site
+        last_seen_at:
+          type: string
+          description: Present for kind=call_site
+
+    ReleaseNoteRow:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        diff_id:
+          type: string
+          format: uuid
+        from_git_ref:
+          type: string
+        to_git_ref:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    ReleaseNote:
+      allOf:
+        - $ref: "#/components/schemas/ReleaseNoteRow"
+        - type: object
+          properties:
+            content:
+              type: string
+              description: Markdown release notes content
+
+    SpecVersionSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+        git_ref:
+          type: string
+        captured_at:
+          type: string
+          format: date-time
+        spec_format:
+          type: string
+
+    TestSuiteSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        jira_key:
+          type: string
+          nullable: true
+        jira_summary:
+          type: string
+          nullable: true
+        collection_name:
+          type: string
+        test_count:
+          type: integer
+        happy_count:
+          type: integer
+        negative_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    TestSuiteDetail:
+      allOf:
+        - $ref: "#/components/schemas/TestSuiteSummary"
+        - type: object
+          properties:
+            collection_json:
+              type: object
+              description: Full Postman Collection v2.1 JSON
+            apitesting_yaml:
+              type: string
+              nullable: true
+              description: api-testing YAML suite
+
+    GenerateTestsRequest:
+      type: object
+      properties:
+        jira_key:
+          type: string
+          description: Fetch ticket content from Jira (requires JIRA_* env vars on server).
+        jira_summary:
+          type: string
+          description: Ticket title (used when jira_key is not provided).
+        jira_description:
+          type: string
+          description: Ticket body (used when jira_key is not provided).
+        spec_yaml:
+          type: string
+          description: OpenAPI spec YAML to generate tests against.
+        base_url:
+          type: string
+          description: Base URL injected into the generated collection.
+          default: "http://localhost:8080"
+
+    SandboxEnv:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        base_url:
+          type: string
+        bearer_token:
+          type: string
+          description: Masked — only the last 4 characters are returned (e.g. ***n123).
+        bearer_token_set:
+          type: boolean
+          description: Whether a bearer token is stored for this environment.
+        description:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateSandboxEnvRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        base_url:
+          type: string
+          default: ""
+        bearer_token:
+          type: string
+          default: ""
+          description: Stored securely; only the last 4 chars are returned in responses.
+        description:
+          type: string
+          default: ""
+
+    AppSettings:
+      type: object
+      properties:
+        policy_block_on:
+          type: string
+          enum: [active_consumers, any_break, never]
+          default: active_consumers
+          description: When to block CI — active_consumers, any_break, or never (warn only).
+        policy_lookback_days:
+          type: integer
+          minimum: 1
+          maximum: 365
+          default: 30
+          description: Days of usage history used to classify a consumer as active.
+        policy_allow_override_with:
+          type: string
+          nullable: true
+          description: GitHub PR label that bypasses blocking (null to disable).
+        retention_days:
+          type: integer
+          minimum: 1
+          maximum: 3650
+          default: 90
+          description: Usage events older than this are purged automatically each hour.
+
+    IntegrationStatus:
+      type: object
+      properties:
+        anthropic:
+          type: boolean
+        openai:
+          type: boolean
+        openai_enterprise:
+          type: boolean
+        github_copilot:
+          type: boolean
+        jira:
+          type: boolean
+        github:
+          type: boolean
+        postman:
           type: boolean
 
     UsageEvent:
@@ -533,6 +1180,7 @@ components:
         operation:
           type: string
           default: ""
+          description: May be empty if the scanner could not determine the operation context.
         file_path:
           type: string
         line_number:
@@ -556,6 +1204,7 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
+      bearerFormat: JWT
 
 security:
   - bearerAuth: []

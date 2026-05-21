@@ -6,11 +6,8 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages";
-const MODEL: &str = "claude-sonnet-4-6";
-
 // ---------------------------------------------------------------------------
-// Claude response types
+// AI response types
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -20,81 +17,69 @@ struct GeneratedSuite {
 }
 
 #[derive(Deserialize)]
-struct GeneratedTestCase {
-    name: String,
-    category: String,
-    method: String,
-    path: String,
+pub struct GeneratedTestCase {
+    pub name: String,
+    pub category: String,
+    pub method: String,
+    pub path: String,
     #[serde(default)]
-    path_params: HashMap<String, String>,
+    pub path_params: HashMap<String, String>,
     #[serde(default)]
-    query_params: HashMap<String, String>,
-    body: Option<serde_json::Value>,
-    expected_status: u16,
+    pub query_params: HashMap<String, String>,
+    pub body: Option<serde_json::Value>,
+    pub expected_status: u16,
     #[serde(default)]
-    assertions: Vec<String>,
+    pub assertions: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Generate a Postman Collection v2.1 from a Jira ticket description and OpenAPI spec.
-/// Requires ANTHROPIC_API_KEY to be set.
+/// Generate both a Postman Collection v2.1 and an api-testing YAML suite from a
+/// single Claude call. Returns `(postman_collection, apitesting_yaml)`.
+pub async fn generate_both(
+    jira_summary: &str,
+    jira_description: &str,
+    spec_yaml: &str,
+    base_url: &str,
+) -> anyhow::Result<(Collection, String)> {
+    let suite = call_claude(jira_summary, jira_description, spec_yaml).await?;
+    let yaml = crate::apitesting::assemble_suite(&suite.collection_name, &suite.test_cases, base_url)
+        .unwrap_or_default();
+    let collection = assemble_collection(suite, base_url);
+    Ok((collection, yaml))
+}
+
+/// Convenience wrapper that returns only the Postman Collection (discards YAML).
 pub async fn generate_test_collection(
     jira_summary: &str,
     jira_description: &str,
     spec_yaml: &str,
     base_url: &str,
-) -> Result<Collection> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| anyhow::anyhow!("ANTHROPIC_API_KEY is not set"))?;
+) -> anyhow::Result<Collection> {
+    let (collection, _yaml) = generate_both(jira_summary, jira_description, spec_yaml, base_url).await?;
+    Ok(collection)
+}
 
-    // Truncate spec to keep prompt within token budget.
-    let spec_excerpt = if spec_yaml.len() > 40_000 {
-        &spec_yaml[..40_000]
-    } else {
-        spec_yaml
-    };
-
+/// Call the configured AI provider once and return the parsed intermediate suite.
+async fn call_claude(
+    jira_summary: &str,
+    jira_description: &str,
+    spec_yaml: &str,
+) -> Result<GeneratedSuite> {
+    let spec_excerpt = if spec_yaml.len() > 40_000 { &spec_yaml[..40_000] } else { spec_yaml };
     let prompt = build_prompt(jira_summary, jira_description, spec_excerpt);
 
-    let body = serde_json::json!({
-        "model": MODEL,
-        "max_tokens": 4096,
-        "messages": [{"role": "user", "content": prompt}]
-    });
+    let raw_text = crate::ai_provider::complete(&prompt, 4096)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("No AI provider configured (set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GITHUB_COPILOT_TOKEN)"))?;
 
-    let resp = reqwest::Client::new()
-        .post(CLAUDE_API_URL)
-        .header("x-api-key", &api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await?;
+    let json_str = extract_json(&raw_text)
+        .ok_or_else(|| anyhow::anyhow!("AI response did not contain a JSON object"))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let err = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("Claude API error {status}: {err}"));
-    }
-
-    let claude_resp: serde_json::Value = resp.json().await?;
-    let raw_text = claude_resp["content"]
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|b| b["text"].as_str())
-        .ok_or_else(|| anyhow::anyhow!("unexpected Claude response format"))?;
-
-    let json_str = extract_json(raw_text)
-        .ok_or_else(|| anyhow::anyhow!("Claude response did not contain a JSON object"))?;
-
-    let suite: GeneratedSuite = serde_json::from_str(json_str).map_err(|e| {
-        anyhow::anyhow!("failed to parse Claude response: {e}\n\nRaw:\n{json_str}")
-    })?;
-
-    Ok(assemble_collection(suite, base_url))
+    serde_json::from_str(json_str)
+        .map_err(|e| anyhow::anyhow!("failed to parse AI response: {e}\n\nRaw:\n{json_str}"))
 }
 
 // ---------------------------------------------------------------------------

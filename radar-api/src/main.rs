@@ -45,7 +45,8 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     info!(db_url = %args.db, bind = %args.bind, "starting radar-api");
 
-    let db_url = args.db.as_str();
+    let db_url = radar_api::resolve_db_url(&args.db);
+    let db_url = db_url.as_str();
     let static_dir = args.static_dir.as_deref();
     let bind_addr = args.bind.as_str();
 
@@ -56,13 +57,23 @@ async fn main() -> Result<()> {
             .connect(db_url)
             .await?
     };
-    let retention_days = 90u32;
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+        let period = tokio::time::Duration::from_secs(3600);
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             interval.tick().await;
-            match radar_api::purge_old_usage_events(&pool_for_retention, retention_days).await {
-                Ok(n) => tracing::info!("retention: purged {n} old usage events"),
+            // Read retention_days from settings each tick so UI changes take effect.
+            let days: u32 = sqlx::query_scalar(
+                "SELECT value FROM settings WHERE key = 'retention.days'",
+            )
+            .fetch_optional(&pool_for_retention)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v: String| v.parse().ok())
+            .unwrap_or(90);
+            match radar_api::purge_old_usage_events(&pool_for_retention, days).await {
+                Ok(n) => tracing::info!("retention: purged {n} old usage events (window={days}d)"),
                 Err(e) => tracing::warn!("retention job failed: {e}"),
             }
         }

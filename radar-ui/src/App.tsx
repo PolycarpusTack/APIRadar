@@ -10,6 +10,7 @@ import ReleaseNotesPage from './pages/ReleaseNotesPage'
 import PlaygroundPage from './pages/PlaygroundPage'
 import GenerateTestsPage from './pages/GenerateTestsPage'
 import HelpPage from './pages/HelpPage'
+import SettingsPage from './pages/SettingsPage'
 
 const NAV = [
   {
@@ -173,6 +174,7 @@ export default function App() {
           <Route path="/playground" element={<PlaygroundPage />} />
           <Route path="/generate-tests" element={<GenerateTestsPage />} />
           <Route path="/help" element={<HelpPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>
     </div>

@@ -16,6 +16,13 @@ pub enum ChangeKind {
     RequiredChanged,
     OperationRemoved,
     OperationAdded,
+    ParameterRemoved,
+    ResponseRemoved,
+    EnumValueRemoved,
+    EnumValueAdded,
+    NullabilityChanged,
+    RequestBodyAdded,
+    RequestBodyRemoved,
 }
 
 /// How severe a change is for consumers.

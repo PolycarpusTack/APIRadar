@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 pub struct JiraTicket {
+    #[allow(dead_code)]
     pub key: String,
     pub summary: String,
     pub description: String,

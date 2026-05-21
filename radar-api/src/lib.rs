@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use sqlx::any::AnyPoolOptions;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tower_http::{cors::{AllowOrigin, Any, CorsLayer}, services::ServeDir, trace::TraceLayer};
+use tower_http::{cors::{AllowOrigin, Any, CorsLayer}, services::ServeDir, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing::info;
 use uuid::Uuid;
 
@@ -186,6 +186,39 @@ async fn request_id_middleware(mut req: Request, next: Next) -> Response {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+/// Resolve a SQLite URL with a relative path to an absolute one and
+/// pre-create the file so sqlx AnyPool can open it on all platforms.
+/// Non-SQLite URLs and `sqlite::memory:` are returned unchanged.
+pub fn resolve_db_url(db_url: &str) -> String {
+    let Some(rest) = db_url.strip_prefix("sqlite:") else {
+        return db_url.to_string();
+    };
+    let rest = rest.trim_start_matches('/');
+    if rest.is_empty() || rest == ":memory:" {
+        return db_url.to_string();
+    }
+    let path = std::path::Path::new(rest);
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    if !abs.exists() {
+        std::fs::File::create(&abs).ok();
+    }
+    // Forward slashes required for the sqlite: URL scheme on all platforms.
+    let s = abs.to_string_lossy().replace('\\', "/");
+    // Unix absolute paths start with '/'; Windows drive letters do not.
+    if s.starts_with('/') {
+        format!("sqlite://{s}")   // → sqlite:///unix/path
+    } else {
+        format!("sqlite:///{s}")  // → sqlite:///C:/win/path
+    }
+}
+
 pub async fn run(
     db_url: &str,
     static_dir: Option<&str>,
@@ -195,17 +228,24 @@ pub async fn run(
 ) -> Result<()> {
     sqlx::any::install_default_drivers();
 
+    let effective_url = resolve_db_url(db_url);
+    let effective_url = effective_url.as_str();
+
     let pool = AnyPoolOptions::new()
         .max_connections(5)
-        .connect(db_url)
+        .connect(effective_url)
         .await?;
 
     sqlx::migrate!("./migrations").run(&pool).await?;
 
     info!("migrations applied");
 
+    let require_auth = std::env::var("RADAR_REQUIRE_AUTH")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
     let limiter = Arc::new(RateLimiter::new(rate_limit_per_minute));
-    let app = build_router(pool, static_dir, max_body_bytes);
+    let app = build_router(pool, static_dir, max_body_bytes, require_auth);
 
     // D-7: Add rate limiting as the outermost layer so it wraps the entire app.
     let app = app.layer(middleware::from_fn(move |req: Request, next: Next| {
@@ -240,17 +280,17 @@ pub async fn run(
 // Auth middleware
 // ---------------------------------------------------------------------------
 
+/// Captured at router-build time so tests can't contaminate each other via env vars.
+#[derive(Clone, Copy)]
+struct RequireAuth(bool);
+
 async fn auth_middleware(
     State(pool): State<sqlx::AnyPool>,
     mut req: Request,
     next: Next,
 ) -> Response {
-    // Only protect /v1/* routes — /health is always accessible.
-    let path = req.uri().path().to_owned();
-    if !path.starts_with("/v1/") {
-        return next.run(req).await;
-    }
-
+    // This middleware is scoped to the /v1 sub-router; /health and /metrics are
+    // on the outer router and never reach here.
     let auth_header = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
@@ -278,7 +318,12 @@ async fn auth_middleware(
     // Legacy static token auth (backwards-compatible when RADAR_JWT_SECRET is not set).
     let service_token = std::env::var("RADAR_SERVICE_TOKEN").unwrap_or_default();
     if service_token.is_empty() {
-        // No auth configured → open access.
+        // require_auth is set at build time (see build_router) to avoid request-time env reads.
+        let require_auth = req.extensions().get::<RequireAuth>().map(|r| r.0).unwrap_or(false);
+        if require_auth {
+            drop(pool);
+            return ApiError::Unauthorized.into_response();
+        }
         return next.run(req).await;
     }
 
@@ -295,7 +340,8 @@ async fn auth_middleware(
 // Router
 // ---------------------------------------------------------------------------
 
-pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_bytes: usize) -> Router {
+pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_bytes: usize, require_auth: bool) -> Router {
+
     let v1 = Router::new()
         .route("/services", get(list_services).post(create_service))
         .route("/services/:id", get(get_service))
@@ -312,7 +358,21 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
         .route("/generate-tests", post(generate_tests))
         .route("/generate-tests", get(list_test_suites))
         .route("/generate-tests/:id", get(get_test_suite))
+        .route("/sandbox-envs", get(list_sandbox_envs).post(create_sandbox_env))
+        .route("/sandbox-envs/:id", axum::routing::put(update_sandbox_env).delete(delete_sandbox_env))
+        .route("/spec-versions", get(list_spec_versions))
+        .route("/spec-versions/:id/raw", get(get_spec_version_raw))
+        .route("/settings", get(get_settings).put(update_settings))
+        .route("/settings/integrations", get(get_integrations))
+        .route("/release-notes", get(list_release_notes))
+        .route("/release-notes/:id", get(get_release_note))
+        .route("/diffs/:id/release-notes", post(create_release_note))
         .layer(middleware::from_fn_with_state(pool.clone(), auth_middleware))
+        // Outermost layer: inject RequireAuth into request extensions before auth_middleware runs.
+        .layer(middleware::from_fn(move |mut req: Request, next: Next| async move {
+            req.extensions_mut().insert(RequireAuth(require_auth));
+            next.run(req).await
+        }))
         .with_state(pool.clone());
 
     let cors = {
@@ -338,10 +398,17 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
     // Ensure the recorder is installed before any request arrives.
     get_prometheus_handle();
 
+    let timeout_secs = std::env::var("RADAR_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30);
+
     let mut app = Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
         .nest("/v1", v1)
+        .with_state(pool.clone())
+        .layer(TimeoutLayer::new(std::time::Duration::from_secs(timeout_secs)))
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .layer(
             TraceLayer::new_for_http().make_span_with(|req: &Request| {
@@ -362,7 +429,13 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
         .layer(cors);
 
     if let Some(dir) = static_dir {
-        app = app.nest_service("/app", ServeDir::new(dir));
+        // SPA fallback: serve index.html for any path not found in the static directory
+        // so that React Router's client-side routes work on hard refresh.
+        let index = format!("{dir}/index.html");
+        app = app.nest_service(
+            "/app",
+            ServeDir::new(dir).fallback(tower_http::services::ServeFile::new(index)),
+        );
     }
 
     app
@@ -465,8 +538,17 @@ fn spec_version_id(service_id: &str, git_ref: &str) -> String {
 // Handlers
 // ---------------------------------------------------------------------------
 
-async fn health() -> Json<Value> {
-    Json(json!({"status": "ok", "version": "0.1.0"}))
+async fn health(State(pool): State<sqlx::AnyPool>) -> impl IntoResponse {
+    match sqlx::query("SELECT 1").execute(&pool).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({"status": "ok", "db": "ok", "version": "0.1.0"})),
+        ),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "degraded", "db": "unreachable", "version": "0.1.0"})),
+        ),
+    }
 }
 
 // GET /metrics — Prometheus text exposition
@@ -712,6 +794,7 @@ async fn list_consumers(
 // POST /v1/consumers
 async fn create_consumer(
     State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
     Json(body): Json<CreateConsumerBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.name.trim().is_empty() {
@@ -721,12 +804,13 @@ async fn create_consumer(
         return Err(ApiError::BadRequest("repo_url must not be empty".into()));
     }
 
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let id = Uuid::new_v4().to_string();
 
     sqlx::query(
         r#"
-        INSERT INTO consumer (id, name, repo_url, owner_team, contact)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO consumer (id, name, repo_url, owner_team, contact, org_id)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO NOTHING
         "#,
     )
@@ -735,6 +819,7 @@ async fn create_consumer(
     .bind(&body.repo_url)
     .bind(&body.owner_team)
     .bind(&body.contact)
+    .bind(&org_id)
     .execute(&pool)
     .await?;
 
@@ -858,7 +943,7 @@ async fn get_diff(
         SELECT path, kind, severity, description
         FROM change
         WHERE diff_id = ?
-        ORDER BY rowid
+        ORDER BY path, kind
         "#,
     )
     .bind(&diff_id)
@@ -938,9 +1023,11 @@ async fn blast_radius(
         .fetch_all(&pool)
         .await?;
 
-    // Parse each change path into (operation, field_path).
-    // Path format: "GET /users" or "GET /users → response.phone"
-    let mut changed_ops: Vec<String> = Vec::new();
+    // Parse each change path into op-level changes and (operation, field) pairs.
+    // Path format: "GET /users" (op-level) or "GET /users → response.phone" (field-level).
+    // We separate these so usage_event queries can be precise: op-level changes match any
+    // telemetry for that operation, field-level changes require (operation AND field_path).
+    let mut op_level_ops: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut changed_fields: Vec<(String, String)> = Vec::new(); // (operation, field_path)
 
     for row in &change_rows {
@@ -948,23 +1035,27 @@ async fn blast_radius(
         if let Some(arrow_pos) = path.find(" \u{2192} ") {
             let op = path[..arrow_pos].to_string();
             let after_arrow = &path[arrow_pos + " → ".len()..];
-            // Strip "response." prefix if present
             let field = if let Some(stripped) = after_arrow.strip_prefix("response.") {
                 stripped.to_string()
             } else {
                 after_arrow.to_string()
             };
-            changed_fields.push((op.clone(), field));
-            if !changed_ops.contains(&op) {
-                changed_ops.push(op);
-            }
+            changed_fields.push((op, field));
         } else {
-            // Plain operation path e.g. "GET /users"
-            if !changed_ops.contains(&path) {
-                changed_ops.push(path.clone());
-            }
+            op_level_ops.insert(path);
         }
     }
+
+    // Field-level (op, field) pairs whose operation has no op-level change — need precise match.
+    let field_level_only: Vec<(String, String)> = {
+        let mut seen = std::collections::HashSet::new();
+        changed_fields
+            .iter()
+            .filter(|(op, _)| !op_level_ops.contains(op.as_str()))
+            .filter(|(op, fp)| seen.insert((op.clone(), fp.clone())))
+            .cloned()
+            .collect()
+    };
 
     // 4. Fetch all subscribed consumers for this service.
     let consumer_rows = sqlx::query(
@@ -992,45 +1083,58 @@ async fn blast_radius(
         let consumer_team: String = consumer_row.try_get("owner_team").map_err(ApiError::Db)?;
         let consumer_contact: String = consumer_row.try_get("contact").map_err(ApiError::Db)?;
 
-        // Query usage_event for matching operations/fields within last 30 days.
-        // Build dynamic OR conditions since AnyPool doesn't support array binding.
-        let mut usage_last_seen: Option<String> = None;
+        // Query usage_event: op-level changes match any usage of that operation;
+        // field-level-only changes require (operation AND field_path) to avoid
+        // flagging consumers that never accessed the specific changed field.
+        // Collect up to 5 matching evidence items per consumer.
+        let mut evidence_items: Vec<Value> = Vec::new();
 
-        if !changed_ops.is_empty() {
-            // Build query: match by operation for operation-level changes,
-            // and by (operation, field_path) for field-level changes.
-            // We query for any usage_event where operation matches one of the changed ops
-            // OR (operation matches AND field_path matches for field-level changes).
-            // Simplified: match consumer+service+recorded_at, then filter operation IN changed_ops.
+        if !op_level_ops.is_empty() || !field_level_only.is_empty() {
             let mut sql = String::from(
-                "SELECT recorded_at FROM usage_event WHERE consumer_id = ? AND service_id = ? AND recorded_at >= ? AND (",
+                "SELECT operation, field_path, recorded_at FROM usage_event \
+                 WHERE consumer_id = ? AND service_id = ? AND recorded_at >= ? AND (",
             );
-            for (i, _op) in changed_ops.iter().enumerate() {
-                if i > 0 {
-                    sql.push_str(" OR ");
-                }
+            let mut first = true;
+            for _ in &op_level_ops {
+                if !first { sql.push_str(" OR "); }
                 sql.push_str("operation = ?");
+                first = false;
             }
-            sql.push_str(") ORDER BY recorded_at DESC LIMIT 1");
+            for _ in &field_level_only {
+                if !first { sql.push_str(" OR "); }
+                sql.push_str("(operation = ? AND field_path = ?)");
+                first = false;
+            }
+            sql.push_str(") ORDER BY recorded_at DESC LIMIT 5");
 
             let mut q = sqlx::query(&sql)
                 .bind(&consumer_id)
                 .bind(&service_id)
                 .bind(&cutoff_30);
-            for op in &changed_ops {
+            for op in &op_level_ops {
                 q = q.bind(op);
             }
+            for (op, fp) in &field_level_only {
+                q = q.bind(op);
+                q = q.bind(fp);
+            }
 
-            if let Some(row) = q.fetch_optional(&pool).await? {
-                let ts: String = row.try_get("recorded_at").map_err(ApiError::Db)?;
-                usage_last_seen = Some(ts);
+            for row in q.fetch_all(&pool).await? {
+                use sqlx::Row as _;
+                let op: String = row.try_get("operation").unwrap_or_default();
+                let fp: Option<String> = row.try_get("field_path").ok().flatten();
+                let ts: String = row.try_get("recorded_at").unwrap_or_default();
+                evidence_items.push(json!({
+                    "kind":        "runtime_usage",
+                    "operation":   op,
+                    "field_path":  fp,
+                    "recorded_at": ts,
+                }));
             }
         }
 
-        // Query call_site for static references matching changed operations or field paths.
-        let mut call_site_last_seen: Option<String> = None;
-
-        // Unique field names from changed_fields (for field_path matching in call_site).
+        // Query call_site: op-level matches by operation; field-level matches by field_path
+        // (static scanners often record field names without operation context).
         let changed_field_paths: Vec<String> = {
             let mut seen = std::collections::HashSet::new();
             changed_fields
@@ -1040,12 +1144,13 @@ async fn blast_radius(
                 .collect()
         };
 
-        if !changed_ops.is_empty() || !changed_field_paths.is_empty() {
+        if !op_level_ops.is_empty() || !changed_field_paths.is_empty() {
             let mut sql = String::from(
-                "SELECT last_seen_at FROM call_site WHERE consumer_id = ? AND service_id = ? AND (",
+                "SELECT operation, field_path, file_path, line_number, last_seen_at \
+                 FROM call_site WHERE consumer_id = ? AND service_id = ? AND (",
             );
             let mut first = true;
-            for _ in &changed_ops {
+            for _ in &op_level_ops {
                 if !first { sql.push_str(" OR "); }
                 sql.push_str("operation = ?");
                 first = false;
@@ -1055,29 +1160,52 @@ async fn blast_radius(
                 sql.push_str("field_path = ?");
                 first = false;
             }
-            sql.push_str(") ORDER BY last_seen_at DESC LIMIT 1");
+            sql.push_str(") ORDER BY last_seen_at DESC LIMIT 5");
 
             let mut q = sqlx::query(&sql).bind(&consumer_id).bind(&service_id);
-            for op in &changed_ops {
+            for op in &op_level_ops {
                 q = q.bind(op);
             }
             for fp in &changed_field_paths {
                 q = q.bind(fp);
             }
 
-            if let Some(row) = q.fetch_optional(&pool).await? {
-                let ts: String = row.try_get("last_seen_at").map_err(ApiError::Db)?;
-                call_site_last_seen = Some(ts);
+            for row in q.fetch_all(&pool).await? {
+                use sqlx::Row as _;
+                let op: String = row.try_get("operation").unwrap_or_default();
+                let fp: Option<String> = row.try_get("field_path").ok().flatten();
+                let fp_val = fp.filter(|s| !s.is_empty());
+                let file: String = row.try_get("file_path").unwrap_or_default();
+                let line: i64 = row.try_get("line_number").unwrap_or(0);
+                let ts: String = row.try_get("last_seen_at").unwrap_or_default();
+                evidence_items.push(json!({
+                    "kind":         "call_site",
+                    "operation":    op,
+                    "field_path":   fp_val,
+                    "file_path":    file,
+                    "line_number":  line,
+                    "last_seen_at": ts,
+                }));
             }
         }
 
         // Skip consumers with no evidence of using the changed paths.
-        if usage_last_seen.is_none() && call_site_last_seen.is_none() {
+        if evidence_items.is_empty() {
             continue;
         }
 
-        let has_runtime_usage = usage_last_seen.is_some();
-        let has_call_site = call_site_last_seen.is_some();
+        let has_runtime_usage = evidence_items.iter().any(|e| e["kind"] == "runtime_usage");
+        let has_call_site = evidence_items.iter().any(|e| e["kind"] == "call_site");
+
+        // Derive timestamps from evidence for confidence and last_seen calculations.
+        let usage_last_seen: Option<String> = evidence_items.iter()
+            .filter(|e| e["kind"] == "runtime_usage")
+            .filter_map(|e| e["recorded_at"].as_str().map(|s| s.to_string()))
+            .max();
+        let call_site_last_seen: Option<String> = evidence_items.iter()
+            .filter(|e| e["kind"] == "call_site")
+            .filter_map(|e| e["last_seen_at"].as_str().map(|s| s.to_string()))
+            .max();
 
         // Determine confidence.
         let confidence = if let Some(ref ts) = usage_last_seen {
@@ -1107,6 +1235,7 @@ async fn blast_radius(
             "last_seen":         last_seen,
             "has_runtime_usage": has_runtime_usage,
             "has_call_site":     has_call_site,
+            "evidence":          evidence_items,
         }));
     }
 
@@ -1283,16 +1412,18 @@ async fn list_all_diffs(
 // POST /v1/services — explicitly register a Producer service
 async fn create_service(
     State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
     Json(body): Json<CreateServiceBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.name.is_empty() {
         return Err(ApiError::BadRequest("name is required".into()));
     }
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let id = body.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     sqlx::query(
         r#"
-        INSERT INTO service (id, name, repo_url, owner_team, spec_format)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             name        = excluded.name,
             repo_url    = excluded.repo_url,
@@ -1305,6 +1436,7 @@ async fn create_service(
     .bind(&body.repo_url)
     .bind(&body.owner_team)
     .bind(&body.spec_format)
+    .bind(&org_id)
     .execute(&pool)
     .await?;
 
@@ -1324,11 +1456,14 @@ async fn create_service(
 async fn get_service(
     Path(service_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
+    let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+
     let row = sqlx::query(
-        "SELECT id, name, repo_url, owner_team, spec_format FROM service WHERE id = ?",
+        "SELECT id, name, repo_url, owner_team, spec_format, org_id FROM service WHERE id = ?",
     )
     .bind(&service_id)
     .fetch_optional(&pool)
@@ -1336,30 +1471,48 @@ async fn get_service(
 
     match row {
         None => Err(ApiError::NotFound(format!("service {service_id} not found"))),
-        Some(r) => Ok((
-            StatusCode::OK,
-            Json(json!({
-                "id":          r.get::<String, _>("id"),
-                "name":        r.get::<String, _>("name"),
-                "repo_url":    r.get::<String, _>("repo_url"),
-                "owner_team":  r.get::<String, _>("owner_team"),
-                "spec_format": r.get::<String, _>("spec_format"),
-            })),
-        )),
+        Some(r) => {
+            let row_org_id: String = r.try_get("org_id").unwrap_or_default();
+            if !caller_org_id.is_empty() && row_org_id != caller_org_id {
+                return Err(ApiError::NotFound(format!("service {service_id} not found")));
+            }
+            Ok((
+                StatusCode::OK,
+                Json(json!({
+                    "id":          r.get::<String, _>("id"),
+                    "name":        r.get::<String, _>("name"),
+                    "repo_url":    r.get::<String, _>("repo_url"),
+                    "owner_team":  r.get::<String, _>("owner_team"),
+                    "spec_format": r.get::<String, _>("spec_format"),
+                })),
+            ))
+        }
     }
 }
 
 // GET /v1/services — list all registered Producer services
 async fn list_services(
     State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
-    let rows = sqlx::query(
-        "SELECT id, name, repo_url, owner_team, spec_format FROM service ORDER BY name",
-    )
-    .fetch_all(&pool)
-    .await?;
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+
+    let rows = if !org_id.is_empty() {
+        sqlx::query(
+            "SELECT id, name, repo_url, owner_team, spec_format FROM service WHERE org_id = ? ORDER BY name",
+        )
+        .bind(&org_id)
+        .fetch_all(&pool)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT id, name, repo_url, owner_team, spec_format FROM service ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await?
+    };
 
     let items: Vec<Value> = rows
         .iter()
@@ -1380,21 +1533,41 @@ async fn list_services(
 // GET /v1/consumers — list all registered Consumer services
 async fn list_all_consumers(
     State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            c.id, c.name, c.repo_url, c.owner_team, c.contact,
-            (SELECT COUNT(*) FROM subscription s WHERE s.consumer_id = c.id)         AS subscription_count,
-            (SELECT MAX(recorded_at) FROM usage_event ue WHERE ue.consumer_id = c.id) AS last_seen
-        FROM consumer c
-        ORDER BY c.name
-        "#,
-    )
-    .fetch_all(&pool)
-    .await?;
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+
+    let rows = if !org_id.is_empty() {
+        sqlx::query(
+            r#"
+            SELECT
+                c.id, c.name, c.repo_url, c.owner_team, c.contact,
+                (SELECT COUNT(*) FROM subscription s WHERE s.consumer_id = c.id)         AS subscription_count,
+                (SELECT MAX(recorded_at) FROM usage_event ue WHERE ue.consumer_id = c.id) AS last_seen
+            FROM consumer c
+            WHERE c.org_id = ?
+            ORDER BY c.name
+            "#,
+        )
+        .bind(&org_id)
+        .fetch_all(&pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT
+                c.id, c.name, c.repo_url, c.owner_team, c.contact,
+                (SELECT COUNT(*) FROM subscription s WHERE s.consumer_id = c.id)         AS subscription_count,
+                (SELECT MAX(recorded_at) FROM usage_event ue WHERE ue.consumer_id = c.id) AS last_seen
+            FROM consumer c
+            ORDER BY c.name
+            "#,
+        )
+        .fetch_all(&pool)
+        .await?
+    };
 
     let items: Vec<Value> = rows
         .iter()
@@ -1497,10 +1670,6 @@ async fn generate_tests(
     State(pool): State<sqlx::AnyPool>,
     Json(body): Json<GenerateTestsBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
-        ApiError::BadRequest("ANTHROPIC_API_KEY is not set on the server".to_string())
-    })?;
-
     // Resolve Jira content.
     let (jira_summary, jira_description) = match body.jira_key {
         Some(ref key) => {
@@ -1562,13 +1731,15 @@ async fn generate_tests(
         }
     };
 
-    // Call Claude to generate structured test cases then assemble the collection.
-    let collection_json =
-        call_claude_for_tests(&api_key, &jira_summary, &jira_description, &spec_yaml, &body.base_url)
+    // Call the configured AI provider; assemble both Postman JSON and api-testing YAML from the result.
+    let suite_raw =
+        call_ai_for_tests(&jira_summary, &jira_description, &spec_yaml)
             .await
             .map_err(|e| ApiError::BadRequest(format!("test generation failed: {e}")))?;
 
-    // Parse counts from the collection.
+    let (collection_json, apitesting_yaml) = build_both_formats(suite_raw, &body.base_url);
+
+    // Parse counts from the Postman collection.
     let items = collection_json["item"].as_array();
     let test_count = items.map(|a| a.len()).unwrap_or(0) as i64;
     let happy_count = items
@@ -1577,7 +1748,7 @@ async fn generate_tests(
     let negative_count = test_count - happy_count;
     let collection_name = collection_json["info"]["name"].as_str().unwrap_or("Generated Tests").to_string();
 
-    // Persist.
+    // Persist both formats.
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let collection_str = serde_json::to_string(&collection_json).unwrap_or_default();
@@ -1585,8 +1756,8 @@ async fn generate_tests(
     sqlx::query(
         r#"INSERT INTO generated_test_suite
            (id, service_id, jira_key, jira_summary, collection_name, collection_json,
-            test_count, happy_count, negative_count, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+            test_count, happy_count, negative_count, created_at, apitesting_yaml)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(&id)
     .bind(&body.service_id)
@@ -1598,6 +1769,7 @@ async fn generate_tests(
     .bind(happy_count)
     .bind(negative_count)
     .bind(&now)
+    .bind(&apitesting_yaml)
     .execute(&pool)
     .await?;
 
@@ -1606,13 +1778,14 @@ async fn generate_tests(
     Ok((
         StatusCode::CREATED,
         Json(json!({
-            "id":              id,
-            "collection_name": collection_name,
-            "test_count":      test_count,
-            "happy_count":     happy_count,
-            "negative_count":  negative_count,
-            "collection_json": collection_json,
-            "created_at":      now,
+            "id":               id,
+            "collection_name":  collection_name,
+            "test_count":       test_count,
+            "happy_count":      happy_count,
+            "negative_count":   negative_count,
+            "collection_json":  collection_json,
+            "apitesting_yaml":  apitesting_yaml,
+            "created_at":       now,
         })),
     ))
 }
@@ -1668,7 +1841,7 @@ async fn get_test_suite(
 
     let row = sqlx::query(
         r#"SELECT id, service_id, jira_key, jira_summary, collection_name,
-                  collection_json, test_count, happy_count, negative_count, created_at
+                  collection_json, apitesting_yaml, test_count, happy_count, negative_count, created_at
            FROM generated_test_suite
            WHERE id = ?"#,
     )
@@ -1684,19 +1857,21 @@ async fn get_test_suite(
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or(Value::Null);
+            let apitesting_yaml = r.try_get::<Option<String>, _>("apitesting_yaml").unwrap_or(None);
             Ok((
                 StatusCode::OK,
                 Json(json!({
-                    "id":              r.get::<String, _>("id"),
-                    "service_id":      r.try_get::<Option<String>, _>("service_id").unwrap_or(None),
-                    "jira_key":        r.try_get::<Option<String>, _>("jira_key").unwrap_or(None),
-                    "jira_summary":    r.try_get::<Option<String>, _>("jira_summary").unwrap_or(None),
-                    "collection_name": r.get::<String, _>("collection_name"),
-                    "collection_json": collection_json,
-                    "test_count":      r.try_get::<i64, _>("test_count").unwrap_or(0),
-                    "happy_count":     r.try_get::<i64, _>("happy_count").unwrap_or(0),
-                    "negative_count":  r.try_get::<i64, _>("negative_count").unwrap_or(0),
-                    "created_at":      r.get::<String, _>("created_at"),
+                    "id":               r.get::<String, _>("id"),
+                    "service_id":       r.try_get::<Option<String>, _>("service_id").unwrap_or(None),
+                    "jira_key":         r.try_get::<Option<String>, _>("jira_key").unwrap_or(None),
+                    "jira_summary":     r.try_get::<Option<String>, _>("jira_summary").unwrap_or(None),
+                    "collection_name":  r.get::<String, _>("collection_name"),
+                    "collection_json":  collection_json,
+                    "apitesting_yaml":  apitesting_yaml,
+                    "test_count":       r.try_get::<i64, _>("test_count").unwrap_or(0),
+                    "happy_count":      r.try_get::<i64, _>("happy_count").unwrap_or(0),
+                    "negative_count":   r.try_get::<i64, _>("negative_count").unwrap_or(0),
+                    "created_at":       r.get::<String, _>("created_at"),
                 })),
             ))
         }
@@ -1730,18 +1905,12 @@ async fn fetch_jira_ticket(key: &str) -> anyhow::Result<(String, String)> {
     Ok((summary, description))
 }
 
-async fn call_claude_for_tests(
-    api_key: &str,
+async fn call_ai_for_tests(
     jira_summary: &str,
     jira_description: &str,
     spec_yaml: &str,
-    base_url: &str,
 ) -> anyhow::Result<Value> {
-    let spec_excerpt = if spec_yaml.len() > 40_000 {
-        &spec_yaml[..40_000]
-    } else {
-        spec_yaml
-    };
+    let spec_excerpt = if spec_yaml.len() > 40_000 { &spec_yaml[..40_000] } else { spec_yaml };
 
     let prompt = format!(
         r#"You are a QA engineer generating Postman API tests from a Jira ticket and an OpenAPI spec.
@@ -1788,41 +1957,122 @@ Required JSON format:
 }}"#
     );
 
-    let request_body = json!({
+    let raw_text = detect_provider()
+        .ok_or_else(|| anyhow::anyhow!("No AI provider configured (set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GITHUB_COPILOT_TOKEN)"))?
+        .complete(&prompt, 4096)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("AI provider call failed"))?;
+
+    let start = raw_text.find('{').ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
+    let end = raw_text.rfind('}').ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
+    let suite: Value = serde_json::from_str(&raw_text[start..=end])?;
+    Ok(suite)
+}
+
+// ---------------------------------------------------------------------------
+// Inline AI provider — mirrors radar-cli/src/ai_provider.rs
+// (radar-api is a separate crate; duplication is intentional)
+// ---------------------------------------------------------------------------
+
+enum AiProvider {
+    Anthropic { api_key: String },
+    OpenAI { api_key: String, base_url: String },
+    GitHubCopilot { token: String },
+}
+
+fn detect_provider() -> Option<AiProvider> {
+    if let Ok(k) = std::env::var("ANTHROPIC_API_KEY") {
+        if !k.is_empty() {
+            return Some(AiProvider::Anthropic { api_key: k });
+        }
+    }
+    if let Ok(k) = std::env::var("OPENAI_API_KEY") {
+        if !k.is_empty() {
+            let base = std::env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".into());
+            return Some(AiProvider::OpenAI { api_key: k, base_url: base });
+        }
+    }
+    if let Ok(t) = std::env::var("GITHUB_COPILOT_TOKEN") {
+        if !t.is_empty() {
+            return Some(AiProvider::GitHubCopilot { token: t });
+        }
+    }
+    None
+}
+
+impl AiProvider {
+    async fn complete(&self, prompt: &str, max_tokens: u32) -> Option<String> {
+        match self {
+            Self::Anthropic { api_key } => {
+                ai_call_anthropic(api_key, prompt, max_tokens).await
+            }
+            Self::OpenAI { api_key, base_url } => {
+                ai_call_openai_compat(api_key, base_url, prompt, max_tokens).await
+            }
+            Self::GitHubCopilot { token } => {
+                ai_call_openai_compat(token, "https://api.githubcopilot.com/v1", prompt, max_tokens).await
+            }
+        }
+    }
+}
+
+async fn ai_call_anthropic(api_key: &str, prompt: &str, max_tokens: u32) -> Option<String> {
+    let body = json!({
         "model": "claude-sonnet-4-6",
-        "max_tokens": 4096,
+        "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}]
     });
-
     let resp = reqwest::Client::new()
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
-        .json(&request_body)
+        .json(&body)
         .send()
-        .await?;
-
+        .await
+        .ok()?;
     if !resp.status().is_success() {
-        let status = resp.status();
-        let err = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("Claude API error {status}: {err}"));
+        tracing::warn!("Anthropic API error: {}", resp.status());
+        return None;
     }
-
-    let claude_resp: Value = resp.json().await?;
-    let raw_text = claude_resp["content"]
-        .as_array()
-        .and_then(|a| a.first())
+    let data: Value = resp.json().await.ok()?;
+    data["content"].as_array()?
+        .iter()
+        .find(|b| b["type"] == "text")
         .and_then(|b| b["text"].as_str())
-        .ok_or_else(|| anyhow::anyhow!("unexpected Claude response format"))?;
+        .map(str::to_owned)
+}
 
-    // Extract JSON object from Claude's response.
-    let start = raw_text.find('{').ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
-    let end = raw_text.rfind('}').ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
-    let json_str = &raw_text[start..=end];
+async fn ai_call_openai_compat(api_key: &str, base_url: &str, prompt: &str, max_tokens: u32) -> Option<String> {
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let body = json!({
+        "model": "gpt-4o",
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}]
+    });
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        tracing::warn!("OpenAI-compat API error {}: {}", url, resp.status());
+        return None;
+    }
+    let data: Value = resp.json().await.ok()?;
+    data["choices"].as_array()?.first()
+        .and_then(|c| c["message"]["content"].as_str())
+        .map(str::to_owned)
+}
 
-    let suite: Value = serde_json::from_str(json_str)?;
-    Ok(assemble_postman_collection(suite, base_url))
+fn build_both_formats(suite: Value, base_url: &str) -> (Value, String) {
+    let apitesting_yaml = assemble_apitesting_yaml(&suite, base_url);
+    let postman = assemble_postman_collection(suite, base_url);
+    (postman, apitesting_yaml)
 }
 
 fn assemble_postman_collection(suite: Value, base_url: &str) -> Value {
@@ -1915,11 +2165,579 @@ fn assemble_postman_collection(suite: Value, base_url: &str) -> Value {
     })
 }
 
+/// Build an api-testing YAML suite from the raw Claude JSON value.
+/// Internalises format patterns from https://github.com/LinuxSuRen/api-testing:
+/// - `#!api-testing` magic header for auto-detection
+/// - `param:` block with authToken for `{{.param.authToken}}` templating
+/// - `expect.verify:` using the expr library (`data.field != null`)
+/// - `expect.bodyFieldsExpect:` for simple field=value pins on happy-path tests
+fn assemble_apitesting_yaml(suite: &Value, base_url: &str) -> String {
+    #[derive(serde::Serialize)]
+    struct Suite<'a> {
+        name: &'a str,
+        api: &'a str,
+        param: std::collections::BTreeMap<&'static str, &'static str>,
+        spec: Spec,
+        items: Vec<TestCase>,
+    }
+    #[derive(serde::Serialize)]
+    struct Spec { kind: &'static str }
+    #[derive(serde::Serialize)]
+    struct TestCase {
+        name: String,
+        request: Request,
+        expect: Expect,
+    }
+    #[derive(serde::Serialize)]
+    struct Request {
+        api: String,
+        method: String,
+        header: std::collections::BTreeMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+    }
+    #[derive(serde::Serialize)]
+    struct Expect {
+        #[serde(rename = "statusCode")]
+        status_code: u64,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        verify: Vec<String>,
+        #[serde(rename = "bodyFieldsExpect", skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        body_fields_expect: std::collections::BTreeMap<String, Value>,
+    }
+
+    let collection_name = suite["collection_name"].as_str().unwrap_or("Generated Tests");
+    let empty = vec![];
+    let test_cases = suite["test_cases"].as_array().unwrap_or(&empty);
+
+    let mut param = std::collections::BTreeMap::new();
+    param.insert("authToken", "");
+
+    let items: Vec<TestCase> = test_cases.iter().map(|tc| {
+        let category = tc["category"].as_str().unwrap_or("test");
+        let name = tc["name"].as_str().unwrap_or("Test");
+        let method = tc["method"].as_str().unwrap_or("GET").to_uppercase();
+        let path = tc["path"].as_str().unwrap_or("/").to_string();
+        let status = tc["expected_status"].as_u64().unwrap_or(200);
+        let has_body = tc["body"].is_object() && !tc["body"].as_object().map(|m| m.is_empty()).unwrap_or(true);
+
+        let mut header = std::collections::BTreeMap::new();
+        header.insert("Authorization".into(), "Bearer {{.param.authToken}}".into());
+        if has_body {
+            header.insert("Content-Type".into(), "application/json".into());
+        }
+
+        let body = if has_body {
+            Some(serde_json::to_string_pretty(&tc["body"]).unwrap_or_default())
+        } else {
+            None
+        };
+
+        // Convert Postman assertions to api-testing expr verify expressions.
+        let mut verify: Vec<String> = tc["assertions"]
+            .as_array()
+            .unwrap_or(&empty)
+            .iter()
+            .filter_map(|a| postman_assertion_to_verify(a.as_str().unwrap_or("")))
+            .collect();
+
+        if verify.is_empty() {
+            verify.push(if category == "happy_path" {
+                "data != null".into()
+            } else {
+                "data.error != null".into()
+            });
+        }
+
+        // bodyFieldsExpect: pin top-level scalar fields from the request body for
+        // happy-path tests as a lightweight contract check.
+        let body_fields_expect = if category == "happy_path" {
+            tc["body"].as_object()
+                .map(|m| m.iter()
+                    .filter(|(_, v)| v.is_string() || v.is_number() || v.is_boolean())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect())
+                .unwrap_or_default()
+        } else {
+            std::collections::BTreeMap::new()
+        };
+
+        let label = format!("[{}] {name}", category.replace('_', " ").to_uppercase());
+        TestCase {
+            name: label,
+            request: Request { api: path, method, header, body },
+            expect: Expect { status_code: status, verify, body_fields_expect },
+        }
+    }).collect();
+
+    let s = Suite { name: collection_name, api: base_url, param, spec: Spec { kind: "openapi" }, items };
+    match serde_yaml::to_string(&s) {
+        Ok(yaml) => format!("#!api-testing\n{yaml}"),
+        Err(_) => String::from("#!api-testing\n# (yaml serialisation failed)\n"),
+    }
+}
+
+/// Convert a Postman pm.test() assertion line to an api-testing expr verify expression.
+fn postman_assertion_to_verify(assertion: &str) -> Option<String> {
+    if assertion.contains("have.status") { return None; }
+    if assertion.contains("headers.get") || assertion.contains("response.headers") { return None; }
+
+    for q in ["'", "\""] {
+        let pat = format!(".have.property({q}");
+        if let Some(pos) = assertion.find(&pat) {
+            let rest = &assertion[pos + pat.len()..];
+            if let Some(end) = rest.find(q) {
+                let field = &rest[..end];
+                if !field.is_empty() && field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return Some(format!("data.{field} != null"));
+                }
+            }
+        }
+    }
+    if assertion.contains(".to.have.length.above(0)") || assertion.contains("lengthOf.above(0)") {
+        return Some("len(data) > 0".into());
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Retention job (public, callable on a schedule)
 // ---------------------------------------------------------------------------
 
 /// Delete usage_event rows older than `lookback_days` days.
+// ---------------------------------------------------------------------------
+// Release note handlers
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct CreateReleaseNoteBody {
+    content: String,
+}
+
+// POST /v1/diffs/:id/release-notes
+async fn create_release_note(
+    Path(diff_id): Path<String>,
+    State(pool): State<sqlx::AnyPool>,
+    Json(body): Json<CreateReleaseNoteBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    if body.content.is_empty() {
+        return Err(ApiError::BadRequest("content is required".into()));
+    }
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO release_note (id, diff_id, content, created_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&diff_id)
+    .bind(&body.content)
+    .bind(&now)
+    .execute(&pool)
+    .await?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": id, "diff_id": diff_id, "created_at": now }))))
+}
+
+// GET /v1/release-notes
+async fn list_release_notes(
+    State(pool): State<sqlx::AnyPool>,
+    Query(params): Query<PaginationParams>,
+) -> Result<impl IntoResponse, ApiError> {
+    let rows = sqlx::query(
+        r#"SELECT rn.id, rn.diff_id, rn.created_at,
+                  d.from_version, d.to_version,
+                  sv_from.git_ref AS from_git_ref,
+                  sv_to.git_ref   AS to_git_ref
+           FROM release_note rn
+           JOIN diff        d      ON d.id      = rn.diff_id
+           JOIN spec_version sv_from ON sv_from.id = d.from_version
+           JOIN spec_version sv_to   ON sv_to.id   = d.to_version
+           ORDER BY rn.created_at DESC
+           LIMIT ? OFFSET ?"#,
+    )
+    .bind(params.limit)
+    .bind(params.offset)
+    .fetch_all(&pool)
+    .await?;
+
+    let items: Vec<Value> = rows.iter().map(|r| {
+        use sqlx::Row;
+        json!({
+            "id":           r.get::<String, _>("id"),
+            "diff_id":      r.get::<String, _>("diff_id"),
+            "from_git_ref": r.get::<String, _>("from_git_ref"),
+            "to_git_ref":   r.get::<String, _>("to_git_ref"),
+            "created_at":   r.get::<String, _>("created_at"),
+        })
+    }).collect();
+
+    Ok(Json(json!(items)))
+}
+
+// GET /v1/release-notes/:id
+async fn get_release_note(
+    Path(note_id): Path<String>,
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<impl IntoResponse, ApiError> {
+    let row = sqlx::query(
+        r#"SELECT rn.id, rn.diff_id, rn.content, rn.created_at,
+                  sv_from.git_ref AS from_git_ref,
+                  sv_to.git_ref   AS to_git_ref
+           FROM release_note rn
+           JOIN diff        d      ON d.id        = rn.diff_id
+           JOIN spec_version sv_from ON sv_from.id = d.from_version
+           JOIN spec_version sv_to   ON sv_to.id   = d.to_version
+           WHERE rn.id = ?"#,
+    )
+    .bind(&note_id)
+    .fetch_optional(&pool)
+    .await?;
+
+    match row {
+        None => Err(ApiError::NotFound(format!("release note {note_id} not found"))),
+        Some(r) => {
+            use sqlx::Row;
+            Ok(Json(json!({
+                "id":           r.get::<String, _>("id"),
+                "diff_id":      r.get::<String, _>("diff_id"),
+                "from_git_ref": r.get::<String, _>("from_git_ref"),
+                "to_git_ref":   r.get::<String, _>("to_git_ref"),
+                "content":      r.get::<String, _>("content"),
+                "created_at":   r.get::<String, _>("created_at"),
+            })))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Settings handlers
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AppSettings {
+    policy_block_on: String,
+    policy_lookback_days: i64,
+    policy_allow_override_with: Option<String>,
+    retention_days: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox Environments — shared Playground environments
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct SandboxEnvBody {
+    name: String,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    bearer_token: String,
+    #[serde(default)]
+    description: String,
+}
+
+fn mask_token(t: &str) -> String {
+    if t.len() <= 4 {
+        "***".into()
+    } else {
+        format!("***{}", &t[t.len() - 4..])
+    }
+}
+
+// GET /v1/sandbox-envs
+async fn list_sandbox_envs(
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT id, name, base_url, bearer_token, description, created_at, updated_at \
+         FROM sandbox_env ORDER BY name ASC",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    let items: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            let raw_token: String = r.try_get("bearer_token").unwrap_or_default();
+            json!({
+                "id":               r.try_get::<String, _>("id").unwrap_or_default(),
+                "name":             r.try_get::<String, _>("name").unwrap_or_default(),
+                "base_url":         r.try_get::<String, _>("base_url").unwrap_or_default(),
+                "bearer_token":     mask_token(&raw_token),
+                "bearer_token_set": !raw_token.is_empty(),
+                "description":      r.try_get::<String, _>("description").unwrap_or_default(),
+                "created_at":       r.try_get::<String, _>("created_at").unwrap_or_default(),
+                "updated_at":       r.try_get::<String, _>("updated_at").unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    Ok(Json(items))
+}
+
+// POST /v1/sandbox-envs
+async fn create_sandbox_env(
+    State(pool): State<sqlx::AnyPool>,
+    Json(body): Json<SandboxEnvBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    if body.name.trim().is_empty() {
+        return Err(ApiError::BadRequest("name is required".into()));
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO sandbox_env (id, name, base_url, bearer_token, description, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(body.name.trim())
+    .bind(body.base_url.trim())
+    .bind(&body.bearer_token)  // not trimmed — tokens may have significant whitespace
+    .bind(body.description.trim())
+    .bind(&now)
+    .bind(&now)
+    .execute(&pool)
+    .await?;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(json!({
+            "id": id,
+            "name": body.name.trim(),
+            "base_url": body.base_url.trim(),
+            "bearer_token": mask_token(&body.bearer_token),
+            "bearer_token_set": !body.bearer_token.is_empty(),
+            "description": body.description.trim(),
+            "created_at": now,
+            "updated_at": now,
+        })),
+    ))
+}
+
+// PUT /v1/sandbox-envs/:id
+async fn update_sandbox_env(
+    State(pool): State<sqlx::AnyPool>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<SandboxEnvBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    if body.name.trim().is_empty() {
+        return Err(ApiError::BadRequest("name is required".into()));
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let result = sqlx::query(
+        "UPDATE sandbox_env \
+         SET name = ?, base_url = ?, bearer_token = ?, description = ?, updated_at = ? \
+         WHERE id = ?",
+    )
+    .bind(body.name.trim())
+    .bind(body.base_url.trim())
+    .bind(&body.bearer_token)
+    .bind(body.description.trim())
+    .bind(&now)
+    .bind(&id)
+    .execute(&pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound("sandbox environment not found".into()));
+    }
+
+    Ok(Json(json!({
+        "id": id,
+        "name": body.name.trim(),
+        "base_url": body.base_url.trim(),
+        "bearer_token": mask_token(&body.bearer_token),
+        "bearer_token_set": !body.bearer_token.is_empty(),
+        "description": body.description.trim(),
+        "updated_at": now,
+    })))
+}
+
+// DELETE /v1/sandbox-envs/:id
+async fn delete_sandbox_env(
+    State(pool): State<sqlx::AnyPool>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let result = sqlx::query("DELETE FROM sandbox_env WHERE id = ?")
+        .bind(&id)
+        .execute(&pool)
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound("sandbox environment not found".into()));
+    }
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Spec Versions — Playground support
+// ---------------------------------------------------------------------------
+
+// GET /v1/spec-versions
+async fn list_spec_versions(
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        r#"SELECT sv.id, sv.service_id, s.name AS service_name, sv.git_ref,
+                  sv.spec_format, sv.captured_at
+           FROM spec_version sv
+           JOIN service s ON s.id = sv.service_id
+           WHERE sv.spec_yaml IS NOT NULL
+           ORDER BY sv.captured_at DESC
+           LIMIT 100"#,
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    let items: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id":           r.try_get::<String, _>("id").unwrap_or_default(),
+                "service_id":   r.try_get::<String, _>("service_id").unwrap_or_default(),
+                "service_name": r.try_get::<String, _>("service_name").unwrap_or_default(),
+                "git_ref":      r.try_get::<String, _>("git_ref").unwrap_or_default(),
+                "spec_format":  r.try_get::<String, _>("spec_format").unwrap_or_default(),
+                "captured_at":  r.try_get::<String, _>("captured_at").unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    Ok(Json(items))
+}
+
+// GET /v1/spec-versions/:id/raw
+async fn get_spec_version_raw(
+    State(pool): State<sqlx::AnyPool>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+    let row = sqlx::query("SELECT spec_yaml, spec_format FROM spec_version WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&pool)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("spec version not found".into()))?;
+
+    let spec_yaml: Option<String> = row.try_get("spec_yaml").ok().flatten();
+    let spec_format: String = row.try_get("spec_format").unwrap_or_else(|_| "openapi".into());
+
+    let content = spec_yaml.ok_or_else(|| ApiError::NotFound("no spec stored for this version".into()))?;
+
+    let content_type = if spec_format.contains("json") || content.trim_start().starts_with('{') {
+        "application/json"
+    } else {
+        "application/yaml"
+    };
+
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, content_type)],
+        content,
+    ))
+}
+
+// GET /v1/settings
+async fn get_settings(State(pool): State<sqlx::AnyPool>) -> Result<impl IntoResponse, ApiError> {
+    let rows = sqlx::query("SELECT key, value FROM settings")
+        .fetch_all(&pool)
+        .await?;
+
+    let mut map: HashMap<String, String> = rows
+        .iter()
+        .map(|r| {
+            use sqlx::Row;
+            (r.get::<String, _>("key"), r.get::<String, _>("value"))
+        })
+        .collect();
+
+    Ok(Json(AppSettings {
+        policy_block_on: map
+            .remove("policy.block_on")
+            .unwrap_or_else(|| "active_consumers".to_string()),
+        policy_lookback_days: map
+            .remove("policy.lookback_days")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30),
+        policy_allow_override_with: map
+            .remove("policy.allow_override_with")
+            .filter(|s| !s.is_empty()),
+        retention_days: map
+            .remove("retention.days")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(90),
+    }))
+}
+
+// PUT /v1/settings
+async fn update_settings(
+    State(pool): State<sqlx::AnyPool>,
+    Json(body): Json<AppSettings>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !["never", "any_break", "active_consumers"].contains(&body.policy_block_on.as_str()) {
+        return Err(ApiError::BadRequest(
+            "policy_block_on must be one of: never, any_break, active_consumers".into(),
+        ));
+    }
+    if !(1..=365).contains(&body.policy_lookback_days) {
+        return Err(ApiError::BadRequest(
+            "policy_lookback_days must be between 1 and 365".into(),
+        ));
+    }
+    if !(1..=3650).contains(&body.retention_days) {
+        return Err(ApiError::BadRequest(
+            "retention_days must be between 1 and 3650".into(),
+        ));
+    }
+
+    let pairs = [
+        ("policy.block_on", body.policy_block_on.clone()),
+        (
+            "policy.lookback_days",
+            body.policy_lookback_days.to_string(),
+        ),
+        (
+            "policy.allow_override_with",
+            body.policy_allow_override_with.clone().unwrap_or_default(),
+        ),
+        ("retention.days", body.retention_days.to_string()),
+    ];
+
+    for (key, value) in &pairs {
+        sqlx::query(
+            "INSERT INTO settings (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&pool)
+        .await?;
+    }
+
+    Ok(Json(body))
+}
+
+// GET /v1/settings/integrations — checks env vars server-side, returns booleans only
+async fn get_integrations() -> Json<Value> {
+    let configured = |key: &str| std::env::var(key).map(|v| !v.is_empty()).unwrap_or(false);
+    let openai_key = configured("OPENAI_API_KEY");
+    Json(json!({
+        "anthropic":         configured("ANTHROPIC_API_KEY"),
+        "openai":            openai_key,
+        "openai_enterprise": openai_key && configured("OPENAI_BASE_URL"),
+        "github_copilot":    configured("GITHUB_COPILOT_TOKEN"),
+        "jira":              configured("JIRA_BASE_URL") && configured("JIRA_EMAIL") && configured("JIRA_TOKEN"),
+        "github":            configured("GITHUB_TOKEN"),
+        "postman":           configured("POSTMAN_API_KEY"),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+
 pub async fn purge_old_usage_events(pool: &sqlx::AnyPool, lookback_days: u32) -> anyhow::Result<u64> {
     let cutoff = (Utc::now() - Duration::days(lookback_days as i64)).to_rfc3339();
     let result = sqlx::query("DELETE FROM usage_event WHERE recorded_at < ?")
@@ -1991,7 +2809,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         let body = serde_json::json!([
             {
@@ -2024,7 +2842,7 @@ mod tests {
     #[tokio::test]
     async fn test_ingest_too_large_batch_rejected() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         // Build a batch of 501 events.
         let events: Vec<serde_json::Value> = (0..501)
@@ -2148,7 +2966,7 @@ mod tests {
     #[tokio::test]
     async fn test_blast_radius_404_for_unknown_diff() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2238,7 +3056,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2373,7 +3191,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2477,7 +3295,7 @@ mod tests {
         .bind("GET /invoices").bind("src/api.rs").bind(42i64).bind(&now)
         .execute(&pool).await.unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
         let req = HttpRequest::builder()
             .method("GET")
             .uri(format!("/v1/diffs/{diff_id}/blast-radius"))
@@ -2498,7 +3316,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_consumer_returns_201() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         let body = serde_json::json!({
             "name": "billing-svc",
@@ -2526,7 +3344,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_consumer_validates_name() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         let body = serde_json::json!({
             "name": "",
@@ -2564,7 +3382,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         // 1. Create consumer.
         let consumer_body = serde_json::json!({
@@ -2645,7 +3463,7 @@ mod tests {
             .bind(Uuid::new_v4().to_string()).bind(&diff_id).bind("GET /items → response.name").bind("field_added").bind("safe").bind::<Option<String>>(None)
             .execute(&pool).await.unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         let req = HttpRequest::builder()
             .method("GET").uri("/v1/diffs").body(Body::empty()).unwrap();
@@ -2693,7 +3511,7 @@ mod tests {
                 .execute(&pool).await.unwrap();
         }
 
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         let req = HttpRequest::builder()
             .method("GET").uri("/v1/summary").body(Body::empty()).unwrap();
@@ -2711,7 +3529,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_service_returns_201() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         let body = serde_json::json!({
             "name": "payments-api",
@@ -2739,7 +3557,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_service_with_explicit_id_then_get() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         let id = Uuid::new_v4().to_string();
         let body = serde_json::json!({
@@ -2777,7 +3595,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_service_404_for_unknown() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2791,7 +3609,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_diffs_pagination_params_accepted() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2809,7 +3627,7 @@ mod tests {
     #[tokio::test]
     async fn test_diff_deduplication_returns_cached() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
 
         let svc_id = Uuid::new_v4().to_string();
         let diff_body = serde_json::json!({
@@ -2849,5 +3667,295 @@ mod tests {
         // Same diff ID returned.
         assert_eq!(first["id"], second["id"]);
         assert_eq!(second["cached"], true);
+    }
+
+    #[tokio::test]
+    async fn test_health_returns_ok_with_live_db() {
+        let pool = test_pool().await;
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["db"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_health_returns_degraded_when_pool_closed() {
+        let pool = test_pool().await;
+        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false);
+        pool.close().await;
+
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "degraded");
+        assert_eq!(body["db"], "unreachable");
+    }
+
+    #[tokio::test]
+    async fn test_require_auth_blocks_unauthenticated_requests() {
+        let pool = test_pool().await;
+        // Pass require_auth=true directly — no env var manipulation needed.
+        let app = build_router(pool, None, 4 * 1024 * 1024, true);
+
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri("/v1/services")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_create_sandbox_env_token_masked_in_response() {
+        let pool = test_pool().await;
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/v1/sandbox-envs")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"name":"my-env","base_url":"https://api.example.com","bearer_token":"supersecrettoken123"}"#,
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let masked = json["bearer_token"].as_str().unwrap();
+        assert!(masked.starts_with("***"), "expected masked token, got: {masked}");
+        assert!(masked.ends_with("n123"), "expected last-4 suffix, got: {masked}");
+        assert_eq!(json["bearer_token_set"], true);
+    }
+
+    #[tokio::test]
+    async fn test_list_sandbox_envs_token_masked() {
+        let pool = test_pool().await;
+        let now = Utc::now().to_rfc3339();
+        let id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO sandbox_env (id, name, base_url, bearer_token, description, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind("prod-env")
+        .bind("https://prod.example.com")
+        .bind("very-long-secret-token")
+        .bind("")
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri("/v1/sandbox-envs")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let items = json.as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        let masked = items[0]["bearer_token"].as_str().unwrap();
+        assert!(masked.starts_with("***"), "expected masked token, got: {masked}");
+        assert!(masked.ends_with("oken"), "expected last-4 suffix, got: {masked}");
+        assert_eq!(items[0]["bearer_token_set"], true);
+    }
+
+    #[tokio::test]
+    async fn test_create_service_writes_org_id() {
+        let pool = test_pool().await;
+        let claims = JwtClaims { sub: "u1".into(), org_id: "acme-corp".into(), exp: usize::MAX };
+        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false).layer(
+            axum::middleware::from_fn(
+                move |mut req: axum::extract::Request, next: axum::middleware::Next| {
+                    let c = claims.clone();
+                    async move {
+                        req.extensions_mut().insert(c);
+                        next.run(req).await
+                    }
+                },
+            ),
+        );
+
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/v1/services")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"name":"svc-org-test","repo_url":"","owner_team":"team","spec_format":"openapi"}"#,
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let row: (String,) =
+            sqlx::query_as("SELECT org_id FROM service WHERE name = 'svc-org-test'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "acme-corp");
+    }
+
+    #[tokio::test]
+    async fn test_list_services_filtered_by_org_id() {
+        let pool = test_pool().await;
+
+        sqlx::query(
+            "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind("svc-alpha").bind("alpha-api").bind("").bind("team-a").bind("openapi").bind("org-alpha")
+        .execute(&pool).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind("svc-beta").bind("beta-api").bind("").bind("team-b").bind("openapi").bind("org-beta")
+        .execute(&pool).await.unwrap();
+
+        let claims = JwtClaims { sub: "u1".into(), org_id: "org-alpha".into(), exp: usize::MAX };
+        let app = build_router(pool, None, 4 * 1024 * 1024, false).layer(
+            axum::middleware::from_fn(
+                move |mut req: axum::extract::Request, next: axum::middleware::Next| {
+                    let c = claims.clone();
+                    async move {
+                        req.extensions_mut().insert(c);
+                        next.run(req).await
+                    }
+                },
+            ),
+        );
+
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri("/v1/services")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let items = json.as_array().unwrap();
+        assert_eq!(items.len(), 1, "expected only org-alpha service");
+        assert_eq!(items[0]["name"], "alpha-api");
+    }
+
+    #[tokio::test]
+    async fn test_blast_radius_entry_has_evidence() {
+        let pool = test_pool().await;
+        let now = Utc::now().to_rfc3339();
+
+        let service_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&service_id).bind("evidence-svc").bind("").bind("team").bind("openapi")
+        .execute(&pool).await.unwrap();
+
+        let consumer_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&consumer_id).bind("evidence-consumer").bind("").bind("team").bind("e@t.com")
+        .execute(&pool).await.unwrap();
+
+        let sub_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO subscription (id, service_id, consumer_id, opted_in_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&sub_id).bind(&service_id).bind(&consumer_id).bind(&now)
+        .execute(&pool).await.unwrap();
+
+        let from_sv_id = Uuid::new_v4().to_string();
+        let to_sv_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&from_sv_id).bind(&service_id).bind("v1.0").bind(&now).bind("openapi")
+        .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&to_sv_id).bind(&service_id).bind("v1.1").bind(&now).bind("openapi")
+        .execute(&pool).await.unwrap();
+
+        let diff_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&diff_id).bind(&from_sv_id).bind(&to_sv_id).bind::<Option<String>>(None).bind(&now)
+        .execute(&pool).await.unwrap();
+
+        let change_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&change_id).bind(&diff_id)
+        .bind("GET /items \u{2192} response.id")
+        .bind("field_removed").bind("breaking").bind::<Option<String>>(None)
+        .execute(&pool).await.unwrap();
+
+        let event_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&event_id).bind(&consumer_id).bind(&service_id)
+        .bind("GET /items").bind("id").bind(&now)
+        .execute(&pool).await.unwrap();
+
+        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("/v1/diffs/{diff_id}/blast-radius"))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let entries = json["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+
+        let evidence = entries[0]["evidence"]
+            .as_array()
+            .expect("evidence must be an array");
+        assert!(!evidence.is_empty(), "evidence array must not be empty");
+        assert_eq!(evidence[0]["kind"], "runtime_usage");
+        assert_eq!(evidence[0]["operation"], "GET /items");
     }
 }
