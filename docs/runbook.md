@@ -1,7 +1,7 @@
 # Radar Monitor — Runbook
 
 > **Audience:** On-call engineers and DevOps.  
-> **Last updated:** 2026-05-18
+> **Last updated:** 2026-05-21
 
 ---
 
@@ -11,9 +11,10 @@
 2. [Standard deploy](#2-standard-deploy)
 3. [Rollback procedure](#3-rollback-procedure)
 4. [Database operations](#4-database-operations)
-5. [Alerts and escalation](#5-alerts-and-escalation)
-6. [Common incidents](#6-common-incidents)
-7. [Secrets and credentials](#7-secrets-and-credentials)
+5. [Prometheus metrics](#5-prometheus-metrics)
+6. [Alerts and escalation](#6-alerts-and-escalation)
+7. [Common incidents](#7-common-incidents)
+8. [Secrets and credentials](#8-secrets-and-credentials)
 
 ---
 
@@ -127,7 +128,29 @@ psql $DATABASE_URL -c \
 
 ---
 
-## 5. Alerts and escalation
+## 5. Prometheus metrics
+
+Metrics are available at `GET /metrics` (Prometheus text format, no auth required).
+
+Key metrics:
+
+| Metric | Meaning |
+|---|---|
+| `http_requests_total{method,path,status}` | Request count |
+| `http_request_duration_seconds{method,path}` | Latency histogram |
+| `radar_rate_limit_rejections_total` | Requests rejected by per-IP rate limiter |
+
+Example Prometheus `scrape_configs` entry:
+```yaml
+- job_name: radar-api
+  static_configs:
+    - targets: ['radar-api-host:8080']
+  metrics_path: /metrics
+```
+
+---
+
+## 6. Alerts and escalation
 
 | Alert | Threshold | Action |
 |---|---|---|
@@ -138,7 +161,7 @@ psql $DATABASE_URL -c \
 
 ---
 
-## 6. Common incidents
+## 7. Common incidents
 
 ### "radar-api won't start"
 
@@ -168,7 +191,7 @@ psql $DATABASE_URL -c \
 
 ---
 
-## 7. Secrets and credentials
+## 8. Secrets and credentials
 
 | Secret | Storage | Rotation |
 |---|---|---|
