@@ -8,7 +8,8 @@ import PageHeader from '../components/PageHeader'
 const API = ((import.meta as { env?: { VITE_API_URL?: string } }).env?.VITE_API_URL ?? '') + '/v1'
 const DEFAULT_SPEC = 'https://cdn.jsdelivr.net/npm/@scalar/galaxy/dist/latest.yaml'
 const LOCAL_STORAGE_KEY = 'drift-playground-envs-local'
-// Mirrors --bg-base token; used inside iframe srcdoc where CSS variables are unavailable.
+// Mirrors --bg-base token (#0B0F19). Used inside iframe srcdoc where the parent's
+// CSS variables are inaccessible. Keep in sync with :root { --bg-base } in index.css.
 const BG_BASE_DARK = '#0B0F19'
 
 // ---------------------------------------------------------------------------
@@ -85,7 +86,7 @@ const INPUT_STYLE = {
 
 function focusInput(e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) {
   e.currentTarget.style.borderColor = 'var(--cobalt)'
-  e.currentTarget.style.boxShadow = '0 0 0 3px rgba(56,5,227,0.15)'
+  e.currentTarget.style.boxShadow = 'var(--cobalt-focus-ring, 0 0 0 3px rgba(56,5,227,0.15))'
 }
 function blurInput(e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) {
   e.currentTarget.style.borderColor = 'var(--border)'

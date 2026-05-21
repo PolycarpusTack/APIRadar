@@ -11,8 +11,10 @@ const styles: Record<BadgeVariant, { bg: string; border: string; color: string }
   warn:    { bg: 'var(--amber-bg)',             border: 'var(--amber-dim)',             color: 'var(--amber)' },
   err:     { bg: 'var(--red-bg)',               border: 'var(--red-dim)',               color: 'var(--red)' },
   info:    { bg: 'var(--blue-bg)',              border: 'var(--blue-dim)',              color: 'var(--blue)' },
-  cobalt:  { bg: 'rgba(56,5,227,0.12)',         border: 'rgba(56,5,227,0.3)',           color: 'var(--cobalt-mid)' },
-  neon:    { bg: 'rgba(179,252,79,0.1)',        border: 'rgba(179,252,79,0.3)',         color: 'var(--neon-green)' },
+  // --cobalt-bg / --cobalt-dim not yet defined in the styleguide token set; using
+  // computed rgba until those tokens are added to unified-styleguide.html.
+  cobalt:  { bg: 'var(--cobalt-bg, rgba(56,5,227,0.12))',  border: 'var(--cobalt-dim, rgba(56,5,227,0.3))',  color: 'var(--cobalt-mid)' },
+  neon:    { bg: 'var(--neon-bg, rgba(179,252,79,0.1))',   border: 'var(--neon-dim, rgba(179,252,79,0.3))',  color: 'var(--neon-green)' },
   purple:  { bg: 'var(--purple-bg)',            border: 'var(--purple-dim)',            color: 'var(--purple)' },
   neutral: { bg: 'var(--bg-raised)',            border: 'var(--border)',                color: 'var(--text-2)' },
 }
