@@ -167,7 +167,7 @@ fn bench_blast_radius(c: &mut Criterion) {
     // Scenario: 10 consumers, 5 breaking changes, 20 usage events each.
     let pool = rt.block_on(bench_pool());
     let (diff_id, _) = rt.block_on(seed_blast_radius(&pool, 10, 5, 20));
-    let app = build_router(pool, None, 4 * 1024 * 1024, false);
+    let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
     let mut group = c.benchmark_group("blast_radius");
     group.measurement_time(Duration::from_secs(15));
@@ -237,7 +237,7 @@ fn bench_usage_ingest(c: &mut Criterion) {
         (cid, sid)
     });
 
-    let app = build_router(pool, None, 4 * 1024 * 1024, false);
+    let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
     let mut group = c.benchmark_group("usage_ingest");
     group.measurement_time(Duration::from_secs(15));

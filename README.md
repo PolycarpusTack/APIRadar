@@ -67,6 +67,11 @@ cargo clippy --all-targets -- -D warnings     # Lint (warnings = errors)
 | `RADAR_REQUIRE_AUTH` | Reject unauthenticated requests (`true`/`1`) | `false` |
 | `RADAR_SERVICE_TOKEN` | Static bearer token for API auth | — |
 | `RADAR_JWT_SECRET` | HS256 secret for JWT auth (`org_id` claim for tenancy) | — |
+| `RADAR_OIDC_PROVIDER_URL` | OIDC provider base URL (e.g. `https://accounts.google.com`) | — |
+| `RADAR_OIDC_CLIENT_ID` | OIDC client ID | — |
+| `RADAR_OIDC_CLIENT_SECRET` | OIDC client secret | — |
+| `RADAR_OIDC_REDIRECT_URI` | OAuth2 callback URL | `http://localhost:8080/auth/callback` |
+| `RADAR_OIDC_ORG_CLAIM` | OIDC claim to use as `org_id` | `hd` (Google Workspace domain) |
 | `RADAR_REQUEST_TIMEOUT_SECS` | Per-request timeout | `30` |
 | `ANTHROPIC_API_KEY` | Claude AI provider | — |
 | `OPENAI_API_KEY` | OpenAI provider (fallback) | — |

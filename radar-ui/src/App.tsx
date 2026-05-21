@@ -1,5 +1,6 @@
-import { NavLink, Routes, Route } from 'react-router-dom'
-import { LayoutDashboard, GitCompare, Users, FileText, Telescope, FlaskConical, HelpCircle, Settings, Server } from 'lucide-react'
+import { NavLink, Routes, Route, Navigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { LayoutDashboard, GitCompare, Users, FileText, Telescope, FlaskConical, HelpCircle, Settings, Server, LogOut } from 'lucide-react'
 import HomePage from './pages/HomePage'
 import DiffsPage from './pages/DiffsPage'
 import DiffDetailPage from './pages/DiffDetailPage'
@@ -11,6 +12,46 @@ import PlaygroundPage from './pages/PlaygroundPage'
 import GenerateTestsPage from './pages/GenerateTestsPage'
 import HelpPage from './pages/HelpPage'
 import SettingsPage from './pages/SettingsPage'
+import LoginPage from './pages/LoginPage'
+
+// ---------------------------------------------------------------------------
+// D-4: OIDC auth hook
+// ---------------------------------------------------------------------------
+
+interface AuthState {
+  /** null = loading, false = unauthenticated / OIDC not configured, object = authenticated */
+  session: { sub: string; org_id: string } | null | false
+}
+
+function useAuth(): AuthState {
+  const [session, setSession] = useState<AuthState['session']>(null)
+
+  useEffect(() => {
+    fetch('/auth/me', { credentials: 'include' })
+      .then(async (res) => {
+        if (res.ok) {
+          const data = await res.json()
+          setSession(data)
+        } else if (res.status === 401) {
+          // OIDC configured but not authenticated
+          setSession(false)
+        } else {
+          // 503 = OIDC not configured — let the app run unauthenticated
+          setSession(null)
+        }
+      })
+      .catch(() => {
+        // Network error or OIDC endpoint absent — allow unauthenticated access
+        setSession(null)
+      })
+  }, [])
+
+  return { session }
+}
+
+// ---------------------------------------------------------------------------
+// Navigation structure
+// ---------------------------------------------------------------------------
 
 const NAV = [
   {
@@ -90,7 +131,13 @@ function NavItem({
   )
 }
 
-function Sidebar() {
+function Sidebar({ showSignOut }: { showSignOut: boolean }) {
+  function handleSignOut() {
+    // Navigate to the logout endpoint; the server will clear the cookie and
+    // redirect to /app/login. We let the browser follow the redirect.
+    window.location.href = '/auth/logout'
+  }
+
   return (
     <aside
       className="fixed inset-y-0 left-0 z-[100] flex w-64 flex-col overflow-y-auto"
@@ -147,6 +194,16 @@ function Sidebar() {
           <Settings className="h-3.5 w-3.5" />
           Settings
         </NavLink>
+        {showSignOut && (
+          <button
+            onClick={handleSignOut}
+            className="mt-2 flex items-center gap-2 text-[12px] transition-colors hover:text-[var(--text-1)] w-full text-left"
+            style={{ color: 'var(--text-3)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            Sign out
+          </button>
+        )}
         <p
           className="mt-2 text-[10px]"
           style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}
@@ -159,9 +216,28 @@ function Sidebar() {
 }
 
 export default function App() {
+  const { session } = useAuth()
+
+  // session === false  → OIDC is configured, user is not authenticated
+  // session === null   → still loading or OIDC not configured (allow through)
+  // session === object → authenticated
+
+  // Render login page for unauthenticated visits when OIDC is active.
+  // While loading (null) we fall through to the main layout to avoid flash.
+  if (session === false) {
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    )
+  }
+
+  const showSignOut = !!session
+
   return (
     <div className="flex min-h-screen" style={{ background: 'var(--bg-base)' }}>
-      <Sidebar />
+      <Sidebar showSignOut={showSignOut} />
       <main className="ml-64 flex-1">
         <Routes>
           <Route path="/" element={<HomePage />} />
@@ -175,6 +251,7 @@ export default function App() {
           <Route path="/generate-tests" element={<GenerateTestsPage />} />
           <Route path="/help" element={<HelpPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/login" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
     </div>

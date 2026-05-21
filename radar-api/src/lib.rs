@@ -88,6 +88,314 @@ fn validate_jwt(token: &str, secret: &str) -> Option<JwtClaims> {
 }
 
 // ---------------------------------------------------------------------------
+// D-4: OIDC authorization code flow
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct OidcConfig {
+    provider_url: String,
+    client_id: String,
+    client_secret: String,
+    redirect_uri: String,
+    /// Which claim in the userinfo/ID-token to use as `org_id`.
+    /// Defaults to "hd" (Google Workspace hosted domain). Falls back to "sub".
+    org_claim: String,
+}
+
+impl OidcConfig {
+    fn from_env() -> Option<Self> {
+        let provider_url = std::env::var("RADAR_OIDC_PROVIDER_URL").ok()?;
+        let client_id = std::env::var("RADAR_OIDC_CLIENT_ID").ok()?;
+        let client_secret = std::env::var("RADAR_OIDC_CLIENT_SECRET").ok()?;
+        let redirect_uri = std::env::var("RADAR_OIDC_REDIRECT_URI")
+            .unwrap_or_else(|_| "http://localhost:8080/auth/callback".to_string());
+        let org_claim = std::env::var("RADAR_OIDC_ORG_CLAIM")
+            .unwrap_or_else(|_| "hd".to_string());
+        Some(OidcConfig { provider_url, client_id, client_secret, redirect_uri, org_claim })
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct OidcDiscovery {
+    authorization_endpoint: String,
+    token_endpoint: String,
+    #[serde(default)]
+    userinfo_endpoint: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct OidcTokenResponse {
+    access_token: String,
+    #[serde(default)]
+    id_token: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct OidcUserInfo {
+    sub: String,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    hd: Option<String>,
+    /// Display name from the identity provider — captured for future use.
+    #[allow(dead_code)]
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Short-lived CSRF state token embedded as a signed JWT.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OidcState {
+    nonce: String,
+    exp: usize,
+}
+
+/// Sign a JwtClaims struct into an HS256 JWT string.
+fn sign_jwt(claims: &JwtClaims, secret: &str) -> Option<String> {
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    encode(&Header::new(Algorithm::HS256), claims, &EncodingKey::from_secret(secret.as_bytes())).ok()
+}
+
+/// Sign an OidcState into an HS256 JWT string.
+fn sign_state(state: &OidcState, secret: &str) -> Option<String> {
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    encode(&Header::new(Algorithm::HS256), state, &EncodingKey::from_secret(secret.as_bytes())).ok()
+}
+
+/// Validate an OidcState JWT and return the nonce if valid.
+fn validate_state(token: &str, secret: &str) -> Option<String> {
+    use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+    let key = DecodingKey::from_secret(secret.as_bytes());
+    let mut v = Validation::new(Algorithm::HS256);
+    v.validate_exp = true;
+    decode::<OidcState>(token, &key, &v).ok().map(|d| d.claims.nonce)
+}
+
+async fn fetch_discovery(provider_url: &str) -> anyhow::Result<OidcDiscovery> {
+    let url = format!("{provider_url}/.well-known/openid-configuration");
+    let disc: OidcDiscovery = reqwest::get(&url).await?.json().await?;
+    Ok(disc)
+}
+
+fn parse_cookie(header: &str, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    header.split(';').find_map(|part| {
+        part.trim().strip_prefix(&prefix).map(|v| v.trim().to_string())
+    })
+}
+
+fn urlencoding_encode(s: &str) -> String {
+    s.chars().flat_map(|c| {
+        if c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+            vec![c]
+        } else {
+            format!("%{:02X}", c as u32).chars().collect()
+        }
+    }).collect()
+}
+
+fn base64_decode_url(s: &str) -> Option<Vec<u8>> {
+    let standard = s.replace('-', "+").replace('_', "/");
+    base64_decode_simple(&standard)
+}
+
+fn base64_decode_simple(s: &str) -> Option<Vec<u8>> {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let s = s.trim_end_matches('=');
+    let mut result = Vec::with_capacity(s.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0;
+    for &b in s.as_bytes() {
+        let val = CHARS.iter().position(|&c| c == b)? as u32;
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            result.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Some(result)
+}
+
+/// GET /auth/login — redirect to OIDC provider authorization endpoint.
+async fn oidc_login() -> Response {
+    use axum::http::header::{LOCATION, SET_COOKIE};
+    let Some(cfg) = OidcConfig::from_env() else {
+        return (StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "OIDC not configured — set RADAR_OIDC_PROVIDER_URL, RADAR_OIDC_CLIENT_ID, RADAR_OIDC_CLIENT_SECRET"}))).into_response();
+    };
+    let jwt_secret = std::env::var("RADAR_JWT_SECRET").unwrap_or_else(|_| "oidc-state-key".to_string());
+    let disc = match fetch_discovery(&cfg.provider_url).await {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("OIDC discovery failed: {e}")}))).into_response(),
+    };
+    let nonce = Uuid::new_v4().to_string();
+    let state_claims = OidcState {
+        nonce: nonce.clone(),
+        exp: (Utc::now() + Duration::minutes(10)).timestamp() as usize,
+    };
+    let state_token = match sign_state(&state_claims, &jwt_secret) {
+        Some(t) => t,
+        None => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "state signing failed"}))).into_response(),
+    };
+    let auth_url = format!(
+        "{}?response_type=code&client_id={}&redirect_uri={}&scope=openid+email+profile&state={}",
+        disc.authorization_endpoint,
+        urlencoding_encode(&cfg.client_id),
+        urlencoding_encode(&cfg.redirect_uri),
+        urlencoding_encode(&state_token),
+    );
+    let state_cookie = format!(
+        "oidc_state={state_token}; HttpOnly; SameSite=Lax; Max-Age=600; Path=/"
+    );
+    (
+        StatusCode::FOUND,
+        [(LOCATION, auth_url), (SET_COOKIE, state_cookie)],
+    ).into_response()
+}
+
+/// GET /auth/callback?code=...&state=... — exchange code, issue session cookie.
+async fn oidc_callback(Query(params): Query<HashMap<String, String>>, req: Request) -> Response {
+    use axum::http::header::{LOCATION, SET_COOKIE};
+    let Some(cfg) = OidcConfig::from_env() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "OIDC not configured"}))).into_response();
+    };
+    let jwt_secret = std::env::var("RADAR_JWT_SECRET").unwrap_or_else(|_| "oidc-state-key".to_string());
+
+    // Verify CSRF state
+    let state_param = params.get("state").cloned().unwrap_or_default();
+    let cookie_header = req.headers().get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let state_cookie_val = parse_cookie(&cookie_header, "oidc_state");
+    if state_cookie_val.as_deref() != Some(state_param.as_str()) || validate_state(&state_param, &jwt_secret).is_none() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid or expired state"}))).into_response();
+    }
+
+    let code = match params.get("code") {
+        Some(c) => c.clone(),
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing code"}))).into_response(),
+    };
+
+    let disc = match fetch_discovery(&cfg.provider_url).await {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("OIDC discovery failed: {e}")}))).into_response(),
+    };
+
+    // Exchange code for tokens
+    let client = reqwest::Client::new();
+    let token_resp = client
+        .post(&disc.token_endpoint)
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            ("redirect_uri", &cfg.redirect_uri),
+            ("client_id", &cfg.client_id),
+            ("client_secret", &cfg.client_secret),
+        ])
+        .send()
+        .await;
+    let token_resp: OidcTokenResponse = match token_resp {
+        Ok(r) if r.status().is_success() => match r.json().await {
+            Ok(t) => t,
+            Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("token parse failed: {e}")}))).into_response(),
+        },
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("token endpoint {status}: {body}")}))).into_response();
+        }
+        Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("token request failed: {e}")}))).into_response(),
+    };
+
+    // Fetch user info
+    let userinfo_url = disc.userinfo_endpoint.as_deref().unwrap_or("").to_string();
+    let userinfo: OidcUserInfo = if !userinfo_url.is_empty() {
+        match client
+            .get(&userinfo_url)
+            .bearer_auth(&token_resp.access_token)
+            .send()
+            .await
+        {
+            Ok(r) => r.json().await.unwrap_or_default(),
+            Err(_) => OidcUserInfo::default(),
+        }
+    } else {
+        // Try to decode claims from id_token JWT payload (middle segment).
+        // We only extract claims from the payload — no signature verification needed here
+        // since the session JWT we issue is what we sign and verify for auth.
+        token_resp.id_token.as_deref()
+            .and_then(|t| t.split('.').nth(1))
+            .and_then(|b| {
+                let padded = format!("{b}{}", "=".repeat((4 - b.len() % 4) % 4));
+                base64_decode_url(&padded)
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            })
+            .unwrap_or_default()
+    };
+
+    // Derive org_id from configured claim
+    let org_id = if cfg.org_claim == "hd" {
+        userinfo.hd.clone().unwrap_or_else(|| userinfo.sub.clone())
+    } else {
+        userinfo.sub.clone()
+    };
+
+    let sub = userinfo.email.as_deref().unwrap_or(&userinfo.sub).to_string();
+    let session_claims = JwtClaims {
+        sub,
+        org_id,
+        exp: (Utc::now() + Duration::hours(24)).timestamp() as usize,
+    };
+    let session_token = match sign_jwt(&session_claims, &jwt_secret) {
+        Some(t) => t,
+        None => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "session signing failed"}))).into_response(),
+    };
+
+    let secure_flag = if cfg.redirect_uri.starts_with("https") { "; Secure" } else { "" };
+    let session_cookie = format!(
+        "radar_session={session_token}; HttpOnly; SameSite=Lax; Max-Age=86400; Path=/{secure_flag}"
+    );
+    let clear_state = "oidc_state=; HttpOnly; SameSite=Lax; Max-Age=0; Path=/".to_string();
+
+    // Two SET_COOKIE headers require a manually built HeaderMap since Axum tuples
+    // deduplicate keys.
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(LOCATION, "/app/".parse().unwrap());
+    headers.append(SET_COOKIE, session_cookie.parse().unwrap());
+    headers.append(SET_COOKIE, clear_state.parse().unwrap());
+
+    (StatusCode::FOUND, headers).into_response()
+}
+
+/// GET /auth/me — return current session claims (JSON).
+async fn oidc_me(req: Request) -> Response {
+    let jwt_secret = req
+        .extensions()
+        .get::<JwtSecretExt>()
+        .and_then(|s| s.0.clone())
+        .or_else(|| std::env::var("RADAR_JWT_SECRET").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_default();
+    if jwt_secret.is_empty() {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "auth not configured"}))).into_response();
+    }
+    let cookie_header = req.headers().get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let token = parse_cookie(&cookie_header, "radar_session");
+    match token.and_then(|t| validate_jwt(&t, &jwt_secret)) {
+        Some(claims) => Json(json!({"sub": claims.sub, "org_id": claims.org_id})).into_response(),
+        None => (StatusCode::UNAUTHORIZED, Json(json!({"error": "not authenticated"}))).into_response(),
+    }
+}
+
+/// GET /auth/logout — clear session cookie, redirect to /app/login.
+async fn oidc_logout() -> Response {
+    use axum::http::header::{LOCATION, SET_COOKIE};
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(LOCATION, "/app/login".parse().unwrap());
+    headers.insert(SET_COOKIE, "radar_session=; HttpOnly; SameSite=Lax; Max-Age=0; Path=/".parse().unwrap());
+    (StatusCode::FOUND, headers).into_response()
+}
+
+// ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
@@ -244,8 +552,10 @@ pub async fn run(
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(false);
 
+    let jwt_secret = std::env::var("RADAR_JWT_SECRET").ok().filter(|s| !s.is_empty());
+
     let limiter = Arc::new(RateLimiter::new(rate_limit_per_minute));
-    let app = build_router(pool, static_dir, max_body_bytes, require_auth);
+    let app = build_router(pool, static_dir, max_body_bytes, require_auth, jwt_secret);
 
     // D-7: Add rate limiting as the outermost layer so it wraps the entire app.
     let app = app.layer(middleware::from_fn(move |req: Request, next: Next| {
@@ -284,6 +594,10 @@ pub async fn run(
 #[derive(Clone, Copy)]
 struct RequireAuth(bool);
 
+/// JWT secret injected at build time; falls back to RADAR_JWT_SECRET env var at runtime.
+#[derive(Clone)]
+struct JwtSecretExt(Option<String>);
+
 async fn auth_middleware(
     State(pool): State<sqlx::AnyPool>,
     mut req: Request,
@@ -298,21 +612,39 @@ async fn auth_middleware(
         .unwrap_or("")
         .to_string();
 
-    // D-4: JWT validation — when RADAR_JWT_SECRET is set, Bearer tokens must be valid JWTs.
-    let jwt_secret = std::env::var("RADAR_JWT_SECRET").unwrap_or_default();
+    // D-4: JWT validation — prefer build-time secret (test-safe), fall back to env var.
+    let jwt_secret = req
+        .extensions()
+        .get::<JwtSecretExt>()
+        .and_then(|s| s.0.clone())
+        .or_else(|| std::env::var("RADAR_JWT_SECRET").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_default();
     if !jwt_secret.is_empty() {
+        // D-4: Also accept session cookie as auth (set by OIDC callback).
+        let cookie_header_str = req
+            .headers()
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
         let bearer = auth_header.strip_prefix("Bearer ").unwrap_or("");
-        match validate_jwt(bearer, &jwt_secret) {
-            Some(claims) => {
-                // Inject org_id into request extensions for downstream handlers.
+        if let Some(claims) = validate_jwt(bearer, &jwt_secret) {
+            // Inject org_id into request extensions for downstream handlers.
+            req.extensions_mut().insert(claims);
+            return next.run(req).await;
+        }
+
+        // Check cookie as fallback for dashboard sessions.
+        if let Some(session_tok) = parse_cookie(&cookie_header_str, "radar_session") {
+            if let Some(claims) = validate_jwt(&session_tok, &jwt_secret) {
                 req.extensions_mut().insert(claims);
-            }
-            None => {
-                drop(pool);
-                return ApiError::Unauthorized.into_response();
+                return next.run(req).await;
             }
         }
-        return next.run(req).await;
+
+        drop(pool);
+        return ApiError::Unauthorized.into_response();
     }
 
     // Legacy static token auth (backwards-compatible when RADAR_JWT_SECRET is not set).
@@ -340,7 +672,7 @@ async fn auth_middleware(
 // Router
 // ---------------------------------------------------------------------------
 
-pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_bytes: usize, require_auth: bool) -> Router {
+pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_bytes: usize, require_auth: bool, jwt_secret: Option<String>) -> Router {
 
     let v1 = Router::new()
         .route("/services", get(list_services).post(create_service))
@@ -368,10 +700,17 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
         .route("/release-notes/:id", get(get_release_note))
         .route("/diffs/:id/release-notes", post(create_release_note))
         .layer(middleware::from_fn_with_state(pool.clone(), auth_middleware))
-        // Outermost layer: inject RequireAuth into request extensions before auth_middleware runs.
-        .layer(middleware::from_fn(move |mut req: Request, next: Next| async move {
-            req.extensions_mut().insert(RequireAuth(require_auth));
-            next.run(req).await
+        // Outermost layer: inject RequireAuth + JwtSecretExt before auth_middleware runs.
+        .layer(middleware::from_fn({
+            let jwt_secret = jwt_secret.clone();
+            move |mut req: Request, next: Next| {
+                let s = jwt_secret.clone();
+                async move {
+                    req.extensions_mut().insert(RequireAuth(require_auth));
+                    req.extensions_mut().insert(JwtSecretExt(s));
+                    next.run(req).await
+                }
+            }
         }))
         .with_state(pool.clone());
 
@@ -406,6 +745,10 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
     let mut app = Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
+        .route("/auth/login", get(oidc_login))
+        .route("/auth/callback", get(oidc_callback))
+        .route("/auth/me", get(oidc_me))
+        .route("/auth/logout", get(oidc_logout))
         .nest("/v1", v1)
         .with_state(pool.clone())
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(timeout_secs)))
@@ -426,6 +769,13 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
             }),
         )
         .layer(middleware::from_fn(request_id_middleware))
+        .layer(middleware::from_fn(move |mut req: Request, next: Next| {
+            let s = jwt_secret.clone();
+            async move {
+                req.extensions_mut().insert(JwtSecretExt(s));
+                next.run(req).await
+            }
+        }))
         .layer(cors);
 
     if let Some(dir) = static_dir {
@@ -2809,7 +3159,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let body = serde_json::json!([
             {
@@ -2842,7 +3192,7 @@ mod tests {
     #[tokio::test]
     async fn test_ingest_too_large_batch_rejected() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         // Build a batch of 501 events.
         let events: Vec<serde_json::Value> = (0..501)
@@ -2966,7 +3316,7 @@ mod tests {
     #[tokio::test]
     async fn test_blast_radius_404_for_unknown_diff() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -3056,7 +3406,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -3191,7 +3541,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -3295,7 +3645,7 @@ mod tests {
         .bind("GET /invoices").bind("src/api.rs").bind(42i64).bind(&now)
         .execute(&pool).await.unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
         let req = HttpRequest::builder()
             .method("GET")
             .uri(format!("/v1/diffs/{diff_id}/blast-radius"))
@@ -3316,7 +3666,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_consumer_returns_201() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let body = serde_json::json!({
             "name": "billing-svc",
@@ -3344,7 +3694,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_consumer_validates_name() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let body = serde_json::json!({
             "name": "",
@@ -3382,7 +3732,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         // 1. Create consumer.
         let consumer_body = serde_json::json!({
@@ -3463,7 +3813,7 @@ mod tests {
             .bind(Uuid::new_v4().to_string()).bind(&diff_id).bind("GET /items → response.name").bind("field_added").bind("safe").bind::<Option<String>>(None)
             .execute(&pool).await.unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let req = HttpRequest::builder()
             .method("GET").uri("/v1/diffs").body(Body::empty()).unwrap();
@@ -3511,7 +3861,7 @@ mod tests {
                 .execute(&pool).await.unwrap();
         }
 
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let req = HttpRequest::builder()
             .method("GET").uri("/v1/summary").body(Body::empty()).unwrap();
@@ -3529,7 +3879,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_service_returns_201() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let body = serde_json::json!({
             "name": "payments-api",
@@ -3557,7 +3907,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_service_with_explicit_id_then_get() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let id = Uuid::new_v4().to_string();
         let body = serde_json::json!({
@@ -3595,7 +3945,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_service_404_for_unknown() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -3609,7 +3959,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_diffs_pagination_params_accepted() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -3627,7 +3977,7 @@ mod tests {
     #[tokio::test]
     async fn test_diff_deduplication_returns_cached() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let svc_id = Uuid::new_v4().to_string();
         let diff_body = serde_json::json!({
@@ -3672,7 +4022,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_returns_ok_with_live_db() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -3691,7 +4041,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_returns_degraded_when_pool_closed() {
         let pool = test_pool().await;
-        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false);
+        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None);
         pool.close().await;
 
         let req = HttpRequest::builder()
@@ -3712,7 +4062,7 @@ mod tests {
     async fn test_require_auth_blocks_unauthenticated_requests() {
         let pool = test_pool().await;
         // Pass require_auth=true directly — no env var manipulation needed.
-        let app = build_router(pool, None, 4 * 1024 * 1024, true);
+        let app = build_router(pool, None, 4 * 1024 * 1024, true, None);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -3727,7 +4077,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_sandbox_env_token_masked_in_response() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let req = HttpRequest::builder()
             .method("POST")
@@ -3770,7 +4120,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -3795,7 +4145,7 @@ mod tests {
     async fn test_create_service_writes_org_id() {
         let pool = test_pool().await;
         let claims = JwtClaims { sub: "u1".into(), org_id: "acme-corp".into(), exp: usize::MAX };
-        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false).layer(
+        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None).layer(
             axum::middleware::from_fn(
                 move |mut req: axum::extract::Request, next: axum::middleware::Next| {
                     let c = claims.clone();
@@ -3844,7 +4194,7 @@ mod tests {
         .execute(&pool).await.unwrap();
 
         let claims = JwtClaims { sub: "u1".into(), org_id: "org-alpha".into(), exp: usize::MAX };
-        let app = build_router(pool, None, 4 * 1024 * 1024, false).layer(
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None).layer(
             axum::middleware::from_fn(
                 move |mut req: axum::extract::Request, next: axum::middleware::Next| {
                     let c = claims.clone();
@@ -3935,7 +4285,7 @@ mod tests {
         .bind("GET /items").bind("id").bind(&now)
         .execute(&pool).await.unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024, false);
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
         let req = HttpRequest::builder()
             .method("GET")
             .uri(format!("/v1/diffs/{diff_id}/blast-radius"))
@@ -3957,5 +4307,50 @@ mod tests {
         assert!(!evidence.is_empty(), "evidence array must not be empty");
         assert_eq!(evidence[0]["kind"], "runtime_usage");
         assert_eq!(evidence[0]["operation"], "GET /items");
+    }
+
+    // ── D-4: OIDC /auth/me tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_auth_me_returns_503_when_oidc_not_configured() {
+        let pool = test_pool().await;
+        // No jwt_secret → OIDC not configured → 503
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/auth/me")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 503);
+    }
+
+    #[tokio::test]
+    async fn test_auth_me_returns_claims_with_valid_cookie() {
+        let secret = "test-oidc-secret-me-200-no-env";
+        let pool = test_pool().await;
+        // Pass secret at build time — no env var mutation, test-safe.
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, Some(secret.to_string()));
+
+        let claims = JwtClaims {
+            sub: "alice@example.com".into(),
+            org_id: "example.com".into(),
+            exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
+        };
+        let token = sign_jwt(&claims, secret).expect("sign_jwt");
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/auth/me")
+            .header("cookie", format!("radar_session={token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["sub"], "alice@example.com");
+        assert_eq!(json["org_id"], "example.com");
     }
 }
