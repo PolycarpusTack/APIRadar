@@ -36,3 +36,8 @@ serde_yaml = { workspace = true }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+criterion = { workspace = true }
+
+[[bench]]
+name = "slo"
+harness = false
