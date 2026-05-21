@@ -12,9 +12,10 @@
 3. [Rollback procedure](#3-rollback-procedure)
 4. [Database operations](#4-database-operations)
 5. [Prometheus metrics](#5-prometheus-metrics)
-6. [Alerts and escalation](#6-alerts-and-escalation)
-7. [Common incidents](#7-common-incidents)
-8. [Secrets and credentials](#8-secrets-and-credentials)
+6. [Security notes](#6-security-notes)
+7. [Alerts and escalation](#7-alerts-and-escalation)
+8. [Common incidents](#8-common-incidents)
+9. [Secrets and credentials](#9-secrets-and-credentials)
 
 ---
 
@@ -150,7 +151,38 @@ Example Prometheus `scrape_configs` entry:
 
 ---
 
-## 6. Alerts and escalation
+## 6. Security notes
+
+### Rate limiter and reverse proxy
+
+The per-IP rate limiter reads the client IP from `X-Forwarded-For` (first value) or `X-Real-IP`, falling back to `"unknown"`. Clients that control their own headers can spoof these values to bypass rate limiting.
+
+**Mitigation:** deploy `radar-api` behind a reverse proxy (nginx, Caddy) and configure the proxy to **overwrite** `X-Forwarded-For` with the real peer address rather than appending to a client-supplied value.
+
+Example nginx snippet:
+```nginx
+location / {
+    proxy_set_header X-Forwarded-For $remote_addr;  # overwrite, not append
+    proxy_set_header X-Real-IP       $remote_addr;
+    proxy_pass http://radar-api:8080;
+}
+```
+
+Without this, rate limiting is advisory only (it deters casual flooding, not a determined attacker).
+
+### Auth in production
+
+- Set `RADAR_REQUIRE_AUTH=true` in any internet-facing deployment.
+- Use `RADAR_JWT_SECRET` (not the static `RADAR_SERVICE_TOKEN`) for multi-tenant deployments; the JWT `org_id` claim scopes all reads and writes.
+- `RADAR_JWT_SECRET` and `RADAR_SERVICE_TOKEN` are never logged by the API.
+
+### Sandbox environment tokens
+
+Bearer tokens stored in Sandbox Environments (Settings → Playground) are masked in all API responses — only the last 4 characters are visible. The full token is stored in the database; ensure DB backups are encrypted at rest.
+
+---
+
+## 7. Alerts and escalation
 
 | Alert | Threshold | Action |
 |---|---|---|
@@ -161,7 +193,7 @@ Example Prometheus `scrape_configs` entry:
 
 ---
 
-## 7. Common incidents
+## 8. Common incidents
 
 ### "radar-api won't start"
 
@@ -191,7 +223,7 @@ Example Prometheus `scrape_configs` entry:
 
 ---
 
-## 8. Secrets and credentials
+## 9. Secrets and credentials
 
 | Secret | Storage | Rotation |
 |---|---|---|

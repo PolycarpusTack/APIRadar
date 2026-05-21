@@ -332,12 +332,13 @@ PostgreSQL 16. `usage_event` can upgrade to TimescaleDB hypertable at scale; def
 
 ## 9. Security & Privacy
 
-- **Threat model:** (1) malicious spec input (billion-laughs-style in OpenAPI refs) — mitigate with size + depth limits. (2) consumer registry spoofing — mitigate with repo-ownership proof (file committed to default branch). (3) usage-event flood — rate-limit per service token.
-- **Secrets handling:** service tokens in env or OS keychain for CLI; no tokens logged.
-- **AuthN / AuthZ:** service-token auth per producer; dashboard uses OIDC.
+- **Threat model:** (1) malicious spec input (billion-laughs-style in OpenAPI refs) — mitigated: 4 MB body limit (`DefaultBodyLimit::max`) + axum JSON extractor depth. (2) consumer registry spoofing — not yet mitigated: repo-ownership proof (file on default branch) is on the roadmap. (3) usage-event flood — mitigated: per-IP sliding-window rate limiter (default 300 req/min), plus per-batch size cap.
+- **Rate limiter trust-proxy caveat:** client IP is read from `X-Forwarded-For` (first value). Clients can spoof this to bypass rate limiting unless the reverse proxy overwrites the header (`proxy_set_header X-Forwarded-For $remote_addr`). Document this in the runbook; do not rely on rate limiting as the sole flood defence.
+- **Secrets handling:** service tokens in env vars; never logged. Sandbox-environment bearer tokens masked to last-4-chars in all API responses.
+- **AuthN / AuthZ:** static bearer token (`RADAR_SERVICE_TOKEN`) or HS256 JWT (`RADAR_JWT_SECRET`) with `org_id` claim for row-level tenancy. `/health` and `/metrics` are unauthenticated by design. OIDC not yet implemented.
 - **PII:** none expected. Field paths are schema-only, not field values.
-- **Data leaves the machine?** Yes, per design — usage telemetry and diffs are sent to `radar-api`. Self-hosted by default.
-- **Supply chain:** cargo lock + npm lock pinned; cosign-signed release binaries; SBOM via syft.
+- **Data leaves the machine?** Yes, per design — usage telemetry and diffs are sent to `radar-api`. Self-hosted by default. AI endpoints call Anthropic/OpenAI APIs.
+- **Supply chain:** `Cargo.lock` + `pnpm-lock.yaml` committed; `cargo audit` in CI (RUSTSEC-2023-0071 acknowledged — transitive mysql dep, no mysql usage); CycloneDX SBOM generated on main-branch releases.
 
 ---
 
