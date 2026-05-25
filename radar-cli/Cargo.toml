@@ -7,6 +7,10 @@ edition = "2021"
 name = "radar"
 path = "src/main.rs"
 
+[lib]
+name = "radar_cli_lib"
+path = "src/lib.rs"
+
 [dependencies]
 radar-core = { path = "../radar-core" }
 radar-scanner = { path = "../radar-scanner" }
@@ -18,7 +22,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 colored = { workspace = true }
-serde_yaml = { workspace = true }
+serde_yml = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 chrono = { workspace = true }

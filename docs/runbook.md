@@ -137,9 +137,11 @@ Key metrics:
 
 | Metric | Meaning |
 |---|---|
-| `http_requests_total{method,path,status}` | Request count |
-| `http_request_duration_seconds{method,path}` | Latency histogram |
+| `request_duration_seconds` | HTTP request latency histogram (all routes) |
 | `radar_rate_limit_rejections_total` | Requests rejected by per-IP rate limiter |
+| `radar_diffs_created_total` | Total diff computations |
+| `radar_consumers_created_total` | Total consumer registrations |
+| `radar_test_suites_created_total` | Total test suite generations |
 
 Example Prometheus `scrape_configs` entry:
 ```yaml

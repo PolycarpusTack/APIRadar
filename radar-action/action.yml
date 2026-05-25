@@ -1,0 +1,150 @@
+name: 'Radar API Contract Drift Monitor'
+description: 'Detect breaking API contract changes and block PRs based on blast radius evidence'
+author: 'PolycarpusTack'
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  base-spec:
+    description: 'Path to the base (old) spec file — OpenAPI YAML/JSON, GraphQL SDL, or .proto'
+    required: true
+  head-spec:
+    description: 'Path to the head (new) spec file'
+    required: true
+  service-id:
+    description: 'Producer service ID in the Radar API registry (enables blast radius and policy decisions)'
+    required: false
+    default: ''
+  radar-url:
+    description: 'Base URL of the Radar API instance (e.g. https://radar.example.com)'
+    required: false
+    default: ''
+  radar-token:
+    description: 'Bearer token for authenticating with Radar API — use a GitHub secret'
+    required: false
+    default: ''
+  fail-mode:
+    description: 'closed | open | warn — behavior when Radar API is unreachable'
+    required: false
+    default: 'closed'
+  post-comment:
+    description: 'true | false — post or update a PR comment with the drift summary and evidence table'
+    required: false
+    default: 'false'
+  spec-format:
+    description: 'openapi | graphql | protobuf — auto-detected from file extension when omitted'
+    required: false
+    default: ''
+
+outputs:
+  diff-id:
+    description: 'ID of the diff record created in the Radar API (empty when radar-url is not set)'
+    value: ${{ steps.check.outputs.diff-id }}
+  breaking-count:
+    description: 'Number of breaking changes detected'
+    value: ${{ steps.check.outputs.breaking-count }}
+  affected-consumer-count:
+    description: 'Number of consumers affected by breaking changes (requires Radar API connection)'
+    value: ${{ steps.check.outputs.affected-consumer-count }}
+  policy-verdict:
+    description: 'Policy verdict: pass | warn | block | overridden'
+    value: ${{ steps.check.outputs.policy-verdict }}
+  dashboard-url:
+    description: 'URL to the Radar dashboard for this diff (empty when radar-url is not set)'
+    value: ${{ steps.check.outputs.dashboard-url }}
+
+runs:
+  using: composite
+  steps:
+    # -------------------------------------------------------------------------
+    # Step 1 — ensure Rust toolchain is available
+    # -------------------------------------------------------------------------
+    - name: Install Rust stable
+      uses: dtolnay/rust-toolchain@stable
+
+    # -------------------------------------------------------------------------
+    # Step 2 — cache the Cargo registry and the radar-cli build output
+    # -------------------------------------------------------------------------
+    - name: Cache radar-cli build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          ${{ github.action_path }}/target/release/radar
+          ${{ github.action_path }}/target/release/radar.exe
+        key: ${{ runner.os }}-radar-cli-${{ hashFiles(format('{0}/Cargo.lock', github.action_path)) }}
+        restore-keys: |
+          ${{ runner.os }}-radar-cli-
+
+    # -------------------------------------------------------------------------
+    # Step 3 — build radar-cli from the action's own source tree
+    # -------------------------------------------------------------------------
+    - name: Build radar-cli
+      shell: bash
+      run: |
+        if command -v radar &>/dev/null; then
+          echo "radar already on PATH — skipping build"
+        else
+          echo "Building radar-cli from source…"
+          cd "$GITHUB_ACTION_PATH"
+          cargo build --release -p radar-cli 2>&1
+          echo "$GITHUB_ACTION_PATH/target/release" >> "$GITHUB_PATH"
+        fi
+      env:
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
+
+    # -------------------------------------------------------------------------
+    # Step 4 — run radar check and capture outputs via summary file
+    # -------------------------------------------------------------------------
+    - name: Run radar check
+      id: check
+      shell: bash
+      run: |
+        SUMMARY_FILE="${RUNNER_TEMP}/radar-summary-$GITHUB_RUN_ID.json"
+
+        ARGS="--base ${{ inputs.base-spec }} --head ${{ inputs.head-spec }}"
+        ARGS="$ARGS --summary-file $SUMMARY_FILE --no-color"
+
+        if [ -n "${{ inputs.service-id }}" ]; then
+          ARGS="$ARGS --service-id ${{ inputs.service-id }}"
+        fi
+        if [ -n "${{ inputs.radar-url }}" ]; then
+          ARGS="$ARGS --api-url ${{ inputs.radar-url }}"
+        fi
+        if [ -n "${{ inputs.spec-format }}" ]; then
+          ARGS="$ARGS --format ${{ inputs.spec-format }}"
+        fi
+        if [ "${{ inputs.post-comment }}" = "true" ]; then
+          ARGS="$ARGS --post-comment"
+        fi
+
+        # Run; capture exit code without triggering set -e
+        set +e
+        # shellcheck disable=SC2086
+        radar check $ARGS
+        EXIT_CODE=$?
+        set -e
+
+        # Parse summary file → GITHUB_OUTPUT
+        if [ -f "$SUMMARY_FILE" ]; then
+          echo "diff-id=$(jq -r '.diff_id // ""' "$SUMMARY_FILE")"           >> "$GITHUB_OUTPUT"
+          echo "breaking-count=$(jq -r '.breaking_count' "$SUMMARY_FILE")"   >> "$GITHUB_OUTPUT"
+          echo "affected-consumer-count=$(jq -r '.affected_consumer_count' "$SUMMARY_FILE")" >> "$GITHUB_OUTPUT"
+          echo "policy-verdict=$(jq -r '.policy_verdict' "$SUMMARY_FILE")"   >> "$GITHUB_OUTPUT"
+          echo "dashboard-url=$(jq -r '.dashboard_url // ""' "$SUMMARY_FILE")" >> "$GITHUB_OUTPUT"
+        else
+          echo "diff-id="                  >> "$GITHUB_OUTPUT"
+          echo "breaking-count=0"          >> "$GITHUB_OUTPUT"
+          echo "affected-consumer-count=0" >> "$GITHUB_OUTPUT"
+          echo "policy-verdict=pass"       >> "$GITHUB_OUTPUT"
+          echo "dashboard-url="            >> "$GITHUB_OUTPUT"
+        fi
+
+        exit $EXIT_CODE
+      env:
+        RADAR_API_URL: ${{ inputs.radar-url }}
+        RADAR_SERVICE_TOKEN: ${{ inputs.radar-token }}
+        GITHUB_TOKEN: ${{ github.token }}

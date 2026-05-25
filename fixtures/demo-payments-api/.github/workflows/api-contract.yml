@@ -1,0 +1,71 @@
+# Demo: API contract check for the payments-api service.
+#
+# Copy this workflow into your own API repository and set the required
+# secrets/variables in your GitHub repository settings:
+#
+#   RADAR_API_URL  — URL of your Radar instance (e.g. https://radar.example.com)
+#   RADAR_TOKEN    — Service token from Radar settings → Sandbox Envs
+#
+# The action will:
+#   1. Diff the OpenAPI spec between PR base and head
+#   2. Compute blast radius (affected consumers + evidence)
+#   3. Post a comment on the PR with the verdict and evidence table
+#   4. Block merge when fail_mode=closed and breaking changes affect active consumers
+name: API Contract Check
+
+on:
+  pull_request:
+    paths:
+      - 'openapi.yaml'
+      - 'openapi/**'
+      - 'api/**/*.yaml'
+
+jobs:
+  contract:
+    name: Radar contract check
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write   # required to post PR comments
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # need full history to resolve base spec
+
+      - name: Resolve base spec
+        id: base
+        run: |
+          git show origin/${{ github.base_ref }}:openapi.yaml > /tmp/base-spec.yaml \
+            || cp openapi.yaml /tmp/base-spec.yaml   # fallback: identical spec (no diff)
+          echo "path=/tmp/base-spec.yaml" >> $GITHUB_OUTPUT
+
+      - name: Radar contract check
+        id: radar
+        uses: PolycarpusTack/radar-monitor/radar-action@v1
+        with:
+          base-spec: ${{ steps.base.outputs.path }}
+          head-spec: openapi.yaml
+          spec-format: openapi
+          service-id: payments-api
+          radar-api-url: ${{ vars.RADAR_API_URL }}
+          radar-token: ${{ secrets.RADAR_TOKEN }}
+          fail-mode: closed
+          post-github-comment: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Show outputs
+        if: always()
+        run: |
+          echo "breaking-count : ${{ steps.radar.outputs.breaking-count }}"
+          echo "policy-verdict : ${{ steps.radar.outputs.policy-verdict }}"
+          echo "diff-id        : ${{ steps.radar.outputs.diff-id }}"
+
+      - name: Block on breaking changes
+        if: steps.radar.outputs.policy-verdict == 'block'
+        run: |
+          echo "::error::Radar blocked this PR — ${{ steps.radar.outputs.breaking-count }} breaking change(s) affect active consumers."
+          echo "See the PR comment for the blast radius and migration guide."
+          exit 1

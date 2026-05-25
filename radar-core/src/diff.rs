@@ -68,7 +68,7 @@ pub struct DiffChange {
 
 /// Parse an OpenAPI 3.x YAML string into an `openapiv3::OpenAPI` value.
 pub fn parse_openapi(content: &str) -> Result<OpenAPI, DriftError> {
-    serde_yaml::from_str(content).map_err(|e| DriftError::Parse(e.to_string()))
+    serde_yml::from_str(content).map_err(|e| DriftError::Parse(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------

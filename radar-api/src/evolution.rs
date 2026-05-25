@@ -1,0 +1,164 @@
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
+use serde_json::{json, Value};
+use uuid::Uuid;
+use crate::auth::JwtClaims;
+use crate::errors::ApiError;
+
+const VALID_CHANGE_KINDS: &[&str] = &[
+    "field_removed", "field_added", "type_changed", "required_changed",
+    "operation_removed", "operation_added", "parameter_removed", "response_removed",
+    "enum_value_removed", "enum_value_added", "nullability_changed",
+    "request_body_added", "request_body_removed",
+];
+
+#[derive(serde::Deserialize)]
+pub(crate) struct CreateEvolutionRuleBody {
+    pub(crate) name: String,
+    pub(crate) change_kind: String,
+    pub(crate) path_pattern: Option<String>,
+    pub(crate) severity_override: String,
+}
+
+/// POST /v1/evolution-rules
+pub(crate) async fn create_evolution_rule(
+    State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
+    Json(body): Json<CreateEvolutionRuleBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    if body.name.is_empty() {
+        return Err(ApiError::BadRequest("name is required".into()));
+    }
+    if !VALID_CHANGE_KINDS.contains(&body.change_kind.as_str()) {
+        return Err(ApiError::BadRequest(format!(
+            "change_kind must be one of: {}",
+            VALID_CHANGE_KINDS.join(", ")
+        )));
+    }
+    if body.severity_override != "safe" && body.severity_override != "non_breaking_risky" {
+        return Err(ApiError::BadRequest(
+            "severity_override must be 'safe' or 'non_breaking_risky'".into(),
+        ));
+    }
+
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let id = Uuid::new_v4().to_string();
+
+    sqlx::query(
+        "INSERT INTO evolution_rule (id, org_id, name, change_kind, path_pattern, severity_override)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&org_id)
+    .bind(&body.name)
+    .bind(&body.change_kind)
+    .bind(body.path_pattern.as_deref())
+    .bind(&body.severity_override)
+    .execute(&pool)
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id":               id,
+            "name":             body.name,
+            "change_kind":      body.change_kind,
+            "path_pattern":     body.path_pattern,
+            "severity_override": body.severity_override,
+            "enabled":          true,
+        })),
+    ))
+}
+
+/// GET /v1/evolution-rules
+pub(crate) async fn list_evolution_rules(
+    State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+
+    let rows = sqlx::query(
+        "SELECT id, name, change_kind, path_pattern, severity_override, enabled, created_at
+         FROM evolution_rule
+         WHERE org_id = ?
+         ORDER BY created_at DESC",
+    )
+    .bind(&org_id)
+    .fetch_all(&pool)
+    .await?;
+
+    let entries: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id":               r.get::<String, _>("id"),
+                "name":             r.get::<String, _>("name"),
+                "change_kind":      r.get::<String, _>("change_kind"),
+                "path_pattern":     r.try_get::<Option<String>, _>("path_pattern").unwrap_or(None),
+                "severity_override": r.get::<String, _>("severity_override"),
+                "enabled":          r.get::<i64, _>("enabled") != 0,
+                "created_at":       r.get::<String, _>("created_at"),
+            })
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(json!({ "entries": entries }))))
+}
+
+/// DELETE /v1/evolution-rules/:id
+pub(crate) async fn delete_evolution_rule(
+    Path(rule_id): Path<String>,
+    State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+
+    let result = sqlx::query(
+        "DELETE FROM evolution_rule WHERE id = ? AND org_id = ?",
+    )
+    .bind(&rule_id)
+    .bind(&org_id)
+    .execute(&pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound(format!("evolution rule {rule_id} not found")));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// PATCH /v1/evolution-rules/:id — toggle enabled/disabled
+pub(crate) async fn toggle_evolution_rule(
+    Path(rule_id): Path<String>,
+    State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, ApiError> {
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let enabled: i64 = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .map(|b| if b { 1 } else { 0 })
+        .ok_or_else(|| ApiError::BadRequest("body must include enabled: bool".into()))?;
+
+    let result = sqlx::query(
+        "UPDATE evolution_rule SET enabled = ? WHERE id = ? AND org_id = ?",
+    )
+    .bind(enabled)
+    .bind(&rule_id)
+    .bind(&org_id)
+    .execute(&pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound(format!("evolution rule {rule_id} not found")));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}

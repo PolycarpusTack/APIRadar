@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use radar_core::models::Severity;
 
 mod ai_provider;
 mod api_client;
@@ -21,6 +20,77 @@ mod test_gen;
 // ---------------------------------------------------------------------------
 // CLI definition
 // ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+enum RuleAction {
+    /// Create a new evolution rule.
+    Add {
+        /// Human-readable label for this rule.
+        #[arg(long)]
+        name: String,
+        /// ChangeKind to target (e.g. field_added, enum_value_added).
+        #[arg(long)]
+        change_kind: String,
+        /// Optional dot-separated field path glob (e.g. "users.*", "**.legacy_field").
+        #[arg(long)]
+        path_pattern: Option<String>,
+        /// Target severity: safe | non_breaking_risky.
+        #[arg(long)]
+        severity_override: String,
+        /// Base URL of the radar-api server.
+        #[arg(long, env = "RADAR_API_URL")]
+        api_url: String,
+        /// Optional bearer token.
+        #[arg(long, env = "RADAR_SERVICE_TOKEN")]
+        token: Option<String>,
+    },
+    /// List all evolution rules for this org.
+    List {
+        /// Base URL of the radar-api server.
+        #[arg(long, env = "RADAR_API_URL")]
+        api_url: String,
+        /// Optional bearer token.
+        #[arg(long, env = "RADAR_SERVICE_TOKEN")]
+        token: Option<String>,
+    },
+    /// Delete an evolution rule by ID.
+    Delete {
+        /// Rule ID to delete.
+        id: String,
+        /// Base URL of the radar-api server.
+        #[arg(long, env = "RADAR_API_URL")]
+        api_url: String,
+        /// Optional bearer token.
+        #[arg(long, env = "RADAR_SERVICE_TOKEN")]
+        token: Option<String>,
+    },
+    /// Enable or disable an evolution rule.
+    Toggle {
+        /// Rule ID.
+        id: String,
+        /// Set to true to enable, false to disable.
+        #[arg(long)]
+        enabled: bool,
+        /// Base URL of the radar-api server.
+        #[arg(long, env = "RADAR_API_URL")]
+        api_url: String,
+        /// Optional bearer token.
+        #[arg(long, env = "RADAR_SERVICE_TOKEN")]
+        token: Option<String>,
+    },
+    /// Show which evolution rules would apply to a specific diff.
+    Test {
+        /// Diff ID to test rules against.
+        #[arg(long)]
+        diff_id: String,
+        /// Base URL of the radar-api server.
+        #[arg(long, env = "RADAR_API_URL")]
+        api_url: String,
+        /// Optional bearer token.
+        #[arg(long, env = "RADAR_SERVICE_TOKEN")]
+        token: Option<String>,
+    },
+}
 
 #[derive(Parser)]
 #[command(
@@ -69,6 +139,11 @@ enum Commands {
         /// Disable ANSI colour codes in output.
         #[arg(long, default_value_t = false)]
         no_color: bool,
+
+        /// Write a JSON summary file (diff_id, breaking_count, policy_verdict, …) to this path.
+        /// Consumed by radar-action to set GitHub Action outputs.
+        #[arg(long)]
+        summary_file: Option<PathBuf>,
 
         /// Base URL of the radar-api server.
         #[arg(long, env = "RADAR_API_URL")]
@@ -141,6 +216,12 @@ enum Commands {
         /// Example: --operation-map "userId=GET /users" --operation-map "email=GET /users"
         #[arg(long, value_name = "FIELD=OP")]
         operation_map: Vec<String>,
+
+        /// Postman Collection v2.1 JSON files to scan for Consumer evidence.
+        /// Can be repeated. These auto-register the consumer and post evidence to the API.
+        /// Example: --collection collections/payments.postman_collection.json
+        #[arg(long, value_name = "PATH")]
+        collection: Vec<PathBuf>,
     },
 
     /// Generate Postman test cases from a Jira ticket and an OpenAPI spec.
@@ -168,6 +249,12 @@ enum Commands {
         /// Push the collection to this Postman workspace ID (requires POSTMAN_API_KEY).
         #[arg(long)]
         postman_workspace: Option<String>,
+    },
+
+    /// Manage evolution rules — org-level severity overrides for specific change kinds.
+    Rule {
+        #[command(subcommand)]
+        action: RuleAction,
     },
 
     /// Print shell completion script to stdout.
@@ -230,6 +317,7 @@ async fn main() -> Result<()> {
             post_comment,
             json,
             no_color,
+            summary_file,
             api_url,
             service_id,
             token,
@@ -283,42 +371,12 @@ async fn main() -> Result<()> {
                 render::print_table(&changes, use_color);
             }
 
-            if post_comment {
-                match github::GithubContext::from_env() {
-                    Some(ctx) => {
-                        let breaking = changes
-                            .iter()
-                            .filter(|c| c.severity == Severity::Breaking)
-                            .count();
-                        let policy_verdict = format!(
-                            "Policy: `{}` \u{2014} {} breaking change(s) found.",
-                            match pol.block_on {
-                                policy::BlockOn::Never => "never",
-                                policy::BlockOn::AnyBreak => "any_break",
-                                policy::BlockOn::ActiveConsumers => "active_consumers",
-                            },
-                            breaking
-                        );
-                        let comment_body =
-                            github::build_comment(&changes, &base, &head, &policy_verdict);
-                        match github::post_or_update_comment(&ctx, &comment_body).await {
-                            Ok(url) => println!("PR comment posted: {url}"),
-                            Err(e) => eprintln!("Warning: failed to post PR comment: {e}"),
-                        }
-                    }
-                    None => {
-                        if !json {
-                            eprintln!(
-                                "Warning: --post-comment set but not running in a GitHub Actions PR context \
-                                (GITHUB_TOKEN or PR number missing). Skipping."
-                            );
-                        }
-                    }
-                }
-            }
-
             // Post diff and fetch blast radius when api_url and service_id are both set.
             let mut has_active_consumers = false;
+            let mut api_error = false;
+            let mut posted_diff_id: Option<String> = None;
+            let mut blast_radius_data: Option<render::BlastRadiusResponse> = None;
+
             if let (Some(ref url), Some(ref svc_id)) = (&api_url, &service_id) {
                 let token_ref = token.as_deref();
                 match api_client::post_diff(
@@ -346,14 +404,18 @@ async fn main() -> Result<()> {
                                 if !json {
                                     render::print_blast_radius(&br, use_color);
                                 }
+                                blast_radius_data = Some(br);
                             }
                             Err(e) => {
                                 eprintln!("Warning: failed to fetch blast radius: {e}");
+                                api_error = true;
                             }
                         }
+                        posted_diff_id = Some(diff_id);
                     }
                     Err(e) => {
                         eprintln!("Warning: failed to post diff to API: {e}");
+                        api_error = true;
                     }
                 }
             }
@@ -373,9 +435,221 @@ async fn main() -> Result<()> {
                     false
                 };
 
-            let code = policy::exit_code(&changes, &pol, has_active_consumers, has_label_override);
-            if code != 0 {
-                std::process::exit(code);
+            // F-3: check for a server-side acknowledgement (overrides block verdict).
+            let has_label_override = if !has_label_override {
+                if let (Some(ref url), Some(ref did)) = (&api_url, &posted_diff_id) {
+                    api_client::check_diff_acknowledged(url, did, token.as_deref())
+                        .await
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            } else {
+                has_label_override
+            };
+
+            // E-3: compute policy verdict using fail_mode semantics.
+            let fail_mode = config.fail_mode();
+            let decision =
+                policy::decide(&changes, &pol, &fail_mode, has_active_consumers, has_label_override, api_error);
+
+            if decision.verdict == policy::Verdict::Warn && !json {
+                eprintln!(
+                    "Warning: drift check completed with verdict=warn (fail_mode={:?}) — build not blocked.",
+                    decision.fail_mode
+                );
+            }
+
+            // Post policy decision to radar-api when api_url is set.
+            if let Some(ref url) = api_url {
+                let verdict_str = match &decision.verdict {
+                    policy::Verdict::Pass => "pass",
+                    policy::Verdict::Warn => "warn",
+                    policy::Verdict::Block => "block",
+                    policy::Verdict::Overridden => "overridden",
+                };
+                let fm_str = match &decision.fail_mode {
+                    policy::FailMode::Closed => "closed",
+                    policy::FailMode::Open => "open",
+                    policy::FailMode::Warn => "warn",
+                };
+                if let Err(e) = api_client::post_policy_decision(
+                    url,
+                    posted_diff_id.as_deref(),
+                    service_id.as_deref(),
+                    verdict_str,
+                    fm_str,
+                    "radar-cli",
+                    token.as_deref(),
+                )
+                .await
+                {
+                    eprintln!("Warning: failed to post policy decision: {e}");
+                }
+            }
+
+            // Post PR comment with evidence table and policy verdict (E-4).
+            // Runs after blast-radius and policy decision are both available.
+            if post_comment {
+                match github::GithubContext::from_env() {
+                    Some(ctx) => {
+                        let verdict_str = match &decision.verdict {
+                            policy::Verdict::Pass => "pass",
+                            policy::Verdict::Warn => "warn",
+                            policy::Verdict::Block => "block",
+                            policy::Verdict::Overridden => "overridden",
+                        };
+                        let fm_str = match &decision.fail_mode {
+                            policy::FailMode::Closed => "closed",
+                            policy::FailMode::Open => "open",
+                            policy::FailMode::Warn => "warn",
+                        };
+                        // H-5: fetch test suites generated for this diff.
+                        let test_suites: Vec<github::TestSuiteSummary> =
+                            if let (Some(ref url), Some(ref did)) = (&api_url, &posted_diff_id) {
+                                api_client::fetch_diff_test_suites(url, did, token.as_deref())
+                                    .await
+                                    .unwrap_or_default()
+                            } else {
+                                vec![]
+                            };
+                        let comment_body = github::build_comment_with_suites(
+                            &changes,
+                            &base,
+                            &head,
+                            blast_radius_data.as_ref(),
+                            verdict_str,
+                            fm_str,
+                            &test_suites,
+                        );
+                        match github::post_or_update_comment(&ctx, &comment_body).await {
+                            Ok(url) => println!("PR comment posted: {url}"),
+                            Err(e) => eprintln!("Warning: failed to post PR comment: {e}"),
+                        }
+                    }
+                    None => {
+                        if !json {
+                            eprintln!(
+                                "Warning: --post-comment set but not running in a GitHub Actions PR context \
+                                (GITHUB_TOKEN or PR number missing). Skipping."
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Write machine-readable summary for radar-action output parsing.
+            if let Some(ref sf) = summary_file {
+                let breaking_count = changes
+                    .iter()
+                    .filter(|c| c.severity == radar_core::models::Severity::Breaking)
+                    .count();
+                let affected_consumer_count = blast_radius_data
+                    .as_ref()
+                    .map(|br| br.entries.len())
+                    .unwrap_or(0);
+                let verdict_str = match &decision.verdict {
+                    policy::Verdict::Pass => "pass",
+                    policy::Verdict::Warn => "warn",
+                    policy::Verdict::Block => "block",
+                    policy::Verdict::Overridden => "overridden",
+                };
+                let dashboard_url = if let (Some(ref url), Some(ref did)) = (&api_url, &posted_diff_id) {
+                    Some(format!("{url}/app/diffs/{did}"))
+                } else {
+                    None
+                };
+                let summary = render::CheckSummary {
+                    diff_id: posted_diff_id.clone(),
+                    breaking_count,
+                    affected_consumer_count,
+                    policy_verdict: verdict_str.to_string(),
+                    dashboard_url,
+                };
+                if let Err(e) = render::write_summary(sf, &summary) {
+                    eprintln!("Warning: failed to write summary file: {e}");
+                }
+            }
+
+            if decision.exit_code != 0 {
+                std::process::exit(decision.exit_code);
+            }
+        }
+        Commands::Rule { action } => {
+            match action {
+                RuleAction::Add { name, change_kind, path_pattern, severity_override, api_url, token } => {
+                    let body = api_client::CreateRuleBody { name, change_kind, path_pattern, severity_override };
+                    let rule = api_client::create_evolution_rule(&api_url, &body, token.as_deref()).await?;
+                    println!("Created rule: {}", rule["id"].as_str().unwrap_or("?"));
+                    println!("  kind:     {}", rule["change_kind"].as_str().unwrap_or("?"));
+                    println!("  override: {}", rule["severity_override"].as_str().unwrap_or("?"));
+                    if let Some(p) = rule["path_pattern"].as_str() {
+                        println!("  pattern:  {p}");
+                    }
+                }
+                RuleAction::List { api_url, token } => {
+                    let rules = api_client::list_evolution_rules(&api_url, token.as_deref()).await?;
+                    if rules.is_empty() {
+                        println!("No evolution rules configured.");
+                    } else {
+                        println!("{:<38} {:<24} {:<22} {:<12} Pattern", "ID", "Name", "ChangeKind", "Override");
+                        println!("{}", "-".repeat(110));
+                        for r in &rules {
+                            let enabled = r["enabled"].as_bool().unwrap_or(true);
+                            let status = if enabled { "" } else { " [disabled]" };
+                            println!(
+                                "{:<38} {:<24} {:<22} {:<12} {}{}",
+                                r["id"].as_str().unwrap_or("?"),
+                                r["name"].as_str().unwrap_or("?"),
+                                r["change_kind"].as_str().unwrap_or("?"),
+                                r["severity_override"].as_str().unwrap_or("?"),
+                                r["path_pattern"].as_str().unwrap_or("*"),
+                                status,
+                            );
+                        }
+                    }
+                }
+                RuleAction::Delete { id, api_url, token } => {
+                    api_client::delete_evolution_rule(&api_url, &id, token.as_deref()).await?;
+                    println!("Deleted rule {id}");
+                }
+                RuleAction::Toggle { id, enabled, api_url, token } => {
+                    api_client::toggle_evolution_rule(&api_url, &id, enabled, token.as_deref()).await?;
+                    println!("Rule {id} is now {}", if enabled { "enabled" } else { "disabled" });
+                }
+                RuleAction::Test { diff_id, api_url, token } => {
+                    // Fetch the diff — evolution rules are already applied server-side.
+                    let client = reqwest::Client::new();
+                    let mut req = client.get(format!("{api_url}/v1/diffs/{diff_id}"));
+                    if let Some(ref t) = token {
+                        req = req.bearer_auth(t);
+                    }
+                    let resp = req.send().await?;
+                    if !resp.status().is_success() {
+                        anyhow::bail!("Failed to fetch diff {diff_id}: HTTP {}", resp.status());
+                    }
+                    let diff: serde_json::Value = resp.json().await?;
+                    let changes = diff["changes"].as_array().cloned().unwrap_or_default();
+                    let applied: Vec<_> = changes.iter()
+                        .filter(|c| c.get("applied_rule").is_some())
+                        .collect();
+                    if applied.is_empty() {
+                        println!("No evolution rules applied to diff {diff_id}.");
+                    } else {
+                        println!("Evolution rules applied to diff {}:\n", diff_id);
+                        for c in &applied {
+                            let rule = &c["applied_rule"];
+                            println!(
+                                "  {} {} — {} → {} (rule: {})",
+                                c["kind"].as_str().unwrap_or("?"),
+                                c["path"].as_str().unwrap_or("?"),
+                                rule["original_severity"].as_str().unwrap_or("?"),
+                                c["severity"].as_str().unwrap_or("?"),
+                                rule["name"].as_str().unwrap_or("?"),
+                            );
+                        }
+                    }
+                }
             }
         }
         Commands::Completions { shell } => {
@@ -479,6 +753,7 @@ async fn main() -> Result<()> {
             api_url,
             token,
             operation_map,
+            collection,
         } => {
             // Parse --operation-map "field=METHOD /path" pairs into a lookup table.
             let op_map: std::collections::HashMap<String, String> = operation_map
@@ -505,7 +780,14 @@ async fn main() -> Result<()> {
             let sites: Vec<api_client::CallSiteBody> = records
                 .into_iter()
                 .map(|r| {
-                    let operation = op_map.get(&r.field_path).cloned().unwrap_or_default();
+                    // S2: use scanner-detected operation; fall back to --operation-map for S1
+                    let operation = r
+                        .operation
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .or_else(|| op_map.get(&r.field_path).cloned())
+                        .unwrap_or_default();
                     api_client::CallSiteBody {
                         consumer_id: consumer_id.clone(),
                         service_id: service_id.clone(),
@@ -526,6 +808,70 @@ async fn main() -> Result<()> {
                 }
             }
             println!("Posted {total} call site record(s) to {api_url}.");
+
+            // E-7: scan collection files and write impact_evidence directly.
+            if !collection.is_empty() {
+                println!("Scanning {} collection file(s)…", collection.len());
+                for col_path in &collection {
+                    match radar_scanner::parse_collection(col_path) {
+                        Err(e) => eprintln!("Warning: skipping {}: {e}", col_path.display()),
+                        Ok((col_name, requests)) => {
+                            // Auto-register consumer by collection name
+                            let resolved_consumer_id = match api_client::upsert_consumer_by_name(
+                                &api_url, &col_name, "collection_file", token.as_deref(),
+                            ).await {
+                                Ok((id, created)) => {
+                                    if created {
+                                        println!("  Registered consumer '{col_name}' ({id})");
+                                    }
+                                    id
+                                }
+                                Err(e) => {
+                                    eprintln!("Warning: could not register consumer '{col_name}': {e}; using --consumer-id");
+                                    consumer_id.clone()
+                                }
+                            };
+
+                            // Build evidence items — one per (request × field_path), or one
+                            // with empty field_path when the request has no test assertions.
+                            let mut evidence: Vec<api_client::CollectionEvidenceBody> = Vec::new();
+                            let file_base = col_path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("<collection>");
+                            for req in &requests {
+                                let op = req.operation.as_deref().unwrap_or("").to_string();
+                                if req.field_paths.is_empty() {
+                                    evidence.push(api_client::CollectionEvidenceBody {
+                                        consumer_id: resolved_consumer_id.clone(),
+                                        service_id: service_id.clone(),
+                                        operation: op,
+                                        field_path: String::new(),
+                                        evidence_uri: format!("file://{file_base}#{}", req.name),
+                                    });
+                                } else {
+                                    for fp in &req.field_paths {
+                                        evidence.push(api_client::CollectionEvidenceBody {
+                                            consumer_id: resolved_consumer_id.clone(),
+                                            service_id: service_id.clone(),
+                                            operation: op.clone(),
+                                            field_path: fp.clone(),
+                                            evidence_uri: format!("file://{file_base}#{}", req.name),
+                                        });
+                                    }
+                                }
+                            }
+
+                            match api_client::post_collection_evidence(&api_url, &evidence, token.as_deref()).await {
+                                Ok((accepted, inserted)) => println!(
+                                    "  {}: {accepted} request(s), {inserted} new evidence row(s)",
+                                    col_path.display()
+                                ),
+                                Err(e) => eprintln!("Warning: failed to post collection evidence: {e}"),
+                            }
+                        }
+                    }
+                }
+            }
         }
         Commands::Explain {
             diff_id,

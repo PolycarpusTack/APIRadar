@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "radar-monitor-sdk"
+version = "0.1.0"
+description = "Radar Monitor middleware SDK for Python — automatically collects API usage evidence"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+fastapi = ["starlette>=0.27"]
+django = ["django>=4.0"]

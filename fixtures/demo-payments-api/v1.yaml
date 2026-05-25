@@ -1,0 +1,41 @@
+openapi: "3.0.3"
+info:
+  title: Payments API
+  version: "1.0.0"
+paths:
+  /users/{id}:
+    get:
+      operationId: getUserById
+      summary: Get a user by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A user object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+components:
+  schemas:
+    User:
+      type: object
+      required:
+        - id
+        - email
+        - phone
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+          description: E.164 formatted phone number
+        name:
+          type: string

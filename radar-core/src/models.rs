@@ -25,6 +25,27 @@ pub enum ChangeKind {
     RequestBodyRemoved,
 }
 
+impl ChangeKind {
+    /// Returns the canonical snake_case string for this kind (matches the serde serialisation).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ChangeKind::FieldRemoved => "field_removed",
+            ChangeKind::FieldAdded => "field_added",
+            ChangeKind::TypeChanged => "type_changed",
+            ChangeKind::RequiredChanged => "required_changed",
+            ChangeKind::OperationRemoved => "operation_removed",
+            ChangeKind::OperationAdded => "operation_added",
+            ChangeKind::ParameterRemoved => "parameter_removed",
+            ChangeKind::ResponseRemoved => "response_removed",
+            ChangeKind::EnumValueRemoved => "enum_value_removed",
+            ChangeKind::EnumValueAdded => "enum_value_added",
+            ChangeKind::NullabilityChanged => "nullability_changed",
+            ChangeKind::RequestBodyAdded => "request_body_added",
+            ChangeKind::RequestBodyRemoved => "request_body_removed",
+        }
+    }
+}
+
 /// How severe a change is for consumers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

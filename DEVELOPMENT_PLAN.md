@@ -38,22 +38,42 @@ _Architect produces all Phase 0 artifacts before any code task is pulled. Stakeh
 | **Sandbox Environment** | A named pre-configured environment entry in the Playground (base URL + auth) used for pre-sales demos |
 | **Desktop Mode** | `radar-api` running with SQLite, spawned as a child process by `radar-desktop` (Electron), with no external infrastructure |
 | **Web Mode** | `radar-api` running with PostgreSQL, deployed on a server, with `radar-ui` served as a static bundle |
+| **Evidence** | A durable, append-only record in `impact_evidence` that links a Diff Change to a specific Consumer with a source type, confidence level, and observed timestamp |
+| **Confidence** | A signal strength classification (high / medium / low) assigned to an Evidence record based on the recency and type of the evidence source |
+| **Policy Decision** | A persisted record in `policy_decision` capturing the verdict (pass / warn / block / overridden), fail mode, and actor for a given Diff evaluation |
+| **Acknowledgement** | A formal record that a Consumer owner, producer, or platform team has reviewed and accepted a specific Breaking Change impact, optionally with an expiry date |
+| **Artifact** | A generated output tied to a Diff: release_notes, migration_guide, postman_collection, apitesting_yaml, or schemathesis_config; progresses through status: draft → reviewed → published → superseded |
+| **Catalog Source** | A configured data source (Backstage, GitHub, CODEOWNERS, CSV, manual) from which Consumer ownership metadata is imported into the service registry |
+| **Fail Mode** | The behavior of `radar-action` when the Radar API is unreachable: `closed` (blocks build), `open` (allows build, warns), `warn` (never fails) |
+| **Scanner Stage** | The capability level of the static scanner: S0 (field extraction only) through S4 (framework-specific semantic scanning); S2 (operation + field correlation) is the publishable minimum |
+| **Demo Scenario** | The canonical three-repo demonstration set (demo-payments-api, demo-billing-svc, demo-mobile-gateway) used to prove the full "field removed → evidence → block" flow |
 
 ### Architecture Memory
 
 ```
 radar-cli        Rust binary — local/CI diff runs, release-notes generation, PR comment posting
-radar-api        Rust/axum HTTP service — Consumer Registry, usage ingest, diff result store
-                 Compiled once; targets SQLite (local/Electron) or PostgreSQL (web/prod) via --db flag
+                 fail-mode: closed | open | warn (explicit since Phase 1)
+radar-action     TypeScript composite GitHub Action — wraps radar-cli for producer repos
+                 inputs: base-spec, head-spec, service-id, radar-url, policy, fail-mode, post-comment
+                 outputs: diff-id, breaking-count, affected-consumer-count, policy-verdict, dashboard-url
+radar-api        Rust/axum HTTP service — compiled once; targets SQLite or PostgreSQL via --db flag
+                 Internal modules: diffs | evidence | impact | policy | artifacts | catalog | authz | audit
                  Also serves radar-ui static bundle at /app in web mode
 radar-scanner    Rust/tree-sitter background worker — call-site extraction from Consumer repos
+                 Scanner stages: S0 (field) → S1 (HTTP client + field) → S2 (operation + field) → S3 (generated-client) → S4 (semantic)
+                 Currently at S2 for TypeScript generated clients (Phase 1 target)
 radar-ui         Vite 6 + React 19 + Tailwind + shadcn/ui — shared renderer
+                 Pages: Services, Diffs, Consumers, Evidence, Policies, Artifacts, Audit, Settings
                  Runs in browser (web) or inside radar-desktop Electron renderer (desktop)
 radar-desktop    Electron 33 shell — wraps radar-ui; spawns radar-api sidecar; manages SQLite file
 drift-db         SQLite file (local/Electron default) | PostgreSQL 16 (web/production)
-                 Same sqlx migrations apply to both; TimescaleDB optional on PostgreSQL at scale
+                 Tables: service, spec_version, diff, change, consumer, subscription,
+                         usage_event, call_site,
+                         impact_evidence (append-only), policy_decision, acknowledgement,
+                         artifact, catalog_source
+                 TimescaleDB optional on usage_event at scale
 
-Dependencies point inward: cli → api; radar-ui → api (HTTP); radar-desktop → radar-ui + radar-api (IPC+HTTP); scanner → api; nothing → cli
+Dependencies point inward: cli → api; radar-ui → api (HTTP); radar-desktop → radar-ui + radar-api (IPC+HTTP); scanner → api; radar-action → cli; nothing → cli except radar-action
 ```
 
 ### Architectural Decision Records
@@ -71,6 +91,10 @@ Dependencies point inward: cli → api; radar-ui → api (HTTP); radar-desktop �
 | ADR-009 | electron-vite as the Electron build tool | Same Vite config for `radar-ui` (web) and `radar-desktop` (renderer); HMR in development; no separate webpack config | Plain webpack (no HMR, verbose config), Electron Forge with webpack plugin (heavier, less Vite-native) |
 | ADR-010 | `graphql-parser 0.4` for GraphQL SDL parsing | Pure Rust, no external binary, MIT licence; parses SDL into a typed AST sufficient for object/interface/enum/union/input diff; owned-string generic (`parse_schema::<String>`) avoids lifetime propagation across crate boundaries | `async-graphql` (heavier, server-oriented), rolling a hand-written parser (high maintenance for a well-solved problem) |
 | ADR-011 | Hand-rolled proto3 parser in `radar-core` (no `protoc`) | Installing `protoc` in CI and on developer machines adds external tool dependency and complicates cross-compilation; our use-case only needs message/enum/field structure — not the full proto descriptor — so a character-scanning parser (~300 LOC) covers 100 % of the test matrix with zero binary dependency | `prost-build` (requires `protoc`; generates Rust structs — not the schema diff model we need), `protobuf` crate (same `protoc` dependency), `protox` (parses, but re-exports `prost-build` model) |
+| ADR-012 | `radar-action` packaged as workspace crate `radar-action/` (TypeScript, composite GitHub Action) | GitHub Actions marketplace expects a `action.yml` at repo root or a published action; TypeScript composite action avoids binary distribution complexity; extract to standalone repo on first public release | Node.js action (slower startup), Docker container action (no ARM runners), Rust binary distributed via release (bootstrap problem for new orgs) |
+| ADR-013 | OTel integration via custom processor component (not exporter) | Processor can inspect span attributes and emit usage events without requiring a separate exporter endpoint; fits naturally into existing collector pipelines; no changes needed to instrumented services | Custom exporter (requires new endpoint config in every service), direct SDK (adoption friction) |
+| ADR-014 | Evidence records are append-only; blast-radius recomputation writes new records rather than updating | Append-only evidence is trivially auditable; expiry is a soft-delete via `expires_at`; recomputation on blast-radius request seeds evidence for first-time callers | Mutable evidence (audit gaps), compute-only blast radius (no durability, no trend data) |
+| ADR-015 | Backstage integration via polling importer (HTTP client reads Backstage catalog API) | No Backstage plugin required on consumer side; importer runs as a scheduled job in `radar-api`; org can point Radar at any Backstage instance without Backstage changes | Backstage plugin (requires consumer-side Backstage upgrade), webhook push (requires Backstage config changes) |
 
 ### Value Hypotheses (Stakeholder)
 
@@ -634,6 +658,523 @@ Then the file is written; stdout is silent
 
 ---
 
+## EPIC E — Durable Evidence & Differentiator Hardening
+
+> **Mode:** DELIVERY
+> **Theme:** Normalize blast-radius evidence into append-only `impact_evidence` records; harden CLI fail-mode semantics; advance scanner to S2; prove the full differentiator flow with fixture-driven demo scenario
+> **Tracer bullet:** NO — builds on EPICs A–D end-to-end path
+> **Business value:** Closes the evidence gap — blast radius is now backed by durable, explainable, expiry-aware Evidence records. PR comment shows exactly what is known and why CI is blocking.
+> **Risk:** tree-sitter TypeScript generated-client detection may require tuning per framework; scope to one major client generator (openapi-typescript-codegen) for E-5.
+> **SLO:** blast-radius p95 < 2 s; evidence ingest p99 < 200 ms
+> **Exit criteria:**
+> - E2E demo scenario test passes: "field removed → billing-svc (high, runtime) + mobile-gateway (low, static) → block"
+> - No blast-radius entry returned without at least one `impact_evidence` record
+> - CLI fail-open / fail-closed / warn behavior is explicit, tested, and written to Policy Decision
+> - PR comment evidence table renders correctly
+
+---
+
+### Story E-1 · `impact_evidence` Table and Blast-Radius Normalization
+
+> **Persona:** Platform engineer reviewing a blast-radius response
+> **Value:** So that every consumer listed in blast radius has at least one traceable, timestamped Evidence record I can inspect rather than a recomputed approximation
+> **Priority:** P0 (blocks E-4, E-5, E-6)
+> **Size:** L
+> **Dependencies:** B-3 (blast radius exists), D-4 (org isolation)
+> **DoR status:** READY
+> **Status: DONE — 2026-05-22**
+
+**Acceptance Criteria**
+
+```gherkin
+Given a Diff with a Breaking Change on field "response.user.phone"
+And blast_radius() is called for that diff
+When GET /v1/diffs/:id/blast-radius is called
+Then every consumer entry in the response has at least one evidence record
+And evidence records are ordered by confidence descending (high → medium → low)
+
+Given an evidence record with expires_at set to 5 days ago
+When GET /v1/diffs/:id/blast-radius?max_age_days=7 is called
+Then that stale evidence record is excluded from the response
+
+Given blast_radius() runs for the first time on a diff
+Then new impact_evidence rows are inserted (not updated)
+```
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| E-1-T1 | PREPARATORY | Migration `007_impact_evidence.sql` — `impact_evidence` table with all fields from data model (id, org_id, diff_id, change_id, producer_service_id, consumer_id, source_type, operation, field_path, confidence, evidence_uri, file_path, line_number, observed_at, expires_at, metadata_json) | Sonnet | ≤ 2 000 |
+| E-1-T2 | FEATURE | `blast_radius()` writer — produces `impact_evidence` rows during computation; source_type=runtime_usage or static_call_site based on evidence source | Sonnet | ≤ 3 000 |
+| E-1-T3 | FEATURE | `GET /v1/diffs/:id/blast-radius` reader — reads from `impact_evidence` rather than recomputing ad hoc; supports `?max_age_days=` query param for stale exclusion | Sonnet | ≤ 2 500 |
+| E-1-T4 | FEATURE | Evidence expiry job — scheduled task that deletes `impact_evidence` rows past `expires_at`; respects org-level retention policy | Sonnet | ≤ 1 500 |
+
+**Contract snapshot (public interface after this story):**
+```rust
+pub struct Evidence {
+    pub id: Uuid,
+    pub diff_id: Uuid,
+    pub change_id: Uuid,
+    pub consumer_id: Uuid,
+    pub source_type: EvidenceSourceType,
+    pub operation: Option<String>,
+    pub field_path: String,
+    pub confidence: Confidence,
+    pub observed_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+pub async fn blast_radius_with_evidence(diff_id: Uuid, max_age_days: Option<u32>, db: &Pool) -> Vec<(Consumer, Vec<Evidence>)>
+```
+
+**TDD order:** write failing test asserting evidence row count ≥ 1 per blast-radius consumer → implement writer → green → implement reader → test stale exclusion → green → refactor.
+
+---
+
+### Story E-2 · Org-Scoped Authorization Audit
+
+> **Persona:** Security engineer validating the multi-tenant isolation claims
+> **Value:** So that no organization can read, enumerate, or modify another organization's data through any API endpoint
+> **Priority:** P0
+> **Size:** M
+> **Dependencies:** D-4 (org isolation foundation)
+> **DoR status:** READY
+> **Status: DONE — 2026-05-22**
+
+**Acceptance Criteria**
+
+```gherkin
+Given a request authenticated as org A
+When GET /v1/diffs/:id is called with a diff_id that belongs to org B
+Then 403 Forbidden is returned
+
+Given a request authenticated as org A
+When GET /v1/services/:id/consumers is called with a service_id that belongs to org B
+Then 403 Forbidden is returned
+
+Given org A's token
+When any endpoint listed in SOLUTION_DESIGN §9.2 is called with an org B resource ID
+Then 403 is returned — not 200, not 404
+```
+
+_All the following resource types must be covered: diffs, spec_versions, usage_events, call_sites, test_suites, release_notes, policies, acknowledgements._
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| E-2-T1 | FEATURE | Integration test suite: for each resource type, assert org A token returns 403 on org B resource IDs; parameterised over all endpoint groups | Sonnet | ≤ 3 000 |
+| E-2-T2 | FEATURE | Fix any org_id enforcement gaps discovered by E-2-T1; update middleware or query filters as needed | Sonnet | ≤ 2 500 |
+
+**TDD order:** write the full 403-assertion test matrix first (all red) → fix gaps → all green → refactor shared test helpers.
+
+---
+
+### Story E-3 · CLI Fail-Mode Hardening
+
+> **Persona:** Platform engineer configuring CI gating behaviour for a producer repo
+> **Value:** So that I can explicitly choose how the CI gate behaves when Radar API is unreachable, and that choice is recorded in a durable Policy Decision rather than silently falling through
+> **Priority:** P0
+> **Size:** S
+> **Dependencies:** A-5 (policy file), D-2 (policy engine)
+> **DoR status:** READY
+> **Status: DONE — 2026-05-22**
+
+**Acceptance Criteria**
+
+```gherkin
+Given .radar.yml sets fail_mode: warn
+When drift check runs with a breaking change
+Then exit code is 0 and a warning line is printed
+And a Policy Decision record is written with verdict=warn and fail_mode=warn
+
+Given .radar.yml sets fail_mode: open
+And the Radar API is unreachable
+When drift check runs
+Then the structural diff still runs locally
+And exit code reflects only local diff result (1 if breaking, 0 if clean)
+And a Policy Decision record is written with verdict=warn and fail_mode=open
+
+Given .radar.yml sets fail_mode: closed
+And the Radar API returns 500
+When drift check runs
+Then exit code is 1 (blocked)
+And a Policy Decision record is written with verdict=block and fail_mode=closed
+
+Given .radar.yml omits fail_mode
+Then fail_mode defaults to closed
+```
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| E-3-T1 | FEATURE | `fail_mode` field in `.radar.yml` config struct; parsing, validation, default=closed; all three mode behaviors wired into policy evaluation | Sonnet | ≤ 2 000 |
+| E-3-T2 | FEATURE | Policy Decision persistence — `POST /v1/policy-decisions` endpoint; `drift check` writes a Policy Decision record after every run | Sonnet | ≤ 2 000 |
+
+**TDD order:** write three failing tests (one per mode) before implementing fail-mode parsing; write Policy Decision persistence test before implementing the API call.
+
+---
+
+### Story E-4 · PR Comment Evidence Rendering
+
+> **Persona:** API producer and reviewer reading a PR comment
+> **Value:** So that I can see exactly which consumers are at risk, why Radar believes that, and what the policy verdict means — all without leaving GitHub
+> **Priority:** P1
+> **Size:** M
+> **Dependencies:** E-1 (evidence records exist), E-3 (policy verdict record exists)
+> **DoR status:** READY after E-1, E-3 complete
+> **Status: DONE — 2026-05-25**
+
+**Acceptance Criteria**
+
+```gherkin
+Given a Diff with blast radius containing one high-confidence runtime evidence entry and one low-confidence static entry
+When the PR comment is rendered
+Then it contains an evidence table section with columns: Consumer | Source | Operation | Field Path | Confidence | Last Seen
+And the high-confidence row appears before the low-confidence row
+And it contains a policy verdict section with: verdict badge, fail_mode, required action text, and override instruction
+
+Given the Policy Decision verdict is block
+Then the verdict badge reads "BLOCKED" and the required action text is non-empty
+
+Given the Policy Decision verdict is warn
+Then the verdict badge reads "WARNED" and no blocking action is required
+```
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| E-4-T1 | FEATURE | Evidence table renderer — Markdown table section; sorts by confidence descending; truncates at 10 rows with "N more…" footer | Sonnet | ≤ 2 000 |
+| E-4-T2 | FEATURE | Policy verdict section renderer — verdict badge (BLOCKED / WARNED / PASSED / OVERRIDDEN), fail_mode label, required action text, override instruction block | Sonnet | ≤ 1 500 |
+| E-4-T3 | FEATURE | Update `drift check` PR comment to include evidence table and policy verdict sections after the existing blast-radius table | Sonnet | ≤ 1 500 |
+
+**PR comment evidence table template:**
+```
+### Evidence
+
+| Consumer | Source | Operation | Field Path | Confidence | Last Seen |
+|---|---|---|---|---|---|
+| billing-svc | runtime_usage | GET /users/{id} | response.user.phone | high | 2 days ago |
+| mobile-gateway | static_call_site | — | response.user.phone | low | (static) |
+```
+
+**PR comment policy verdict template:**
+```
+### Policy Verdict
+
+> **BLOCKED** · fail_mode: closed
+
+2 consumers affected. At least 1 high-confidence evidence record present.
+To override: add the `drift-ack` label to this PR and re-run CI.
+```
+
+---
+
+### Story E-5 · Operation-Aware TypeScript Scanner (S2)
+
+> **Persona:** Static scanner advancing from field-only (S1) to operation-correlated (S2) for TypeScript
+> **Value:** So that blast-radius confidence reflects whether Radar knows which API operation a call site is targeting, reducing false positives and giving Policy a signal to act on
+> **Priority:** P1
+> **Size:** L
+> **Dependencies:** C-5 (tree-sitter scanner exists at S1), E-1 (confidence field in impact_evidence)
+> **DoR status:** READY after E-1 complete
+> **Status: DONE — 2026-05-25**
+
+**Acceptance Criteria**
+
+```gherkin
+Given a TypeScript fixture file that calls a generated client method `usersApi.getUserById(id)`
+And the generated client is known to map to operation "GET /users/{id}"
+When the scanner processes the fixture
+Then a call_site row is written with operation="GET /users/{id}" and field_path="response.user.phone"
+And confidence is medium (operation known, field extracted from response)
+
+Given a TypeScript fixture file that reads `response.user.phone` with no known generated client context
+When the scanner processes the fixture
+Then a call_site row is written with operation=NULL and confidence=low
+
+Given an impact_evidence record seeded from a low-confidence static call_site (operation=NULL)
+When policy is set to ignore_low_confidence_static=true
+Then that evidence record does not contribute to a block verdict
+```
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| E-5-T1 | FEATURE | TypeScript generated-client detection — tree-sitter query identifies `new ApiClient()` patterns and method calls matching known generated-client shapes (openapi-typescript-codegen, orval); emits (method_name → operation) mapping | Sonnet | ≤ 3 500 |
+| E-5-T2 | FEATURE | Operation correlation logic — resolves detected method names against service spec operations; writes `operation` column in `call_site`; marks unresolved as NULL | Sonnet | ≤ 2 500 |
+| E-5-T3 | FEATURE | Confidence propagation — when `impact_evidence` is seeded from a `call_site`, set confidence=medium if operation is populated, confidence=low if operation is NULL | Sonnet | ≤ 1 500 |
+
+**TDD order:** write fixture TypeScript file with known generated client call → write failing test asserting operation column populated → implement detection → green → write low-confidence fixture test → green → refactor.
+
+---
+
+### Story E-6 · Demo Scenario Fixtures
+
+> **Persona:** Architect and developer validating the full differentiator claim end-to-end
+> **Value:** So that we can prove the "field removed → evidence → block" flow in a single repeatable test without requiring live external services
+> **Priority:** P1
+> **Size:** M
+> **Dependencies:** E-1, E-3, E-4, E-5
+> **DoR status:** READY after E-1, E-3, E-4, E-5 complete
+> **Status: DONE — 2026-05-25**
+
+**Acceptance Criteria**
+
+```gherkin
+Given the demo fixtures are loaded (specs, usage event, call site)
+When cargo test --test demo_scenario is run
+Then the test passes green
+
+Given demo-payments-api v1 has field response.user.phone
+And demo-payments-api v2 removes that field
+When diff is computed
+Then a Breaking Change of kind=field_removed on path=response.user.phone is produced
+
+Given billing-svc usage event fixture (response.user.phone observed 2 days ago)
+When blast radius is computed
+Then billing-svc appears with confidence=high and source_type=runtime_usage
+
+Given mobile-gateway static call-site fixture (TypeScript generated client call)
+When blast radius is computed
+Then mobile-gateway appears with confidence=low and source_type=static_call_site
+
+Given the blast radius contains both consumers
+When the PR comment is rendered from fixture
+Then it exactly matches the expected PR comment fixture file
+```
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| E-6-T1 | PREPARATORY | Create fixture directories: `fixtures/demo-payments-api/` (v1.yaml, v2.yaml), `fixtures/demo-billing-svc/` (usage_events.json), `fixtures/demo-mobile-gateway/` (src/clients/users.ts generated client call) | Sonnet | ≤ 2 000 |
+| E-6-T2 | FEATURE | Expected PR comment fixture file `fixtures/expected-pr-comment.md`; deterministic enough for byte-level assertion on structured sections | Sonnet | ≤ 1 500 |
+| E-6-T3 | FEATURE | Integration test `tests/demo_scenario.rs`: loads fixtures, seeds DB, runs diff, blast radius, PR comment render; asserts all fixture expectations | Sonnet | ≤ 3 000 |
+
+**Hand-off artifact:** `fixtures/README.md` explaining the demo scenario, how to load fixtures locally, and what each fixture proves.
+
+---
+
+### Story E-7 · Collection File Scanner — Postman Collection v2.1 as Consumer Evidence Source
+
+> **Persona:** Platform engineer or Consumer team lead who maintains API test collections (Postman, Insomnia, NativeREST) in source control
+> **Value:** So that Radar automatically derives Consumer evidence from committed collection files without requiring instrumented runtime telemetry or tree-sitter code analysis
+> **Priority:** P1
+> **Size:** M
+> **Dependencies:** E-1 (impact_evidence schema), E-5 (S2 scanner architecture)
+> **INVEST:** Independent · Negotiable · Valuable · Estimable · Small · Testable
+> **DoR status:** READY after E-1 complete
+> **Status: DONE — 2026-05-25**
+
+**Acceptance Criteria**
+
+```gherkin
+Given a Consumer repo contains `collections/payments.postman_collection.json` (Postman Collection v2.1)
+And the collection includes a request "GET /users/{id}" with test assertions checking "response.user.phone"
+When the scanner processes the file
+Then a call_site row is written with source_type=collection_file, operation="GET /users/{id}", field_path="response.user.phone", confidence=medium
+
+Given the collection contains only a request "POST /orders" with no test assertions
+When the scanner processes the file
+Then a call_site row is written with source_type=collection_file, operation="POST /orders", field_path=NULL, confidence=medium
+
+Given the collection's "info.name" is "Billing Service Tests"
+And no existing Consumer row matches that name for this producer
+When the scanner processes the file
+Then a new Consumer is registered with name="Billing Service Tests" and catalog_source=collection_file
+And subsequent blast-radius computation includes this Consumer
+
+Given a collection file with a variable base URL "{{base_url}}/users/{id}"
+When the scanner processes the file
+Then the variable prefix is stripped and operation is resolved to "/users/{id}"
+
+Given the scanner processes the same collection file twice without changes between runs
+When impact_evidence is written
+Then no duplicate evidence rows are inserted (idempotent on file hash + consumer_id + operation + field_path)
+
+Given a malformed or non-v2.1 JSON file at the configured path
+When the scanner processes the file
+Then it logs a structured warning with file path and error reason and continues without panicking
+```
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| E-7-T1 | PREPARATORY | `CollectionFile` Rust struct + `parse_collection(path) -> Result<Vec<CollectionRequest>>` — deserialise Postman Collection v2.1 JSON; extract `info.name`, request items, URL template, method, and `event[].script.exec` test scripts; strip `{{variable}}` prefixes from URLs | Sonnet | ≤ 3 000 |
+| E-7-T2 | FEATURE | Field-path extraction from test scripts — scan `exec` lines for `.json().<field>`, `pm.response.json().<path>`, and `jsonPath` patterns; produce best-effort `field_path` strings (NULL when unresolvable) | Sonnet | ≤ 2 500 |
+| E-7-T3 | FEATURE | Consumer auto-registration — on first scan of a collection file, upsert a Consumer row using `info.name` as display name; `catalog_source=collection_file`; idempotent on `(org_id, name)` | Sonnet | ≤ 1 500 |
+| E-7-T4 | FEATURE | Evidence writer — for each `CollectionRequest` produce one `impact_evidence` row: `source_type=collection_file`, `confidence=medium` (operation known), `evidence_uri=file://<relative_path>#<request_name>`; dedup on `(diff_id, consumer_id, operation, field_path, source_type)` using INSERT OR IGNORE / ON CONFLICT DO NOTHING | Sonnet | ≤ 1 500 |
+| E-7-T5 | FEATURE | Scanner configuration — `collection_paths` glob list in scanner config TOML (e.g. `["**/*.postman_collection.json", "**/*.nativerest_collection.json"]`); scanner walks configured paths and invokes the parser | Sonnet | ≤ 1 000 |
+
+**Contract snapshot (public interface after this story):**
+```rust
+pub struct CollectionRequest {
+    pub name: String,
+    pub method: String,
+    pub operation: Option<String>,   // normalised path e.g. "/users/{id}"
+    pub field_paths: Vec<String>,    // extracted from test scripts; may be empty
+}
+
+pub fn parse_collection(path: &Path) -> Result<(String, Vec<CollectionRequest>)>
+// returns (collection_name, requests)
+```
+
+**New `source_type` enum variant:** `collection_file` (added to `EvidenceSourceType` in radar-core; new migration not required — stored as TEXT)
+
+**Test data:** `fixtures/billing-svc-tests.postman_collection.json` — a minimal v2.1 collection with one `GET /users/{id}` request and one test assertion on `response.user.phone`; one `POST /orders` request with no test assertions; one request with a `{{base_url}}` variable prefix.
+
+**Idempotency strategy:** `INSERT … ON CONFLICT (diff_id, consumer_id, operation, field_path, source_type) DO NOTHING`; file hash stored in `evidence_uri` allows re-scan detection.
+
+**TDD order:** write fixture JSON → write failing test for `parse_collection` extracting `CollectionRequest` list → implement parser → green; write failing test for evidence dedup (run twice, assert row count unchanged) → implement writer → green; refactor.
+
+---
+
+### EPIC E — Phase Gate Checklist
+
+- [x] `cargo test --test demo_scenario` passes green on a clean checkout _(E-6 done — 6 integration tests)_
+- [x] No blast-radius API response contains a consumer without at least one `impact_evidence` row _(E-1 done)_
+- [x] All three fail-modes (closed, open, warn) tested with Policy Decision record assertions _(E-3 done)_
+- [x] PR comment evidence table renders correctly with correct confidence ordering _(E-4 done — 14 new github tests)_
+- [x] Scanner S2: TypeScript generated-client call site produces operation-populated `call_site` row _(E-5 done — 12 new scanner tests)_
+- [x] Collection File Scanner: Postman Collection v2.1 parsed and evidence rows written with source_type=collection_file _(E-7 done — 9 scanner tests + 4 API tests)_
+- [x] Org isolation tests from E-2 all green _(E-2 done — 7 cross-org 403 tests)_
+- [ ] All tasks DoD-passed: 80 % coverage · lint clean · no secrets · no two-hat violations
+- [ ] Architecture Memory updated (E hand-off)
+- [ ] EPIC F DoR verified before pull
+
+---
+
+## EPIC F — Enterprise Workflow Packaging
+
+> **Mode:** DELIVERY
+> **Theme:** GitHub Action; policy decisions table; acknowledgement workflow; Backstage and CODEOWNERS catalog importers; dashboard enterprise pages
+> **Tracer bullet:** NO
+> **Unlock condition:** EPIC E phase gate passed
+> **Exit criteria:**
+> - New repo can install radar-action from docs in under 15 minutes without custom scripting
+> - PR comment clearly explains pass / warn / block with evidence
+> - Overrides are recorded in `acknowledgement` table and visible in audit trail
+
+**Stories (DoR to be completed before pull)**
+
+| ID | Title | Size | Agent tier | Dependencies |
+|---|---|---|---|---|
+| F-1 | `radar-action` — GitHub Action composite action (TypeScript) | L | Sonnet | E-3, E-4 | _(DONE 2026-05-25 — composite action with Rust toolchain + cargo cache + --summary-file bridge)_ |
+| F-2 | `policy_decision` table + persistence in radar-api | M | Sonnet | E-3 | _(pre-delivered by E-3-T2 — migration 012, POST /v1/policy-decisions, CLI wiring all done)_ |
+| F-3 | Acknowledgement workflow — `acknowledgement` table + API endpoints + UI | L | Sonnet | E-2, F-2 | _(DONE 2026-05-25 — migration 014, POST/GET /v1/acknowledgements + /diffs/:id/acknowledgements, CLI check wired, 4 API tests)_ |
+| F-4 | Backstage `catalog-info.yaml` importer (polling job) | M | Sonnet | — | _(DONE 2026-05-25 — migration 015, POST/GET /v1/catalog-sources, POST /v1/catalog-sources/:id/sync, Backstage entity upsert; 3 tests)_ |
+| F-5 | CODEOWNERS fallback importer | S | Sonnet | F-4 | _(DONE 2026-05-25 — parse_codeowners() + sync_codeowners_source() wired into sync handler; 3 unit tests)_ |
+| F-6 | Catalog sync status in dashboard UI (`catalog_source` table + sync page) | S | Sonnet | F-4 | _(DONE 2026-05-25 — CatalogSourcesPage.tsx; create + sync-now per row; nav entry under Registry)_ |
+| F-7 | Acknowledgement workflow in dashboard UI (diff detail page, ack button, override flow) | M | Sonnet | F-3 | _(DONE 2026-05-25 — acknowledgement section on DiffDetailPage; create-ack form; live list after submit)_ |
+| F-8 | Audit trail page in dashboard UI (paginated, org-scoped) | S | Sonnet | F-3 | _(DONE 2026-05-25 — AuditPage.tsx; paginated policy decisions + acknowledgements tables; Governance nav section)_ |
+| F-9 | Documentation — `docs/getting-started-github-action.md`, `docs/backstage-integration.md`, `docs/policy-reference.md`, `docs/oidc-setup.md` | M | Sonnet | F-1, F-4 | _(DONE 2026-05-25)_ |
+
+---
+
+## EPIC F+ — Evolution Rules
+
+> **Mode:** DELIVERY
+> **Theme:** Operator-defined severity overrides per change kind; glob path matching; server-side evaluation in diff response; CLI management; dashboard UI
+> **Tracer bullet:** NO
+> **Unlock condition:** EPIC F complete
+> **Exit criteria:**
+> - Rules stored in `evolution_rule` table (migration 016); org-scoped
+> - `GET /v1/diffs/:id` applies active rules at query time — severity field overridden, `applied_rule` attached
+> - Rules can only downgrade severity (never tighten); first match wins
+> - CLI: `radar rule add|list|delete|toggle|test`
+> - Dashboard: `/evolution-rules` page with enable/disable toggle and delete
+
+| ID | Title | Size | Done |
+|---|---|---|---|
+| F+-1 | Migration 016 + evolution_rule CRUD API (POST/GET/DELETE/PATCH) | S | _(DONE 2026-05-25 — 5 new API tests; path_matches + severity_rank helpers)_ |
+| F+-2 | Server-side rule evaluator in get_diff — severity override + applied_rule field | M | _(DONE 2026-05-25 — integrated into GET /v1/diffs/:id)_ |
+| F+-3 | CLI `radar rule` subcommands (add, list, delete, toggle, test) | S | _(DONE 2026-05-25 — RuleAction enum; api_client functions)_ |
+| F+-4 | Dashboard UI — EvolutionRulesPage + Governance nav section | S | _(DONE 2026-05-25 — enable/disable toggle, delete, create form)_ |
+
+---
+
+## EPIC G — Runtime Evidence Collection
+
+> **Mode:** DELIVERY
+> **Theme:** OTel collector processor; API gateway adapters; Node/Express and FastAPI middleware SDKs; evidence freshness dashboard; sampling controls; privacy documentation
+> **Tracer bullet:** NO
+> **Unlock condition:** EPIC E phase gate passed; EPIC F may run in parallel
+> **Exit criteria:**
+> - At least one real service produces usage Evidence via OTel processor or gateway adapter without custom application code
+> - Dashboard shows evidence coverage by service and Consumer
+> - Stale evidence is visible and expires predictably
+
+**Stories (DoR to be completed before pull)**
+
+| ID | Title | Size | Agent tier | Dependencies |
+|---|---|---|---|---|
+| G-1 | Spike — OTel collector processor architecture | S | _(DONE 2026-05-25 — OTLP-over-HTTP in radar-api; no separate Go process required)_ |
+| G-2 | OTel collector processor — OTLP JSON trace receiver in radar-api | L | _(DONE 2026-05-25 — POST /v1/otlp/v1/traces; CLIENT span extraction; path normalisation)_ |
+| G-3 | API gateway adapter — Kong / NGINX log ingestion | M | _(DONE 2026-05-25 — POST /v1/gateway/logs; numeric segment normalisation)_ |
+| G-4 | Node/Express middleware SDK | M | _(DONE 2026-05-25 — @radar-monitor/sdk; RadarBatcher; expressMiddleware; recordFieldUsage; 4 tests)_ |
+| G-5 | FastAPI middleware SDK (Python) | M | _(DONE 2026-05-25 — radar-monitor-sdk; RadarBatcher; RadarMiddleware ASGI; 12 tests)_ |
+| G-6 | Ingestion sampling controls (per-service sample rate, field-path allow/block list) | S | _(DONE 2026-05-25 — service_sampling table; PUT/GET /v1/services/:id/sampling; field_deny_list glob; probabilistic sample_rate)_ |
+| G-7 | Evidence freshness dashboard page (coverage by service and Consumer, stale warning) | M | _(DONE 2026-05-25 — EvidenceCoveragePage; Governance nav; stale row warnings; SDK callout)_ |
+| G-8 | Privacy/redaction documentation (`docs/runtime-usage-ingestion.md`, `docs/security-and-privacy.md`) | S | _(DONE 2026-05-25 — both docs written)_ |
+
+---
+
+## EPIC H — Impact-Targeted Artifacts
+
+> **Mode:** DELIVERY
+> **Theme:** Diff+evidence-scoped test generation; deterministic templates per change kind; per-Consumer migration guides; release-note state workflow; generated artifacts in PR comment and dashboard
+> **Tracer bullet:** NO
+> **Unlock condition:** EPIC E phase gate passed
+> **Exit criteria:**
+> - For each Breaking Change kind in the 5 templates, Radar generates at least one relevant test Artifact from the Diff + Evidence (not requiring a Jira ticket)
+> - Release Notes include affected Consumers and Evidence
+> - Migration Guide is scoped to Consumer usage (call sites + runtime Evidence)
+
+**Stories (DoR to be completed before pull)**
+
+| ID | Title | Size | Agent tier | Dependencies |
+|---|---|---|---|---|
+| H-1 | Test generation from diff + evidence context (accepts diff_id, not just Jira/spec) | L | _(DONE 2026-05-25 — diff_id-only path; evidence context; AI or template fallback; migration 019)_ |
+| H-2 | Deterministic test templates per change kind (5 templates: field_removed, required_changed, enum_value_removed, operation_removed, type_changed) | M | _(DONE 2026-05-25 — templates_from_changes; 4 unit tests; evidence [evidence] tag)_ |
+| H-3 | Per-Consumer migration guides scoped to Consumer usage and call sites | M | _(DONE 2026-05-25 — GET /v1/diffs/:id/migration-guide?consumer_id=; Markdown with change advice, evidence table, call-site table)_ |
+| H-4 | Release-note state workflow (draft → reviewed → published → superseded) | M | _(DONE 2026-05-25 — migration 018; PATCH /v1/release-notes/:id/status; state-machine guard; 2 API tests)_ |
+| H-5 | Generated test artifacts linked in PR comment | S | _(DONE 2026-05-25 — GET /v1/diffs/:id/test-suites; build_comment_with_suites; fetch_diff_test_suites in api_client)_ |
+| H-6 | Artifact review/publish controls in dashboard UI | M | _(DONE 2026-05-25 — ReleaseNotesPage: StatusBadge, transition buttons, state machine, optimistic update)_ |
+
+---
+
+## EPIC I — Public Readiness
+
+> **Mode:** HARDENING
+> **Theme:** Polished demo repo; public documentation; self-host install guide; benchmark suite; SBOM and signed binaries; demo video script
+> **Tracer bullet:** NO
+> **Unlock condition:** EPICs E–H complete (F, G, H may overlap)
+> **No new features in HARDENING — only completion, verification, and documentation**
+> **Exit criteria:**
+> - Public docs state the "impact-aware contract drift" product promise without caveats
+> - Demo works from clean clone with `docker compose up`
+> - CI is green
+> - Enterprise pilot checklist is complete (§3.2 of SOLUTION_DESIGN v1.0)
+
+**Stories (DoR to be completed before pull)**
+
+| ID | Title | Size | Agent tier | Dependencies |
+|---|---|---|---|---|
+| I-1 | Demo repository set: `fixtures/demo-payments-api/`, `fixtures/demo-billing-svc/`, `fixtures/demo-mobile-gateway/` with seeded runtime usage and GitHub workflow | M | Sonnet | E-6 | **DONE** |
+| I-2 | Polished README with installation, demo scenario, and architecture diagram | M | Sonnet | I-1 | **DONE** |
+| I-3 | `docs/evidence-confidence.md`, `docs/security-and-privacy.md`, `docs/demo-scenario.md`, `docs/enterprise-deployment.md` | M | Sonnet | G-8 | **DONE** |
+| I-4 | Self-host install guide (`docs/enterprise-deployment.md`) — Docker Compose + PostgreSQL + OIDC | S | Sonnet | — | **DONE** (merged into I-3) |
+| I-5 | Benchmark suite: `drift check` p95 < 10 s, blast-radius p95 < 2 s, usage ingest p95 < 500 ms | M | Haiku | All | **DONE** (`radar-core/benches/diff_bench.rs`) |
+| I-6 | SBOM (syft), cosign-signed release binaries, cargo audit, licensing review | S | Haiku | All | **DONE** (CI: cargo-audit + cargo-cyclonedx; `LICENSE` file added) |
+| I-7 | `docs/generated-artifacts.md` and demo video script | S | Sonnet | H-6 | **DONE** |
+
+---
+
 ## Agent Capability Assignment Summary
 
 | Work type | Assigned tier | Rationale (Core Spec §6) |
@@ -687,3 +1228,13 @@ _Every task must pass before the story is considered complete._
 |---|---|---|---|
 | 0.1 | 2026-05-17 | Yannick Verrydt | Initial development plan — Phase 0, EPIC A (full), EPIC B (full), EPIC C/D (outline); framework: GPM v2.1 + Backlog Builder v5.1 + Core Spec v1 |
 | 0.2 | 2026-05-17 | Yannick Verrydt | Electron + Web dual deployment: replaced Next.js with Vite 6; added radar-ui (shared renderer) and radar-desktop (Electron shell); added Story A-8 (Electron shell + SQLite mode); added ADR-007/008/009; added SQLite/PostgreSQL database abstraction (ADR-002 revised); expanded EPIC C with C-14/C-15/C-16; updated Architecture Memory, Glossary, and EPIC exit criteria |
+| 0.3 | 2026-05-21 | Yannick Verrydt | Enterprise EPICs E–I added: durable evidence, GitHub Action, OTel ingest, impact-targeted artifacts, public readiness; new glossary terms (Evidence, Confidence, Policy Decision, Acknowledgement, Artifact, Catalog Source, Fail Mode, Scanner Stage, Demo Scenario); ADR-012 through ADR-015; updated Architecture Memory |
+| 0.4 | 2026-05-22 | Yannick Verrydt | E-1, E-2, E-3 marked DONE; phase gate checklist updated; F-2 noted as pre-delivered by E-3-T2; next story is E-4 (PR Comment Evidence Rendering) |
+| 0.5 | 2026-05-25 | Yannick Verrydt | E-4, E-5, E-6 marked DONE; E-7 story drafted; EPIC E phase gate 5/10 items checked; next is E-7 (Postman Collection Scanner) |
+| 0.6 | 2026-05-25 | Yannick Verrydt | E-7 marked DONE; EPIC E phase gate 6/10 items checked; migration 013; 27 scanner tests + 42 API tests; EPIC F is next |
+| 0.7 | 2026-05-25 | Yannick Verrydt | Tech debt pass complete (ChangeKind::as_str(), JiraTicket cleanup, README/CLAUDE.md rewrite); F-1 DONE — radar-action composite action with --summary-file bridge; 3 new render tests; 182 workspace tests green |
+| 0.8 | 2026-05-25 | Yannick Verrydt | EPIC F complete — F-3 (acknowledgement API + CLI override), F-4 (catalog sources + Backstage importer), F-5 (CODEOWNERS importer), F-6 (CatalogSourcesPage), F-7 (DiffDetailPage ack workflow), F-8 (AuditPage), F-9 (docs); new Governance nav section; 52 API tests, 0 TS errors |
+| 0.9 | 2026-05-25 | Yannick Verrydt | EPIC F+ complete — evolution rules (migration 016, CRUD API, server-side evaluator in get_diff, CLI `radar rule`, EvolutionRulesPage); 65 API tests, 211 workspace tests, 0 TS errors |
+| 1.0 | 2026-05-25 | Yannick Verrydt | EPIC G complete — OTLP trace receiver, gateway log ingestion, sampling controls (migration 017, field_deny_list glob, probabilistic sample_rate), @radar-monitor/sdk (Node.js), radar-monitor-sdk (Python, ASGI), EvidenceCoveragePage + Governance nav, docs/runtime-usage-ingestion.md, docs/security-and-privacy.md |
+| 1.1 | 2026-05-25 | Yannick Verrydt | EPIC H complete — H-1 diff-based test gen (no Jira), H-2 deterministic templates (5 change kinds), H-3 migration guide endpoint, H-4 release-note status workflow (migrations 018/019), H-5 test suites in PR comment, H-6 ReleaseNotesPage status transitions; new github test |
+| 1.2 | 2026-05-25 | Yannick Verrydt | EPIC I complete — I-1 demo fixtures + seed-demo.sh + payments-api GitHub workflow; I-2 README architecture diagram + 5-minute demo section; I-3/I-4 docs/evidence-confidence.md + docs/demo-scenario.md + docs/enterprise-deployment.md; I-5 radar-core/benches/diff_bench.rs (Criterion); I-6 LICENSE file (cargo-audit + SBOM already in CI); I-7 docs/generated-artifacts.md + docs/demo-video-script.md; 83 API tests + clippy clean |

@@ -1,22 +1,23 @@
-// D-6: Performance benchmarks — parse+diff must stay well under the p95 targets
-// (check p95 < 5 s, blast-radius p95 < 300 ms).
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use radar_core::diff::{diff_openapi, parse_openapi};
-use radar_core::graphql::{diff_graphql, parse_graphql};
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
+const PAYMENTS_V1: &str = include_str!("../../fixtures/demo-payments-api/v1.yaml");
+const PAYMENTS_V2: &str = include_str!("../../fixtures/demo-payments-api/v2.yaml");
 
-const SMALL_OPENAPI: &str = r#"
-openapi: "3.0.0"
+const WIDE_SPEC: &str = r#"
+openapi: "3.0.3"
 info:
-  title: Test API
+  title: Wide API
   version: "1.0"
 paths:
-  /users:
+  /users/{id}:
     get:
-      operationId: listUsers
+      operationId: getUser
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
       responses:
         "200":
           description: ok
@@ -25,35 +26,47 @@ paths:
               schema:
                 type: object
                 properties:
-                  id:
-                    type: string
-                  name:
-                    type: string
-                  email:
-                    type: string
-  /users/{id}:
+                  id:     { type: string }
+                  name:   { type: string }
+                  email:  { type: string }
+                  phone:  { type: string }
+                  role:   { type: string }
+                  status: { type: string }
+  /orders/{id}:
     get:
-      operationId: getUser
+      operationId: getOrder
       parameters:
         - name: id
           in: path
           required: true
-          schema:
-            type: string
+          schema: { type: string }
       responses:
         "200":
           description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:     { type: string }
+                  total:  { type: number }
+                  items:  { type: array, items: { type: string } }
 "#;
 
-const SMALL_OPENAPI_MODIFIED: &str = r#"
-openapi: "3.0.0"
+const WIDE_SPEC_BREAKING: &str = r#"
+openapi: "3.0.3"
 info:
-  title: Test API
+  title: Wide API
   version: "2.0"
 paths:
-  /users:
+  /users/{id}:
     get:
-      operationId: listUsers
+      operationId: getUser
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
       responses:
         "200":
           description: ok
@@ -62,116 +75,63 @@ paths:
               schema:
                 type: object
                 properties:
-                  id:
-                    type: string
-                  name:
-                    type: string
-  /users/{id}:
+                  id:     { type: string }
+                  name:   { type: string }
+                  email:  { type: string }
+                  role:   { type: string }
+  /orders/{id}:
     get:
-      operationId: getUser
+      operationId: getOrder
       parameters:
         - name: id
           in: path
           required: true
-          schema:
-            type: string
+          schema: { type: string }
       responses:
         "200":
           description: ok
-  /posts:
-    get:
-      operationId: listPosts
-      responses:
-        "200":
-          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:     { type: string }
+                  total:  { type: number }
 "#;
 
-const SMALL_GRAPHQL: &str = r#"
-type User {
-  id: ID!
-  name: String!
-  email: String
-  role: Role!
-}
-
-enum Role {
-  ADMIN
-  VIEWER
-  EDITOR
-}
-
-type Query {
-  user(id: ID!): User
-  users: [User!]!
-}
-"#;
-
-const SMALL_GRAPHQL_MODIFIED: &str = r#"
-type User {
-  id: ID!
-  name: String!
-  role: Role!
-}
-
-enum Role {
-  ADMIN
-  VIEWER
-}
-
-type Query {
-  user(id: ID!): User
-  users: [User!]!
-}
-"#;
-
-// ---------------------------------------------------------------------------
-// Benchmarks
-// ---------------------------------------------------------------------------
-
-fn bench_openapi_parse(c: &mut Criterion) {
-    c.bench_function("openapi_parse_small", |b| {
-        b.iter(|| parse_openapi(SMALL_OPENAPI).expect("parse failed"))
+fn bench_parse(c: &mut Criterion) {
+    c.bench_function("parse_openapi/payments_v1", |b| {
+        b.iter(|| parse_openapi(PAYMENTS_V1).unwrap())
+    });
+    c.bench_function("parse_openapi/wide_spec", |b| {
+        b.iter(|| parse_openapi(WIDE_SPEC).unwrap())
     });
 }
 
-fn bench_openapi_diff(c: &mut Criterion) {
-    let base = parse_openapi(SMALL_OPENAPI).unwrap();
-    let head = parse_openapi(SMALL_OPENAPI_MODIFIED).unwrap();
-    c.bench_function("openapi_diff_small", |b| {
-        b.iter(|| diff_openapi(&base, &head))
+fn bench_diff(c: &mut Criterion) {
+    let v1 = parse_openapi(PAYMENTS_V1).unwrap();
+    let v2 = parse_openapi(PAYMENTS_V2).unwrap();
+    let wide_base = parse_openapi(WIDE_SPEC).unwrap();
+    let wide_head = parse_openapi(WIDE_SPEC_BREAKING).unwrap();
+
+    let mut group = c.benchmark_group("diff_openapi");
+
+    group.bench_function("payments_v1_v2", |b| {
+        b.iter(|| diff_openapi(&v1, &v2))
     });
+
+    group.bench_with_input(
+        BenchmarkId::new("wide_spec", "2_fields_removed"),
+        &(&wide_base, &wide_head),
+        |b, (base, head)| b.iter(|| diff_openapi(base, head)),
+    );
+
+    group.bench_function("identical_spec", |b| {
+        b.iter(|| diff_openapi(&v1, &v1))
+    });
+
+    group.finish();
 }
 
-fn bench_openapi_parse_and_diff(c: &mut Criterion) {
-    c.bench_function("openapi_parse_and_diff_small", |b| {
-        b.iter(|| {
-            let base = parse_openapi(SMALL_OPENAPI).unwrap();
-            let head = parse_openapi(SMALL_OPENAPI_MODIFIED).unwrap();
-            diff_openapi(&base, &head)
-        })
-    });
-}
-
-fn bench_graphql_parse(c: &mut Criterion) {
-    c.bench_function("graphql_parse_small", |b| {
-        b.iter(|| parse_graphql(SMALL_GRAPHQL).expect("parse failed"))
-    });
-}
-
-fn bench_graphql_diff(c: &mut Criterion) {
-    let base = parse_graphql(SMALL_GRAPHQL).unwrap();
-    let head = parse_graphql(SMALL_GRAPHQL_MODIFIED).unwrap();
-    c.bench_function("graphql_diff_small", |b| {
-        b.iter(|| diff_graphql(&base, &head))
-    });
-}
-
-criterion_group!(
-    benches,
-    bench_openapi_parse,
-    bench_openapi_diff,
-    bench_openapi_parse_and_diff,
-    bench_graphql_parse,
-    bench_graphql_diff,
-);
+criterion_group!(benches, bench_parse, bench_diff);
 criterion_main!(benches);

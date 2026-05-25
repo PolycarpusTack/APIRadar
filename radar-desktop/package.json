@@ -1,6 +1,8 @@
 {
   "name": "radar-desktop",
   "version": "0.1.0",
+  "description": "API Contract Radar Monitor — desktop application",
+  "author": "Radar Monitor Contributors",
   "private": true,
   "main": "out/main/index.js",
   "scripts": {

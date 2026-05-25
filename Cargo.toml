@@ -18,7 +18,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tower-http = { version = "0.5", features = ["cors", "fs", "trace", "timeout"] }
 tokio-util = "0.7"
 openapiv3 = "2"
-serde_yaml = "0.9"
+serde_yml = "0.0.12"
 indexmap = { version = "2", features = ["serde"] }
 colored = "2"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

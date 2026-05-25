@@ -45,6 +45,19 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     info!(db_url = %args.db, bind = %args.bind, "starting radar-api");
 
+    // Warn when auth is disabled and the server is binding to all interfaces.
+    // In desktop sidecar mode, pass --bind 127.0.0.1:8080 to suppress this warning.
+    let require_auth = std::env::var("RADAR_REQUIRE_AUTH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !require_auth && args.bind.starts_with("0.0.0.0") {
+        tracing::warn!(
+            "SECURITY: RADAR_REQUIRE_AUTH is not set — API is unauthenticated on {}. \
+             Set RADAR_REQUIRE_AUTH=true or pass --bind 127.0.0.1:<port> for local-only access.",
+            args.bind
+        );
+    }
+
     let db_url = radar_api::resolve_db_url(&args.db);
     let db_url = db_url.as_str();
     let static_dir = args.static_dir.as_deref();
@@ -75,6 +88,10 @@ async fn main() -> Result<()> {
             match radar_api::purge_old_usage_events(&pool_for_retention, days).await {
                 Ok(n) => tracing::info!("retention: purged {n} old usage events (window={days}d)"),
                 Err(e) => tracing::warn!("retention job failed: {e}"),
+            }
+            match radar_api::expire_old_evidence(&pool_for_retention).await {
+                Ok(n) => tracing::info!("evidence expiry: removed {n} expired impact_evidence rows"),
+                Err(e) => tracing::warn!("evidence expiry job failed: {e}"),
             }
         }
     });

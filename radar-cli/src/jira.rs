@@ -1,8 +1,6 @@
 use anyhow::Result;
 
 pub struct JiraTicket {
-    #[allow(dead_code)]
-    pub key: String,
     pub summary: String,
     pub description: String,
 }
@@ -37,7 +35,6 @@ pub async fn fetch_ticket(
         .to_string();
 
     Ok(JiraTicket {
-        key: key.to_string(),
         summary: fields["summary"].as_str().unwrap_or("").to_string(),
         description,
     })

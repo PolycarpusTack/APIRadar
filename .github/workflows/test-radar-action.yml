@@ -1,0 +1,110 @@
+name: Test radar-action
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'radar-action/**'
+      - 'radar-cli/**'
+      - 'radar-core/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'radar-action/**'
+      - 'radar-cli/**'
+      - 'radar-core/**'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Smoke test: identical specs → exit 0, breaking-count=0
+  # ---------------------------------------------------------------------------
+  test-clean:
+    name: radar-action (clean — no breaking changes)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run radar-action against identical specs
+        id: radar
+        uses: ./radar-action
+        with:
+          base-spec: fixtures/demo-payments-api/v1.yaml
+          head-spec: fixtures/demo-payments-api/v1.yaml
+          spec-format: openapi
+
+      - name: Assert clean outputs
+        shell: bash
+        run: |
+          echo "breaking-count=${{ steps.radar.outputs.breaking-count }}"
+          echo "policy-verdict=${{ steps.radar.outputs.policy-verdict }}"
+          [ "${{ steps.radar.outputs.breaking-count }}" = "0" ] || (echo "Expected breaking-count=0" && exit 1)
+          [ "${{ steps.radar.outputs.policy-verdict }}" = "pass" ] || (echo "Expected policy-verdict=pass" && exit 1)
+
+  # ---------------------------------------------------------------------------
+  # Smoke test: v1→v2 (phone field removed) → exit 1 (breaking), outputs populated
+  # ---------------------------------------------------------------------------
+  test-breaking:
+    name: radar-action (breaking — phone field removed)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run radar-action against v1→v2 specs
+        id: radar
+        continue-on-error: true        # we EXPECT exit 1
+        uses: ./radar-action
+        with:
+          base-spec: fixtures/demo-payments-api/v1.yaml
+          head-spec: fixtures/demo-payments-api/v2.yaml
+          spec-format: openapi
+          fail-mode: warn              # warn so CI itself doesn't fail
+
+      - name: Assert breaking outputs
+        shell: bash
+        run: |
+          echo "breaking-count=${{ steps.radar.outputs.breaking-count }}"
+          echo "policy-verdict=${{ steps.radar.outputs.policy-verdict }}"
+          [ "${{ steps.radar.outputs.breaking-count }}" != "0" ] || (echo "Expected at least one breaking change" && exit 1)
+
+  # ---------------------------------------------------------------------------
+  # Smoke test: GraphQL SDL diff
+  # ---------------------------------------------------------------------------
+  test-graphql:
+    name: radar-action (GraphQL — type field removed)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Write base SDL
+        shell: bash
+        run: |
+          cat > /tmp/base.graphql <<'EOF'
+          type User { id: ID! name: String! phone: String }
+          type Query { user(id: ID!): User }
+          EOF
+
+      - name: Write head SDL (phone removed)
+        shell: bash
+        run: |
+          cat > /tmp/head.graphql <<'EOF'
+          type User { id: ID! name: String! }
+          type Query { user(id: ID!): User }
+          EOF
+
+      - name: Run radar-action on GraphQL specs
+        id: radar
+        continue-on-error: true
+        uses: ./radar-action
+        with:
+          base-spec: /tmp/base.graphql
+          head-spec: /tmp/head.graphql
+          spec-format: graphql
+          fail-mode: warn
+
+      - name: Assert GraphQL breaking change detected
+        shell: bash
+        run: |
+          [ "${{ steps.radar.outputs.breaking-count }}" != "0" ] || (echo "Expected breaking change in GraphQL diff" && exit 1)

@@ -1,12 +1,16 @@
 import { NavLink, Routes, Route, Navigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { LayoutDashboard, GitCompare, Users, FileText, Telescope, FlaskConical, HelpCircle, Settings, Server, LogOut } from 'lucide-react'
+import { LayoutDashboard, GitCompare, Users, FileText, Telescope, FlaskConical, HelpCircle, Settings, Server, LogOut, Database, Shield, Sliders, Activity } from 'lucide-react'
 import HomePage from './pages/HomePage'
 import DiffsPage from './pages/DiffsPage'
 import DiffDetailPage from './pages/DiffDetailPage'
 import ConsumersPage from './pages/ConsumersPage'
 import ConsumerDetailPage from './pages/ConsumerDetailPage'
 import ServicesPage from './pages/ServicesPage'
+import CatalogSourcesPage from './pages/CatalogSourcesPage'
+import AuditPage from './pages/AuditPage'
+import EvolutionRulesPage from './pages/EvolutionRulesPage'
+import EvidenceCoveragePage from './pages/EvidenceCoveragePage'
 import ReleaseNotesPage from './pages/ReleaseNotesPage'
 import PlaygroundPage from './pages/PlaygroundPage'
 import GenerateTestsPage from './pages/GenerateTestsPage'
@@ -66,6 +70,15 @@ const NAV = [
     items: [
       { to: '/services', label: 'Services', icon: Server },
       { to: '/consumers', label: 'Consumers', icon: Users },
+      { to: '/catalog-sources', label: 'Catalog Sources', icon: Database },
+    ],
+  },
+  {
+    label: 'Governance',
+    items: [
+      { to: '/audit', label: 'Audit Trail', icon: Shield },
+      { to: '/evolution-rules', label: 'Evolution Rules', icon: Sliders },
+      { to: '/evidence-coverage', label: 'Evidence Coverage', icon: Activity },
     ],
   },
   {
@@ -246,6 +259,10 @@ export default function App() {
           <Route path="/services" element={<ServicesPage />} />
           <Route path="/consumers" element={<ConsumersPage />} />
           <Route path="/consumers/:id" element={<ConsumerDetailPage />} />
+          <Route path="/catalog-sources" element={<CatalogSourcesPage />} />
+          <Route path="/audit" element={<AuditPage />} />
+          <Route path="/evolution-rules" element={<EvolutionRulesPage />} />
+          <Route path="/evidence-coverage" element={<EvidenceCoveragePage />} />
           <Route path="/release-notes" element={<ReleaseNotesPage />} />
           <Route path="/playground" element={<PlaygroundPage />} />
           <Route path="/generate-tests" element={<GenerateTestsPage />} />

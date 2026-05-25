@@ -8,8 +8,8 @@ This project uses the AI-Native Software Delivery framework. All task execution 
 - `Agents/backlog-builder-v5.1.md` — story/task templates, DoR/DoD
 - `Agents/core-specification-v1.md` — shared principles, modes, global DoD
 
-Current execution mode: PROTOTYPE (EPIC A) → DELIVERY (EPIC B+)
-Active stories: see `DEVELOPMENT_PLAN.md`
+Current execution mode: DELIVERY (EPIC F+)
+Active stories: see `DEVELOPMENT_PLAN.md` — EPIC E complete, EPIC F is next.
 
 ---
 
@@ -23,18 +23,22 @@ Always use terms from the Domain Glossary in `DEVELOPMENT_PLAN.md`. Never use sy
 | Consumer        | client, subscriber                  |
 | Blast Radius    | impact, affected services           |
 | Breaking Change | breaking, breaking update           |
+| Evidence        | signal, indicator                   |
+| Fail Mode       | policy mode, gate mode              |
 
 ---
 
 ## Workspace structure
 
 ```
-radar-core/       Shared Rust types (Change, Consumer, Diff, etc.)
-radar-cli/        CLI binary (clap 4)
+radar-core/       Shared Rust types (ChangeKind, Severity, Consumer, Diff, …)
+radar-cli/        CLI binary (clap 4) + radar_cli_lib (pub: github, render, api_client, policy)
 radar-api/        axum HTTP service; run with --db sqlite:PATH or --db postgres://...
-radar-scanner/    tree-sitter background worker
+radar-scanner/    tree-sitter code scanner + Postman Collection v2.1 parser
 radar-ui/         Vite 6 + React 19 web renderer (shared with desktop)
 radar-desktop/    Electron 33 shell (wraps radar-ui, spawns radar-api sidecar)
+fixtures/         Demo scenario fixtures for E-6 integration tests
+docs/             Runbook, enterprise plan, openapi.yaml
 ```
 
 ---
@@ -46,9 +50,12 @@ radar-desktop/    Electron 33 shell (wraps radar-ui, spawns radar-api sidecar)
 ```sh
 cargo build                               # build all Rust crates
 cargo test                                # run all tests
-cargo clippy -- -D warnings              # lint (CI fails on warnings)
+cargo test -p radar-cli --test demo_scenario  # run E-6 integration tests
+cargo clippy -- -D warnings               # lint (CI fails on warnings)
 cargo fmt --all                           # format
 ```
+
+**Important:** Never run multiple `cargo` commands in parallel — disk fills up fast. Always run them sequentially.
 
 ### Node / pnpm
 
@@ -79,6 +86,29 @@ Migration compatibility rules:
 - Use `TEXT` for IDs and timestamps — never `SERIAL`, `BIGSERIAL`, or `TIMESTAMPTZ`
 - All migrations must work on **both** SQLite and PostgreSQL
 - Test locally against SQLite; CI and production use PostgreSQL
+- Current migrations: 001–013 (013 adds `catalog_source` to consumer)
+
+---
+
+## Key architectural patterns
+
+### ChangeKind string representation
+`ChangeKind::as_str()` is defined in `radar-core/src/models.rs`. Use it in all crates — do **not** duplicate the match arm locally.
+
+### Evidence writing
+All evidence flows through `impact_evidence` (append-only, migration 011). Three source types:
+- `runtime_usage` — from `POST /v1/usage/events`; confidence high/medium based on recency
+- `static_call_site` — from `POST /v1/call-sites`; confidence medium (S2, operation known) or low (S1)
+- `collection_file` — from `POST /v1/evidence/collection`; confidence medium; deterministic ID for idempotency
+
+### Consumer auto-registration
+`POST /v1/consumers/upsert` registers a consumer by name without requiring `repo_url`. Used by the collection file scanner. Idempotent on `(org_id, name)`.
+
+### Policy engine
+`radar-cli/src/policy.rs` — `decide()` takes `(changes, policy, fail_mode, has_active_consumers, has_label_override, api_error)`. Always post the result to `POST /v1/policy-decisions` after `drift check`.
+
+### Library target
+`radar-cli` exposes `radar_cli_lib` as a `[lib]` target. Integration tests in `radar-cli/tests/` import from `radar_cli_lib`. Keep `lib.rs` to just `pub mod` declarations for: `api_client`, `github`, `policy`, `render`.
 
 ---
 
@@ -120,3 +150,4 @@ Every task must be labelled with exactly one hat before implementation begins:
 - The Electron desktop build is skipped in CI for the same reason
 - `pnpm-lock.yaml` is committed and must never be `.gitignore`d
 - Clippy warnings are treated as errors (`-D warnings`) in CI
+- Test counts (approximate): radar-scanner 27, radar-api 42, radar-cli (unit + integration) ~55+

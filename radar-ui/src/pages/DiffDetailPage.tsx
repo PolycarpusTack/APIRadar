@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, ExternalLink } from 'lucide-react'
+import { ArrowLeft, ExternalLink, CheckCircle, Plus, X } from 'lucide-react'
 import Badge from '../components/Badge'
 
 interface DiffChange {
@@ -38,6 +38,23 @@ interface BlastRadius {
   service_id: string
   lookback_days: number
   entries: BlastEntry[]
+}
+
+interface Acknowledgement {
+  id: string
+  diff_id: string | null
+  service_id: string | null
+  consumer_id: string | null
+  acknowledged_by: string
+  reason: string | null
+  expires_at: string | null
+  created_at: string
+}
+
+interface AckFormState {
+  acknowledged_by: string
+  reason: string
+  expires_at: string
 }
 
 function severityVariant(s: string): 'err' | 'warn' | 'ok' | 'neutral' {
@@ -85,14 +102,29 @@ function TableHeader({ cols }: { cols: string[] }) {
   )
 }
 
+const DEFAULT_ACK_FORM: AckFormState = { acknowledged_by: '', reason: '', expires_at: '' }
+
 export default function DiffDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
 
   const [diff, setDiff] = useState<DiffDetail | null>(null)
   const [blast, setBlast] = useState<BlastRadius | null>(null)
+  const [acks, setAcks] = useState<Acknowledgement[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [showAckForm, setShowAckForm] = useState(false)
+  const [ackForm, setAckForm] = useState<AckFormState>(DEFAULT_ACK_FORM)
+  const [submittingAck, setSubmittingAck] = useState(false)
+  const [ackError, setAckError] = useState<string | null>(null)
+
+  function loadAcks() {
+    if (!id) return
+    fetch(`/v1/diffs/${id}/acknowledgements`)
+      .then((r) => r.ok ? r.json() as Promise<{ entries: Acknowledgement[] }> : Promise.resolve({ entries: [] }))
+      .then((data) => setAcks(data.entries ?? []))
+      .catch(() => {})
+  }
 
   useEffect(() => {
     if (!id) return
@@ -111,7 +143,37 @@ export default function DiffDetailPage() {
       .then(([d, b]) => { setDiff(d); setBlast(b) })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
+
+    loadAcks()
   }, [id])
+
+  function handleAckSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!id) return
+    setSubmittingAck(true)
+    setAckError(null)
+    fetch('/v1/acknowledgements', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        diff_id: id,
+        acknowledged_by: ackForm.acknowledged_by,
+        reason: ackForm.reason || undefined,
+        expires_at: ackForm.expires_at || undefined,
+      }),
+    })
+      .then((r) => {
+        if (!r.ok) return r.text().then((t) => { throw new Error(t || `HTTP ${r.status}`) })
+        return r.json()
+      })
+      .then(() => {
+        setShowAckForm(false)
+        setAckForm(DEFAULT_ACK_FORM)
+        loadAcks()
+      })
+      .catch((e: Error) => setAckError(e.message))
+      .finally(() => setSubmittingAck(false))
+  }
 
   if (loading) {
     return (
@@ -282,6 +344,141 @@ export default function DiffDetailPage() {
                           {e.has_runtime_usage && <Badge variant="cobalt">usage</Badge>}
                           {e.has_call_site && <Badge variant="neon">call site</Badge>}
                         </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </section>
+
+        {/* Acknowledgements */}
+        <section>
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-[9.5px] font-semibold uppercase tracking-[1.2px]" style={{ color: 'var(--text-dim)' }}>
+              Acknowledgements ({acks.length})
+            </p>
+            <button
+              onClick={() => setShowAckForm((v) => !v)}
+              className="flex items-center gap-1 rounded-md border px-2.5 py-1 text-[11.5px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
+              style={{ borderColor: 'var(--border-mid)', color: 'var(--text-2)' }}
+            >
+              <Plus className="h-3 w-3" />
+              Acknowledge
+            </button>
+          </div>
+
+          {showAckForm && (
+            <div className="mb-3 rounded-lg p-4" style={{ border: '1px solid var(--cobalt-muted)', background: 'var(--bg-surface)' }}>
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-[12px] font-semibold" style={{ color: 'var(--text-1)' }}>Create Acknowledgement</p>
+                <button onClick={() => { setShowAckForm(false); setAckError(null) }}>
+                  <X className="h-4 w-4" style={{ color: 'var(--text-3)' }} />
+                </button>
+              </div>
+              <form onSubmit={handleAckSubmit} className="space-y-3">
+                <div>
+                  <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                    Acknowledged by
+                  </label>
+                  <input
+                    required
+                    value={ackForm.acknowledged_by}
+                    onChange={(e) => setAckForm((f) => ({ ...f, acknowledged_by: e.target.value }))}
+                    placeholder="alice@example.com"
+                    className="w-full rounded-md border px-2.5 py-1.5 text-[12.5px]"
+                    style={{ borderColor: 'var(--border-mid)', background: 'var(--bg-raised)', color: 'var(--text-1)' }}
+                  />
+                </div>
+                <div>
+                  <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                    Reason
+                  </label>
+                  <input
+                    value={ackForm.reason}
+                    onChange={(e) => setAckForm((f) => ({ ...f, reason: e.target.value }))}
+                    placeholder="All consumers have migrated to v2"
+                    className="w-full rounded-md border px-2.5 py-1.5 text-[12.5px]"
+                    style={{ borderColor: 'var(--border-mid)', background: 'var(--bg-raised)', color: 'var(--text-1)' }}
+                  />
+                </div>
+                <div>
+                  <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                    Expires at (optional ISO 8601)
+                  </label>
+                  <input
+                    value={ackForm.expires_at}
+                    onChange={(e) => setAckForm((f) => ({ ...f, expires_at: e.target.value }))}
+                    placeholder="2026-12-31T00:00:00Z"
+                    className="w-full rounded-md border px-2.5 py-1.5 text-[12.5px]"
+                    style={{ borderColor: 'var(--border-mid)', background: 'var(--bg-raised)', color: 'var(--text-1)', fontFamily: 'var(--font-mono)' }}
+                  />
+                </div>
+                {ackError && (
+                  <p className="text-[12px]" style={{ color: 'var(--red)' }}>{ackError}</p>
+                )}
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setShowAckForm(false); setAckError(null) }}
+                    className="rounded-md px-3 py-1.5 text-[12px]"
+                    style={{ border: '1px solid var(--border-mid)', color: 'var(--text-2)', background: 'var(--bg-raised)' }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={submittingAck}
+                    className="rounded-md px-3 py-1.5 text-[12px] font-medium"
+                    style={{ background: 'var(--cobalt)', color: 'var(--text-inverse)', opacity: submittingAck ? 0.6 : 1 }}
+                  >
+                    {submittingAck ? 'Saving…' : 'Create acknowledgement'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          <div className="overflow-hidden rounded-lg" style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
+            {acks.length === 0 ? (
+              <p className="px-4 py-6 text-center text-[12.5px]" style={{ color: 'var(--text-3)' }}>
+                No acknowledgements yet. Create one to formally accept this breaking change and allow CI to proceed.
+              </p>
+            ) : (
+              <table className="w-full border-collapse">
+                <TableHeader cols={['Acknowledged By', 'Reason', 'Expires', 'Date']} />
+                <tbody>
+                  {acks.map((a) => (
+                    <tr key={a.id} className="group" style={{ borderBottom: '1px solid var(--border)' }}>
+                      <td
+                        className="px-3 py-2.5 font-medium group-hover:bg-[var(--bg-hover)]"
+                        style={{ fontSize: '12.5px', color: 'var(--text-1)' }}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <CheckCircle className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--green)' }} />
+                          {a.acknowledged_by}
+                        </div>
+                      </td>
+                      <td
+                        className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]"
+                        style={{ fontSize: '12px', color: 'var(--text-2)', maxWidth: '260px' }}
+                      >
+                        <span className="truncate block" title={a.reason ?? ''}>
+                          {a.reason ?? <span style={{ color: 'var(--text-dim)' }}>—</span>}
+                        </span>
+                      </td>
+                      <td
+                        className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]"
+                        style={{ fontFamily: 'var(--font-mono)', fontSize: '11.5px', color: 'var(--text-3)' }}
+                      >
+                        {a.expires_at ? formatDate(a.expires_at) : <span style={{ color: 'var(--text-dim)' }}>never</span>}
+                      </td>
+                      <td
+                        className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]"
+                        style={{ fontFamily: 'var(--font-mono)', fontSize: '11.5px', color: 'var(--text-3)' }}
+                      >
+                        {formatDate(a.created_at)}
                       </td>
                     </tr>
                   ))}

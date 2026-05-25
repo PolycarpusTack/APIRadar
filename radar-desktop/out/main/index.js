@@ -5,15 +5,15 @@ const child_process = require("child_process");
 const fs = require("fs");
 let apiProcess = null;
 function resolveApiBinary() {
-  const envBin = process.env["DRIFT_API_BIN"];
+  const envBin = process.env["RADAR_API_BIN"];
   if (envBin && fs.existsSync(envBin)) {
     return envBin;
   }
-  const resourcesBin = path.join(process.resourcesPath ?? "", "drift-api");
+  const resourcesBin = path.join(process.resourcesPath ?? "", "radar-api");
   if (fs.existsSync(resourcesBin)) {
     return resourcesBin;
   }
-  const resourcesBinExe = path.join(process.resourcesPath ?? "", "drift-api.exe");
+  const resourcesBinExe = path.join(process.resourcesPath ?? "", "radar-api.exe");
   if (fs.existsSync(resourcesBinExe)) {
     return resourcesBinExe;
   }
@@ -21,23 +21,23 @@ function resolveApiBinary() {
 }
 function startApiSidecar() {
   const dbPath = `sqlite:${path.join(electron.app.getPath("userData"), "drift.db")}`;
-  const args = ["--db", dbPath];
+  const args = ["--db", dbPath, "--bind", "127.0.0.1:8080"];
   const bin = resolveApiBinary();
   if (!bin) {
     const workspaceRoot = path.join(__dirname, "..", "..", "..", "..");
     console.warn(
-      "[main] drift-api binary not found — falling back to `cargo run`. Run `cargo build -p drift-api` to avoid this slow start."
+      "[main] radar-api binary not found — falling back to `cargo run`. Run `cargo build -p radar-api` to avoid this slow start."
     );
     try {
-      const cargoProcess = child_process.spawn("cargo", ["run", "--bin", "drift-api", "--", ...args], {
+      const cargoProcess = child_process.spawn("cargo", ["run", "--bin", "radar-api", "--", ...args], {
         cwd: workspaceRoot,
         stdio: ["ignore", "pipe", "pipe"],
         detached: false
       });
-      wireProcessLogs(cargoProcess, "drift-api(cargo)");
+      wireProcessLogs(cargoProcess, "radar-api(cargo)");
       return cargoProcess;
     } catch (err) {
-      console.error("[main] Failed to start drift-api via cargo run:", err);
+      console.error("[main] Failed to start radar-api via cargo run:", err);
       return null;
     }
   }
@@ -46,10 +46,10 @@ function startApiSidecar() {
       stdio: ["ignore", "pipe", "pipe"],
       detached: false
     });
-    wireProcessLogs(proc, "drift-api");
+    wireProcessLogs(proc, "radar-api");
     return proc;
   } catch (err) {
-    console.error("[main] Failed to spawn drift-api binary:", err);
+    console.error("[main] Failed to spawn radar-api binary:", err);
     return null;
   }
 }
@@ -78,7 +78,7 @@ function waitForApi(url, maxRetries) {
       attempts++;
       fetch(url).then((res) => {
         if (res.ok) {
-          console.log(`[main] drift-api healthy after ${attempts} attempt(s)`);
+          console.log(`[main] radar-api healthy after ${attempts} attempt(s)`);
           resolve();
         } else {
           retry();
@@ -87,7 +87,7 @@ function waitForApi(url, maxRetries) {
     }
     function retry() {
       if (attempts >= maxRetries) {
-        reject(new Error(`drift-api did not become healthy after ${maxRetries} attempts`));
+        reject(new Error(`radar-api did not become healthy after ${maxRetries} attempts`));
         return;
       }
       setTimeout(attempt, 500);
@@ -100,7 +100,8 @@ function createWindow() {
   const win = new electron.BrowserWindow({
     width: 1280,
     height: 800,
-    backgroundColor: "#0f0f14",
+    backgroundColor: "#0B0F19",
+    // matches --bg-base token; Electron reads this before CSS loads
     titleBarStyle: "default",
     webPreferences: {
       contextIsolation: true,
@@ -123,7 +124,7 @@ electron.app.whenReady().then(async () => {
   try {
     await waitForApi("http://127.0.0.1:8080/health", 20);
   } catch (err) {
-    console.warn("[main] drift-api health check failed — continuing anyway:", err);
+    console.warn("[main] radar-api health check failed — continuing anyway:", err);
   }
   createWindow();
   electron.app.on("activate", () => {
@@ -137,7 +138,7 @@ electron.app.on("window-all-closed", () => {
 });
 electron.app.on("before-quit", () => {
   if (apiProcess && !apiProcess.killed) {
-    console.log("[main] Stopping drift-api sidecar…");
+    console.log("[main] Stopping radar-api sidecar…");
     apiProcess.kill("SIGTERM");
     apiProcess = null;
   }

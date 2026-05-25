@@ -31,7 +31,9 @@ jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-serde_yaml = { workspace = true }
+serde_yml = { workspace = true }
+percent-encoding = "2"
+base64 = "0.22"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

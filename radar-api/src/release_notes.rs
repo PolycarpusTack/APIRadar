@@ -1,0 +1,349 @@
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
+use chrono::Utc;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use uuid::Uuid;
+use crate::errors::ApiError;
+use crate::ai_tests::load_diff_evidence;
+use crate::PaginationParams;
+
+#[derive(serde::Deserialize)]
+pub(crate) struct CreateReleaseNoteBody {
+    pub(crate) content: String,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct PatchStatusBody {
+    pub(crate) status: String,
+}
+
+// POST /v1/diffs/:id/release-notes
+pub(crate) async fn create_release_note(
+    Path(diff_id): Path<String>,
+    State(pool): State<sqlx::AnyPool>,
+    Json(body): Json<CreateReleaseNoteBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    if body.content.is_empty() {
+        return Err(ApiError::BadRequest("content is required".into()));
+    }
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO release_note (id, diff_id, content, created_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&diff_id)
+    .bind(&body.content)
+    .bind(&now)
+    .execute(&pool)
+    .await?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": id, "diff_id": diff_id, "created_at": now }))))
+}
+
+// GET /v1/release-notes
+pub(crate) async fn list_release_notes(
+    State(pool): State<sqlx::AnyPool>,
+    Query(params): Query<PaginationParams>,
+) -> Result<impl IntoResponse, ApiError> {
+    let rows = sqlx::query(
+        r#"SELECT rn.id, rn.diff_id, rn.created_at, rn.status,
+                  d.from_version, d.to_version,
+                  sv_from.git_ref AS from_git_ref,
+                  sv_to.git_ref   AS to_git_ref
+           FROM release_note rn
+           JOIN diff        d      ON d.id      = rn.diff_id
+           JOIN spec_version sv_from ON sv_from.id = d.from_version
+           JOIN spec_version sv_to   ON sv_to.id   = d.to_version
+           ORDER BY rn.created_at DESC
+           LIMIT ? OFFSET ?"#,
+    )
+    .bind(params.limit)
+    .bind(params.offset)
+    .fetch_all(&pool)
+    .await?;
+
+    let items: Vec<Value> = rows.iter().map(|r| {
+        use sqlx::Row;
+        json!({
+            "id":           r.get::<String, _>("id"),
+            "diff_id":      r.get::<String, _>("diff_id"),
+            "from_git_ref": r.get::<String, _>("from_git_ref"),
+            "to_git_ref":   r.get::<String, _>("to_git_ref"),
+            "status":       r.try_get::<String, _>("status").unwrap_or_else(|_| "draft".into()),
+            "created_at":   r.get::<String, _>("created_at"),
+        })
+    }).collect();
+
+    Ok(Json(json!(items)))
+}
+
+// GET /v1/release-notes/:id
+pub(crate) async fn get_release_note(
+    Path(note_id): Path<String>,
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<impl IntoResponse, ApiError> {
+    let row = sqlx::query(
+        r#"SELECT rn.id, rn.diff_id, rn.content, rn.created_at,
+                  sv_from.git_ref AS from_git_ref,
+                  sv_to.git_ref   AS to_git_ref
+           FROM release_note rn
+           JOIN diff        d      ON d.id        = rn.diff_id
+           JOIN spec_version sv_from ON sv_from.id = d.from_version
+           JOIN spec_version sv_to   ON sv_to.id   = d.to_version
+           WHERE rn.id = ?"#,
+    )
+    .bind(&note_id)
+    .fetch_optional(&pool)
+    .await?;
+
+    match row {
+        None => Err(ApiError::NotFound(format!("release note {note_id} not found"))),
+        Some(r) => {
+            use sqlx::Row;
+            Ok(Json(json!({
+                "id":           r.get::<String, _>("id"),
+                "diff_id":      r.get::<String, _>("diff_id"),
+                "from_git_ref": r.get::<String, _>("from_git_ref"),
+                "to_git_ref":   r.get::<String, _>("to_git_ref"),
+                "content":      r.get::<String, _>("content"),
+                "status":       r.try_get::<String, _>("status").unwrap_or_else(|_| "draft".into()),
+                "created_at":   r.get::<String, _>("created_at"),
+            })))
+        }
+    }
+}
+
+// PATCH /v1/release-notes/:id/status
+pub(crate) async fn patch_release_note_status(
+    Path(note_id): Path<String>,
+    State(pool): State<sqlx::AnyPool>,
+    Json(body): Json<PatchStatusBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+    const VALID_STATUSES: &[&str] = &["draft", "reviewed", "published", "superseded"];
+    if !VALID_STATUSES.contains(&body.status.as_str()) {
+        return Err(ApiError::BadRequest(format!(
+            "invalid status '{}'; must be one of: {}",
+            body.status,
+            VALID_STATUSES.join(", ")
+        )));
+    }
+
+    let row = sqlx::query("SELECT status FROM release_note WHERE id = ?")
+        .bind(&note_id)
+        .fetch_optional(&pool)
+        .await?;
+
+    let Some(row) = row else {
+        return Err(ApiError::NotFound(format!("release note {note_id} not found")));
+    };
+    let current: String = row.try_get("status").unwrap_or_else(|_| "draft".into());
+
+    let allowed_next = match current.as_str() {
+        "draft"       => &["reviewed", "superseded"][..],
+        "reviewed"    => &["published", "draft", "superseded"][..],
+        "published"   => &["superseded"][..],
+        "superseded"  => &[][..],
+        _             => &["draft"][..],
+    };
+    if !allowed_next.contains(&body.status.as_str()) {
+        return Err(ApiError::BadRequest(format!(
+            "transition '{current}' → '{}' is not allowed",
+            body.status
+        )));
+    }
+
+    sqlx::query("UPDATE release_note SET status = ? WHERE id = ?")
+        .bind(&body.status)
+        .bind(&note_id)
+        .execute(&pool)
+        .await?;
+
+    Ok(Json(json!({ "id": note_id, "status": body.status })))
+}
+
+// GET /v1/diffs/:id/migration-guide?consumer_id=xxx
+pub(crate) async fn get_migration_guide(
+    Path(diff_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+    let consumer_id = params.get("consumer_id").map(String::as_str);
+
+    let diff_row = sqlx::query(
+        r#"SELECT d.id, sv_from.git_ref AS from_ref, sv_to.git_ref AS to_ref,
+                  s.name AS service_name
+           FROM diff d
+           JOIN spec_version sv_from ON sv_from.id = d.from_version
+           JOIN spec_version sv_to   ON sv_to.id   = d.to_version
+           JOIN service s ON s.id = sv_from.service_id
+           WHERE d.id = ?"#,
+    )
+    .bind(&diff_id)
+    .fetch_optional(&pool)
+    .await?;
+    let Some(dr) = diff_row else {
+        return Err(ApiError::NotFound(format!("diff {diff_id} not found")));
+    };
+    let from_ref: String = dr.try_get("from_ref").unwrap_or_default();
+    let to_ref: String   = dr.try_get("to_ref").unwrap_or_default();
+    let service_name: String = dr.try_get("service_name").unwrap_or_else(|_| diff_id.clone());
+
+    let consumer_name: Option<String> = if let Some(cid) = consumer_id {
+        sqlx::query("SELECT name FROM consumer WHERE id = ?")
+            .bind(cid)
+            .fetch_optional(&pool)
+            .await?
+            .and_then(|r| r.try_get::<Option<String>, _>("name").ok().flatten())
+    } else {
+        None
+    };
+
+    let change_rows = sqlx::query(
+        "SELECT path, kind, severity, description FROM change WHERE diff_id = ? AND severity = 'breaking' ORDER BY path",
+    )
+    .bind(&diff_id)
+    .fetch_all(&pool)
+    .await?;
+
+    let evidence = load_diff_evidence(&pool, &diff_id, consumer_id).await?;
+
+    let mut cs_q = String::from(
+        "SELECT operation, field_path, file_path, line_number FROM call_site WHERE service_id IN (SELECT sv.service_id FROM diff d JOIN spec_version sv ON sv.id = d.from_version WHERE d.id = ?)"
+    );
+    if consumer_id.is_some() {
+        cs_q.push_str(" AND consumer_id = ?");
+    }
+    cs_q.push_str(" ORDER BY operation, field_path LIMIT 100");
+    let mut csqb = sqlx::query(&cs_q).bind(&diff_id);
+    if let Some(cid) = consumer_id {
+        csqb = csqb.bind(cid);
+    }
+    let call_sites = csqb.fetch_all(&pool).await?;
+
+    let mut md = String::new();
+    let scope_label = consumer_name.as_deref()
+        .or(consumer_id)
+        .map(|n| format!(" ��� scoped to **{n}**"))
+        .unwrap_or_default();
+
+    md.push_str(&format!(
+        "# Migration Guide: {service_name}{scope_label}\n\n\
+         **Diff:** `{from_ref}` → `{to_ref}`\n\n"
+    ));
+
+    if change_rows.is_empty() {
+        md.push_str("No breaking changes in this diff.\n");
+    } else {
+        md.push_str(&format!(
+            "## Breaking Changes ({})\n\n",
+            change_rows.len()
+        ));
+        for cr in &change_rows {
+            let path: String = cr.try_get("path").unwrap_or_default();
+            let kind: String = cr.try_get("kind").unwrap_or_default();
+            let desc: Option<String> = cr.try_get("description").unwrap_or(None);
+            md.push_str(&format!("### `{path}` — {kind}\n\n"));
+            if let Some(d) = desc {
+                md.push_str(&format!("{d}\n\n"));
+            }
+            migration_advice(&mut md, &kind, &path);
+        }
+    }
+
+    if !evidence.is_empty() {
+        md.push_str(&format!("\n## Your Usage Evidence ({})\n\n", evidence.len()));
+        md.push_str("The following operations and fields were observed from your service:\n\n");
+        md.push_str("| Operation | Field | Source | Confidence | Last seen |\n");
+        md.push_str("|---|---|---|---|---|\n");
+        for ev in &evidence {
+            let op  = ev["operation"].as_str().unwrap_or("—");
+            let fp  = ev["field_path"].as_str().filter(|s| !s.is_empty()).unwrap_or("—");
+            let src = ev["source_type"].as_str().unwrap_or("—");
+            let conf = ev["confidence"].as_str().unwrap_or("—");
+            let obs  = ev["observed_at"].as_str().map(|s| s.get(..10).unwrap_or(s)).unwrap_or("—");
+            md.push_str(&format!("| `{op}` | `{fp}` | {src} | {conf} | {obs} |\n"));
+        }
+    }
+
+    if !call_sites.is_empty() {
+        md.push_str(&format!("\n## Call Sites ({})\n\n", call_sites.len()));
+        md.push_str("Static references found in your codebase:\n\n");
+        md.push_str("| Operation | Field | File | Line |\n");
+        md.push_str("|---|---|---|---|\n");
+        for cs in &call_sites {
+            use sqlx::Row as _;
+            let op:  String = cs.try_get("operation").unwrap_or_default();
+            let fp:  String = cs.try_get("field_path").unwrap_or_default();
+            let file: String = cs.try_get("file_path").unwrap_or_default();
+            let line: Option<i64> = cs.try_get("line_number").unwrap_or(None);
+            let line_str = line.map(|l| l.to_string()).unwrap_or_else(|| "—".into());
+            md.push_str(&format!("| `{op}` | `{fp}` | `{file}` | {line_str} |\n"));
+        }
+    }
+
+    Ok((
+        [("Content-Type", "text/markdown; charset=utf-8")],
+        md,
+    ))
+}
+
+fn migration_advice(md: &mut String, kind: &str, path: &str) {
+    let field = path.rsplit_once(" \u{2192} ").map(|(_, f)| f).unwrap_or(path);
+    match kind {
+        "field_removed" => {
+            md.push_str(&format!(
+                "**What changed:** `{field}` was removed from the response.\n\n\
+                 **Action required:** Remove all code that reads `{field}`. \
+                 Clients that access this field will receive `undefined` / `null`.\n\n"
+            ));
+        }
+        "required_changed" => {
+            md.push_str(&format!(
+                "**What changed:** `{field}` is now required.\n\n\
+                 **Action required:** Ensure your requests always include `{field}`. \
+                 Omitting it will result in a 422 Unprocessable Entity response.\n\n"
+            ));
+        }
+        "enum_value_removed" => {
+            md.push_str(&format!(
+                "**What changed:** A value was removed from the `{field}` enum.\n\n\
+                 **Action required:** Audit your code for hardcoded uses of the removed value \
+                 and replace with a currently supported value.\n\n"
+            ));
+        }
+        "operation_removed" => {
+            md.push_str(&format!(
+                "**What changed:** The operation `{path}` was removed.\n\n\
+                 **Action required:** Remove all calls to this operation. \
+                 Check the release notes for a replacement endpoint.\n\n"
+            ));
+        }
+        "type_changed" => {
+            md.push_str(&format!(
+                "**What changed:** The type of `{field}` changed.\n\n\
+                 **Action required:** Update your request and response parsing to handle the new type. \
+                 Sending the old type will result in a 422 response.\n\n"
+            ));
+        }
+        "nullability_changed" => {
+            md.push_str(&format!(
+                "**What changed:** `{field}` is now non-nullable (or vice-versa).\n\n\
+                 **Action required:** Guard all accesses to `{field}` with a null check, or \
+                 update your serialisation code to handle the new nullability.\n\n"
+            ));
+        }
+        _ => {
+            md.push_str(&format!(
+                "**What changed:** `{kind}` on `{field}`.\n\n\
+                 **Action required:** Review the API changelog and update affected code paths.\n\n"
+            ));
+        }
+    }
+}

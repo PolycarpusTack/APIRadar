@@ -1,33 +1,61 @@
 use colored::Colorize;
 use radar_core::{
     diff::DiffChange,
-    models::{ChangeKind, Severity},
+    models::Severity,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Blast-radius response types (deserialized from the API)
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct ConsumerInfo {
     pub name: String,
     pub owner_team: String,
     pub contact: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
+pub struct EvidenceItem {
+    pub kind: String,
+    pub operation: Option<String>,
+    pub field_path: Option<String>,
+    pub recorded_at: Option<String>,
+    // last_seen_at (call_site) omitted: serde ignores unknown JSON fields; we show "(static)" in the PR comment
+}
+
+#[derive(Deserialize, Clone)]
 pub struct BlastRadiusEntry {
     pub consumer: ConsumerInfo,
     pub confidence: String,
     pub last_seen: String,
     pub has_runtime_usage: bool,
     pub has_call_site: bool,
+    #[serde(default)]
+    pub evidence: Vec<EvidenceItem>,
 }
 
 #[derive(Deserialize)]
 pub struct BlastRadiusResponse {
     pub entries: Vec<BlastRadiusEntry>,
+}
+
+/// Machine-readable summary written to `--summary-file` for GitHub Action output parsing.
+#[derive(Serialize)]
+pub struct CheckSummary {
+    pub diff_id: Option<String>,
+    pub breaking_count: usize,
+    pub affected_consumer_count: usize,
+    pub policy_verdict: String,
+    pub dashboard_url: Option<String>,
+}
+
+/// Write a `CheckSummary` as pretty-printed JSON to the given path.
+pub fn write_summary(path: &std::path::Path, summary: &CheckSummary) -> anyhow::Result<()> {
+    let json = serde_json::to_string_pretty(summary)?;
+    std::fs::write(path, json)?;
+    Ok(())
 }
 
 /// Print the check results to stdout.
@@ -61,8 +89,7 @@ pub fn print_table(changes: &[DiffChange], use_color: bool) {
                 change.path.normal().to_string(),
             ),
         };
-        let kind_str = kind_label(&change.kind);
-        println!("{badge}   {path_colored:<45}  {kind_str}");
+        println!("{badge}   {path_colored:<45}  {}", change.kind.as_str());
     }
 
     println!();
@@ -95,24 +122,6 @@ pub fn print_table(changes: &[DiffChange], use_color: bool) {
         print!("{} safe", safe.to_string().cyan());
     }
     println!();
-}
-
-fn kind_label(kind: &ChangeKind) -> &'static str {
-    match kind {
-        ChangeKind::FieldRemoved => "field_removed",
-        ChangeKind::FieldAdded => "field_added",
-        ChangeKind::TypeChanged => "type_changed",
-        ChangeKind::RequiredChanged => "required_changed",
-        ChangeKind::OperationRemoved => "operation_removed",
-        ChangeKind::OperationAdded => "operation_added",
-        ChangeKind::ParameterRemoved => "parameter_removed",
-        ChangeKind::ResponseRemoved => "response_removed",
-        ChangeKind::EnumValueRemoved => "enum_value_removed",
-        ChangeKind::EnumValueAdded => "enum_value_added",
-        ChangeKind::NullabilityChanged => "nullability_changed",
-        ChangeKind::RequestBodyAdded => "request_body_added",
-        ChangeKind::RequestBodyRemoved => "request_body_removed",
-    }
 }
 
 /// Print JSON output to stdout.
@@ -194,4 +203,61 @@ pub fn print_blast_radius(br: &BlastRadiusResponse, use_color: bool) {
         "  {} consumer(s) affected.",
         br.entries.len().to_string().bold()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_summary_serializes_all_fields() {
+        let summary = CheckSummary {
+            diff_id: Some("abc-123".to_string()),
+            breaking_count: 2,
+            affected_consumer_count: 1,
+            policy_verdict: "block".to_string(),
+            dashboard_url: Some("https://radar.example.com/app/diffs/abc-123".to_string()),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["diff_id"], "abc-123");
+        assert_eq!(v["breaking_count"], 2);
+        assert_eq!(v["affected_consumer_count"], 1);
+        assert_eq!(v["policy_verdict"], "block");
+        assert_eq!(v["dashboard_url"], "https://radar.example.com/app/diffs/abc-123");
+    }
+
+    #[test]
+    fn check_summary_none_optionals_serialize_as_null() {
+        let summary = CheckSummary {
+            diff_id: None,
+            breaking_count: 0,
+            affected_consumer_count: 0,
+            policy_verdict: "pass".to_string(),
+            dashboard_url: None,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["diff_id"].is_null());
+        assert_eq!(v["breaking_count"], 0);
+        assert_eq!(v["policy_verdict"], "pass");
+    }
+
+    #[test]
+    fn write_summary_creates_valid_json_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("summary.json");
+        let summary = CheckSummary {
+            diff_id: Some("x".to_string()),
+            breaking_count: 1,
+            affected_consumer_count: 0,
+            policy_verdict: "warn".to_string(),
+            dashboard_url: None,
+        };
+        write_summary(&path, &summary).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(v["breaking_count"], 1);
+        assert_eq!(v["policy_verdict"], "warn");
+    }
 }

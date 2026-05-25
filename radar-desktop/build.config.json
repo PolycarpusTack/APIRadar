@@ -9,23 +9,17 @@
     "out/**/*",
     "!node_modules/**/*"
   ],
-  "extraResources": [
-    {
-      "from": "../../radar-api/target/release/radar-api",
-      "to": "radar-api",
-      "filter": ["**/*"]
-    },
-    {
-      "from": "../../radar-api/target/release/radar-api.exe",
-      "to": "radar-api.exe",
-      "filter": ["**/*"]
-    }
-  ],
   "win": {
     "target": [
       {
         "target": "nsis",
         "arch": ["x64"]
+      }
+    ],
+    "extraResources": [
+      {
+        "from": "../../radar-api/target/release/radar-api.exe",
+        "to": "radar-api.exe"
       }
     ]
   },
@@ -36,7 +30,13 @@
         "arch": ["x64", "arm64"]
       }
     ],
-    "category": "public.app-category.developer-tools"
+    "category": "public.app-category.developer-tools",
+    "extraResources": [
+      {
+        "from": "../../radar-api/target/release/radar-api",
+        "to": "radar-api"
+      }
+    ]
   },
   "linux": {
     "target": [
@@ -45,7 +45,13 @@
         "arch": ["x64"]
       }
     ],
-    "category": "Development"
+    "category": "Development",
+    "extraResources": [
+      {
+        "from": "../../radar-api/target/release/radar-api",
+        "to": "radar-api"
+      }
+    ]
   },
   "nsis": {
     "oneClick": false,

@@ -83,7 +83,7 @@ pub fn assemble_suite(
         items,
     };
 
-    let yaml = serde_yaml::to_string(&suite)?;
+    let yaml = serde_yml::to_string(&suite)?;
     // Prepend the api-testing magic comment used for auto-detection.
     Ok(format!("#!api-testing\n{yaml}"))
 }
