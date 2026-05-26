@@ -18,6 +18,19 @@ interface MappingEntry {
   column: string | null
 }
 
+interface CsvRunJob {
+  id: string
+  name: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  total_rows: number
+  completed_rows: number
+  error_count: number
+  error_message: string | null
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+}
+
 // ---------------------------------------------------------------------------
 // Request template builder
 // ---------------------------------------------------------------------------
@@ -120,11 +133,14 @@ export default function CsvRunnerPanel() {
   const [mapping, setMapping] = useState<MappingEntry[]>([])
   const [showPreview, setShowPreview] = useState(false)
 
-  // Execution state
-  const [running, setRunning] = useState(false)
+  // Server-side job state
+  const [jobId, setJobId] = useState<string | null>(null)
+  const [job, setJob] = useState<CsvRunJob | null>(null)
   const [results, setResults] = useState<RowResult[]>([])
-  const [progress, setProgress] = useState(0)
-  const abortRef = useRef<AbortController | null>(null)
+  const [runError, setRunError] = useState<string | null>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const running = job !== null && (job.status === 'pending' || job.status === 'running')
 
   // Recompute mapping whenever request or CSV headers change
   useEffect(() => {
@@ -136,6 +152,13 @@ export default function CsvRunnerPanel() {
     }))
     setMapping(newMapping)
   }, [request, headers])
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+    }
+  }, [])
 
   // Warn before tab close during run
   useEffect(() => {
@@ -168,55 +191,103 @@ export default function CsvRunnerPanel() {
     reader.readAsText(file, 'utf-8')
   }
 
+  async function loadResults(id: string) {
+    try {
+      const resp = await fetch(`/v1/csv-runs/${id}/results?limit=500`)
+      if (!resp.ok) return
+      const data = await resp.json() as Array<{
+        row_number: number
+        http_status: number | null
+        duration_ms: number
+        error: string | null
+        url: string
+      }>
+      // Map server result shape to RowResult shape used by csvExporter.
+      const mapped: RowResult[] = data.map((r, idx) => ({
+        rowNumber: r.row_number,
+        httpStatus: r.http_status,
+        durationMs: r.duration_ms,
+        error: r.error,
+        url: r.url,
+        originalRow: rows[idx] ?? {},
+      }))
+      setResults(mapped)
+    } catch {
+      // Non-fatal: results already partially shown via job status
+    }
+  }
+
+  const pollJob = useCallback(async (id: string) => {
+    try {
+      const resp = await fetch(`/v1/csv-runs/${id}`)
+      if (!resp.ok) return
+      const data = await resp.json() as CsvRunJob
+      setJob(data)
+      if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
+        if (pollRef.current) clearInterval(pollRef.current)
+        pollRef.current = null
+        await loadResults(id)
+      }
+    } catch {
+      // Keep polling; transient errors are expected
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows])
+
   const runBatch = useCallback(async () => {
     if (rows.length === 0 || !request.url) return
-    const controller = new AbortController()
-    abortRef.current = controller
-    setRunning(true)
+    setRunError(null)
     setResults([])
-    setProgress(0)
+    setJob(null)
+    setJobId(null)
 
-    const allResults: RowResult[] = []
-    for (let i = 0; i < rows.length; i++) {
-      if (controller.signal.aborted) break
-      const resolved = resolveRequest(request, rows[i])
-      const start = performance.now()
-      let httpStatus: number | null = null
-      let error: string | null = null
-
-      try {
-        const resp = await fetch(resolved.url, {
-          method: resolved.method,
-          headers: resolved.headers,
-          body: ['GET', 'HEAD'].includes(resolved.method) ? undefined : resolved.body || undefined,
-          signal: controller.signal,
-        })
-        httpStatus = resp.status
-      } catch (err) {
-        if ((err as Error).name === 'AbortError') break
-        error = (err as Error).message
+    try {
+      const resp = await fetch('/v1/csv-runs', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: `CSV run — ${new Date().toLocaleTimeString()}`,
+          request,
+          rows,
+        }),
+      })
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({})) as { error?: string }
+        throw new Error(body.error ?? `HTTP ${resp.status}`)
       }
+      const data = await resp.json() as { id: string; status: string; total_rows: number }
+      setJobId(data.id)
+      setJob({
+        id: data.id,
+        name: '',
+        status: 'pending',
+        total_rows: data.total_rows,
+        completed_rows: 0,
+        error_count: 0,
+        error_message: null,
+        created_at: new Date().toISOString(),
+        started_at: null,
+        completed_at: null,
+      })
 
-      const durationMs = Math.round(performance.now() - start)
-      const rowResult: RowResult = {
-        rowNumber: i + 1,
-        httpStatus,
-        durationMs,
-        error,
-        url: resolved.url,
-        originalRow: rows[i],
-      }
-      allResults.push(rowResult)
-      setResults(prev => [...prev, rowResult])
-      setProgress(i + 1)
+      // Start polling every 2s
+      if (pollRef.current) clearInterval(pollRef.current)
+      pollRef.current = setInterval(() => pollJob(data.id), 2000)
+    } catch (err) {
+      setRunError((err as Error).message)
     }
+  }, [rows, request, pollJob])
 
-    setRunning(false)
-    abortRef.current = null
-  }, [rows, request])
-
-  function cancel() {
-    abortRef.current?.abort()
+  async function cancel() {
+    if (!jobId) return
+    try {
+      await fetch(`/v1/csv-runs/${jobId}`, { method: 'DELETE' })
+    } catch {
+      // Best-effort
+    }
+    if (pollRef.current) clearInterval(pollRef.current)
+    pollRef.current = null
+    if (jobId) await pollJob(jobId) // fetch final status
   }
 
   const unresolvedVars = mapping.filter(m => m.status === 'unmapped')
@@ -225,6 +296,9 @@ export default function CsvRunnerPanel() {
   const avgDuration = results.length > 0
     ? Math.round(results.reduce((s, r) => s + r.durationMs, 0) / results.length)
     : 0
+
+  const progress = job?.completed_rows ?? 0
+  const totalRows = job?.total_rows ?? rows.length
 
   const statusColor = (r: RowResult) => {
     if (r.error) return 'var(--red)'
@@ -240,6 +314,7 @@ export default function CsvRunnerPanel() {
         <p className="text-[12.5px] font-semibold mb-4" style={{ color: 'var(--text-1)' }}>Request Template</p>
         <p className="text-[11.5px] mb-4" style={{ color: 'var(--text-3)' }}>
           Use <code className="font-mono" style={{ color: 'var(--cobalt-mid)' }}>{'{{column_name}}'}</code> placeholders — one value per CSV row.
+          Requests are executed server-side — target URLs must be reachable from the radar-api host.
         </p>
         <RequestBuilder request={request} onChange={setRequest} />
       </div>
@@ -388,87 +463,128 @@ export default function CsvRunnerPanel() {
           {running && (
             <div className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--text-3)' }}>
               <Loader2 className="h-4 w-4 animate-spin" />
-              {progress}/{rows.length} complete
+              {progress}/{totalRows} complete
+              {job?.status === 'pending' && <span style={{ color: 'var(--text-dim)' }}>(queued…)</span>}
             </div>
           )}
         </div>
       )}
 
+      {/* Run-level error */}
+      {runError && (
+        <div
+          className="flex items-start gap-2 rounded-md px-3 py-2.5 text-[12px]"
+          style={{ background: 'var(--red-bg)', border: '1px solid var(--red-dim)', color: 'var(--red)' }}
+        >
+          <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+          {runError}
+        </div>
+      )}
+
       {/* Results */}
-      {results.length > 0 && (
+      {(results.length > 0 || (job && job.status !== 'pending' && job.status !== 'running')) && (
         <div className="rounded-lg border overflow-hidden" style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
           <div className="flex items-center justify-between px-5 py-3 border-b" style={{ borderColor: 'var(--border)' }}>
             <div className="flex items-center gap-6">
               <p className="text-[12.5px] font-semibold" style={{ color: 'var(--text-1)' }}>Results</p>
-              <span className="text-[12px]" style={{ color: 'var(--green)' }}>{successCount} ok</span>
-              {failedCount > 0 && <span className="text-[12px]" style={{ color: 'var(--red)' }}>{failedCount} failed</span>}
-              <span className="text-[12px]" style={{ color: 'var(--text-dim)' }}>{avgDuration}ms avg</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => triggerDownload(exportResults(results), 'run-results.csv')}
-                className="flex items-center gap-1.5 rounded px-2.5 py-1.5 text-[11.5px] font-medium"
-                style={{ background: 'var(--bg-raised)', color: 'var(--text-2)', border: '1px solid var(--border)' }}
-              >
-                <Download className="h-3.5 w-3.5" />
-                Export Results
-              </button>
-              {failedCount > 0 && (
-                <button
-                  onClick={() => triggerDownload(exportFailedRows(results), 'failed-rows.csv')}
-                  className="flex items-center gap-1.5 rounded px-2.5 py-1.5 text-[11.5px] font-medium"
-                  style={{ background: 'var(--bg-raised)', color: 'var(--red)', border: '1px solid var(--border)' }}
+              {results.length > 0 && (
+                <>
+                  <span className="text-[12px]" style={{ color: 'var(--green)' }}>{successCount} ok</span>
+                  {failedCount > 0 && <span className="text-[12px]" style={{ color: 'var(--red)' }}>{failedCount} failed</span>}
+                  <span className="text-[12px]" style={{ color: 'var(--text-dim)' }}>{avgDuration}ms avg</span>
+                </>
+              )}
+              {job && (
+                <span
+                  className="text-[11px] rounded px-1.5 py-0.5 font-medium"
+                  style={{
+                    background: job.status === 'completed' ? 'var(--green-bg, rgba(0,200,100,0.1))' :
+                               job.status === 'failed' ? 'var(--red-bg)' :
+                               job.status === 'cancelled' ? 'var(--bg-raised)' : 'var(--bg-raised)',
+                    color: job.status === 'completed' ? 'var(--green)' :
+                           job.status === 'failed' ? 'var(--red)' :
+                           'var(--text-dim)',
+                  }}
                 >
-                  <FileDown className="h-3.5 w-3.5" />
-                  Failed Rows
-                </button>
+                  {job.status}
+                </span>
               )}
             </div>
+            {results.length > 0 && (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => triggerDownload(exportResults(results), 'run-results.csv')}
+                  className="flex items-center gap-1.5 rounded px-2.5 py-1.5 text-[11.5px] font-medium"
+                  style={{ background: 'var(--bg-raised)', color: 'var(--text-2)', border: '1px solid var(--border)' }}
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Export Results
+                </button>
+                {failedCount > 0 && (
+                  <button
+                    onClick={() => triggerDownload(exportFailedRows(results), 'failed-rows.csv')}
+                    className="flex items-center gap-1.5 rounded px-2.5 py-1.5 text-[11.5px] font-medium"
+                    style={{ background: 'var(--bg-raised)', color: 'var(--red)', border: '1px solid var(--border)' }}
+                  >
+                    <FileDown className="h-3.5 w-3.5" />
+                    Failed Rows
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Progress bar */}
-          {running && (
+          {/* Progress bar while running */}
+          {running && totalRows > 0 && (
             <div className="w-full h-1" style={{ background: 'var(--bg-raised)' }}>
               <div
                 className="h-1 transition-all"
-                style={{ width: `${(progress / rows.length) * 100}%`, background: 'var(--cobalt)' }}
+                style={{ width: `${(progress / totalRows) * 100}%`, background: 'var(--cobalt)' }}
               />
             </div>
           )}
 
-          <table className="w-full text-[11.5px]">
-            <thead>
-              <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>#</th>
-                <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>Status</th>
-                <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>HTTP</th>
-                <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>Duration</th>
-                <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>URL</th>
-                <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>Error</th>
-              </tr>
-            </thead>
-            <tbody>
-              {results.map(r => (
-                <tr key={r.rowNumber} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td className="px-4 py-2" style={{ color: 'var(--text-dim)' }}>{r.rowNumber}</td>
-                  <td className="px-4 py-2">
-                    {r.error
-                      ? <XCircle className="h-3.5 w-3.5" style={{ color: 'var(--red)' }} />
-                      : r.httpStatus != null && r.httpStatus < 400
-                        ? <CheckCircle className="h-3.5 w-3.5" style={{ color: 'var(--green)' }} />
-                        : <XCircle className="h-3.5 w-3.5" style={{ color: 'var(--red)' }} />
-                    }
-                  </td>
-                  <td className="px-4 py-2 font-mono" style={{ color: statusColor(r) }}>
-                    {r.httpStatus ?? '—'}
-                  </td>
-                  <td className="px-4 py-2" style={{ color: 'var(--text-3)' }}>{r.durationMs}ms</td>
-                  <td className="px-4 py-2 font-mono truncate max-w-[260px]" style={{ color: 'var(--text-2)' }}>{r.url}</td>
-                  <td className="px-4 py-2 max-w-[200px] truncate" style={{ color: 'var(--red)' }}>{r.error ?? ''}</td>
+          {results.length > 0 && (
+            <table className="w-full text-[11.5px]">
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                  <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>#</th>
+                  <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>Status</th>
+                  <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>HTTP</th>
+                  <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>Duration</th>
+                  <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>URL</th>
+                  <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>Error</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {results.map(r => (
+                  <tr key={r.rowNumber} style={{ borderBottom: '1px solid var(--border)' }}>
+                    <td className="px-4 py-2" style={{ color: 'var(--text-dim)' }}>{r.rowNumber}</td>
+                    <td className="px-4 py-2">
+                      {r.error
+                        ? <XCircle className="h-3.5 w-3.5" style={{ color: 'var(--red)' }} />
+                        : r.httpStatus != null && r.httpStatus < 400
+                          ? <CheckCircle className="h-3.5 w-3.5" style={{ color: 'var(--green)' }} />
+                          : <XCircle className="h-3.5 w-3.5" style={{ color: 'var(--red)' }} />
+                      }
+                    </td>
+                    <td className="px-4 py-2 font-mono" style={{ color: statusColor(r) }}>
+                      {r.httpStatus ?? '—'}
+                    </td>
+                    <td className="px-4 py-2" style={{ color: 'var(--text-3)' }}>{r.durationMs}ms</td>
+                    <td className="px-4 py-2 font-mono truncate max-w-[260px]" style={{ color: 'var(--text-2)' }}>{r.url}</td>
+                    <td className="px-4 py-2 max-w-[200px] truncate" style={{ color: 'var(--red)' }}>{r.error ?? ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {results.length === 0 && job && (job.status === 'failed' || job.status === 'cancelled') && (
+            <div className="px-5 py-4 text-[12px]" style={{ color: 'var(--text-dim)' }}>
+              {job.error_message ?? 'No results recorded.'}
+            </div>
+          )}
         </div>
       )}
     </div>
