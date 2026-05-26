@@ -197,7 +197,7 @@ export default function EvolutionRulesPage() {
 
         {/* Create form */}
         {showCreate && (
-          <div className="rounded-lg p-5" style={{ border: '1px solid var(--cobalt-muted)', background: 'var(--bg-surface)' }}>
+          <div className="rounded-lg p-5" style={{ border: '1px solid var(--border-mid)', background: 'var(--bg-surface)' }}>
             <div className="flex items-center justify-between mb-4">
               <p className="text-[13px] font-semibold" style={{ color: 'var(--text-1)' }}>New Evolution Rule</p>
               <button onClick={() => { setShowCreate(false); setCreateError(null) }}>

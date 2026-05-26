@@ -65,14 +65,14 @@ export default function TermTooltip({ term, placement = 'top' }: TermTooltipProp
     width: 280,
     padding: '8px 10px',
     borderRadius: 6,
-    background: 'var(--bg-tooltip, #1a1a2e)',
-    border: '1px solid var(--border)',
+    background: 'var(--bg-raised)',
+    border: '1px solid var(--border-mid)',
     color: 'var(--text-1)',
     fontSize: 11.5,
     lineHeight: 1.6,
     zIndex: 50,
     pointerEvents: 'none',
-    boxShadow: '0 4px 12px rgba(0,0,0,0.35)',
+    boxShadow: 'var(--shadow-md)',
     ...(placement === 'top' ? { bottom: '100%', marginBottom: 6 } : { top: '100%', marginTop: 6 }),
   }
 

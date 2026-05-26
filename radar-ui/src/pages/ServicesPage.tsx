@@ -249,7 +249,7 @@ export default function ServicesPage() {
         {nudgeServiceId && (
           <div
             className="mb-5 flex items-center justify-between rounded-lg px-4 py-3"
-            style={{ background: 'var(--bg-active)', border: '1px solid var(--cobalt-muted)', color: 'var(--text-1)' }}
+            style={{ background: 'var(--bg-active)', border: '1px solid rgba(56,5,227,0.3)', color: 'var(--text-1)' }}
           >
             <span className="text-[12.5px]">Service registered. Ready to compare specs?</span>
             <div className="flex items-center gap-3">

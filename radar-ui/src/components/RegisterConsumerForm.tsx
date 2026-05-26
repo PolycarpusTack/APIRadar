@@ -280,16 +280,14 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md px-4 py-2 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
-            style={{ border: '1px solid var(--border)', color: 'var(--text-2)' }}
+            className="btn-ghost rounded-md px-4 py-2 text-[12px] font-medium"
           >
             Cancel
           </button>
           <button
             type="submit"
             disabled={saving}
-            className="flex items-center gap-2 rounded-md px-5 py-2 text-[12.5px] font-medium transition-opacity disabled:opacity-50"
-            style={{ background: 'var(--cobalt-mid)', color: '#fff' }}
+            className="btn-primary flex items-center gap-2 rounded-md px-5 py-2 text-[12.5px] font-medium"
           >
             <UserPlus className="h-3.5 w-3.5" />
             {saving ? 'Registering…' : 'Register'}

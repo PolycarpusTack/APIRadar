@@ -107,3 +107,32 @@
   }
   ::-webkit-scrollbar-thumb:hover { background: var(--border-hi); }
 }
+
+@layer components {
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: none;
+    border-color: var(--cobalt) !important;
+    box-shadow: 0 0 0 3px rgba(56,5,227,0.15) !important;
+  }
+
+  .btn-primary {
+    background: var(--cobalt);
+    color: #fff;
+    transition: transform 150ms var(--ease-default), box-shadow 150ms var(--ease-default);
+  }
+  .btn-primary:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: var(--glow-cobalt);
+  }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--border-mid);
+    color: var(--text-2);
+    transition: background 150ms var(--ease-default);
+  }
+  .btn-ghost:hover:not(:disabled) { background: var(--bg-hover); }
+}

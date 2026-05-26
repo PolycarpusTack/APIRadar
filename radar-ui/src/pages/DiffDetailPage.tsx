@@ -275,7 +275,7 @@ export default function DiffDetailPage() {
                 onClick={generateReleaseNote}
                 disabled={generatingNote}
                 className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
-                style={{ borderColor: 'var(--cobalt-muted)', color: 'var(--cobalt-mid)' }}
+                style={{ borderColor: 'rgba(56,5,227,0.3)', color: 'var(--cobalt-mid)' }}
               >
                 <Sparkles className="h-3.5 w-3.5" />
                 {generatingNote ? 'Generating…' : 'Generate Release Notes'}
@@ -410,7 +410,7 @@ export default function DiffDetailPage() {
           </div>
 
           {showAckForm && (
-            <div className="mb-3 rounded-lg p-4" style={{ border: '1px solid var(--cobalt-muted)', background: 'var(--bg-surface)' }}>
+            <div className="mb-3 rounded-lg p-4" style={{ border: '1px solid rgba(56,5,227,0.3)', background: 'var(--bg-surface)' }}>
               <div className="flex items-center justify-between mb-3">
                 <p className="text-[12px] font-semibold" style={{ color: 'var(--text-1)' }}>Create Acknowledgement</p>
                 <button onClick={() => { setShowAckForm(false); setAckError(null) }}>

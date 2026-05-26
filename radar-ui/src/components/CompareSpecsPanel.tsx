@@ -312,8 +312,7 @@ export default function CompareSpecsPanel({ onClose }: { onClose?: () => void })
           <button
             type="submit"
             disabled={submitting || services.length === 0}
-            className="flex items-center gap-2 rounded-md px-5 py-2 text-[12.5px] font-medium transition-opacity disabled:opacity-50"
-            style={{ background: 'var(--cobalt-mid)', color: '#fff' }}
+            className="btn-primary flex items-center gap-2 rounded-md px-5 py-2 text-[12.5px] font-medium"
           >
             <GitCompare className="h-3.5 w-3.5" />
             {submitting ? 'Comparing…' : 'Compare Specs'}
