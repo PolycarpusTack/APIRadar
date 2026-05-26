@@ -133,7 +133,7 @@ DOMAIN MODEL HEALTH SCORE: 6/10
                          found across 12 EPICs
   Domain layer purity:   PARTIAL — radar-core has pure types. radar-api mixes HTTP
                          handler logic with business rules (e.g., blast-radius computation
-                         in diffs.rs handler rather than in radar-core). 
+                         in diffs.rs handler rather than in radar-core).
   Anemic model:          PARTIAL — Rust structs are data containers; behaviour is in
                          free functions rather than methods on types. Acceptable in Rust
                          idioms but domain logic is scattered rather than cohesive.
@@ -195,13 +195,13 @@ TECHNICAL DEBT HEALTH SCORE: 6/10
   Debt visibility:       PARTIALLY — 5-phase maturity plan is an implicit debt register.
                          Items are named (ADRs missing, no fitness functions, no E2E tests)
                          but not tracked with principal/interest/servicing decision.
-  Debt register items:   ~12 (extracted from maturity plan and hardening sprint history)
+  Debt register items:   ~10 (see register below)
   Composition:
-    Code debt:      3 items — CsvRunnerPanel size, repeated query patterns, no frontend tests
-    Architecture:   5 items — no ADRs, no fitness functions, no circuit breakers,
-                    org_id hardcoded, no contract tests between CLI and API
-    Infra debt:     4 items — no automated release, no SLOs, no E2E test suite, no
-                    bundle size budget
+    Code debt:      2 items — CsvRunnerPanel size, no frontend tests
+    Architecture:   4 items — no ADRs, no fitness functions, async op inconsistency,
+                    SSRF guard duplicated
+    Infra debt:     4 items — no automated release, no E2E suite, no readiness model,
+                    IP-literal test URLs
   Recurring interest:    est. 0.5 days/sprint — occasional rework from missing ADRs;
                          manual testing gap in frontend
   Past tipping point:    0 items (debt is recent and manageable)
@@ -297,125 +297,149 @@ PRODUCT VALUE HEALTH SCORE: 5/10
 
 ### Phase 1 — Runtime Foundation ✅ COMPLETE (v0.2.0, 2026-05-26)
 
-**Rationale (from evaluation):** Architecture debt + code duplication from 42+ scattered fetch calls.
+**Agreed scope:**
+- Centralize frontend API access into one client.
+- Fix desktop/web API base URL handling (Electron `file://` breakage).
+- Add shared error handling and auth behavior.
+- Add audit events now, not later.
+- Add setup/runtime diagnostics where they support debugging.
 
-**Agents applied:**
-- `@agent-refactoring-catalog-advisor` — Extract Move pattern for apiClient.ts
-- `@agent-pragmatic-programmer` — DRY principle; single base URL resolution
+**Agents applied:** `@agent-refactoring-catalog-advisor`, `@agent-pragmatic-programmer`
 
-**Outcomes:**
-- `radar-ui/src/lib/apiClient.ts` — centralized typed fetch wrapper
-- `initApiClient()` resolves Electron sidecar URL before first render
-- All 42+ fetch calls migrated; Electron production file:// breakage fixed
-- `audit_event` table (migration 030) + `GET/POST /v1/audit-events`
-- App.tsx sidebar version bumped to v0.2.0
+**Outcomes (commit 654e50e):**
+- `radar-ui/src/lib/apiClient.ts` — typed fetch wrapper; `initApiClient()` resolves Electron sidecar URL via IPC before first render; all 42+ fetch calls migrated.
+- `audit_event` table (migration 030) + `GET/POST /v1/audit-events`.
+- App.tsx `useAuth` hook uses api client; sidebar version bumped to v0.2.0.
 
 ---
 
 ### Phase 2 — Product Readiness Loop
 
-**Execution mode:** DELIVERY  
-**Target:** v0.2.1  
-**Rationale (from evaluation):** Product Value Health 5/10; SLOs absent; validation loop absent; empty states are generic.
+**Execution mode:** DELIVERY
+**Target:** v0.2.1
+
+**Agreed scope:**
+- Add `GET /v1/readiness`.
+- Wire the dashboard around "what is monitored, what is missing, what changed, what needs action."
+- Improve empty states and setup guidance.
+- Make the core drift workflow feel intentional end to end.
 
 **Agents to apply:**
 
 | Agent | Task | Deliverable |
 |---|---|---|
-| `@agent-slo-advisor` | Define SLIs + SLO targets for diff computation, blast-radius query, CSV row execution | SLO doc + 3 Prometheus recording rules |
-| `@agent-observability-advisor` | Golden signals per endpoint; error rate alert | 2 new Prometheus counters; alerting rule template |
-| `@agent-product-owner-coach` | Readiness model: what does "configured" mean? | `GET /v1/readiness` endpoint; dashboard wired around it |
-| `@agent-lean-thinking-advisor` | Map first-run to first-diff flow; identify wait steps | Improved empty states; setup guidance in UI |
+| `@agent-product-owner-coach` | Define what "configured" means; model first-run to first-diff flow | `GET /v1/readiness` checklist; dashboard readiness widget |
+| `@agent-lean-thinking-advisor` | Identify wait steps and handoffs in setup flow | Empty states with actionable next steps; setup guidance |
+| `@agent-observability-advisor` | Instrument key flows via audit_event | Usage events: `diff.created`, `consumer.registered`, `csv_run.started` |
 
 **Stories:**
-1. `GET /v1/readiness` — returns checklist: db connected, migrations current, at least one service registered, at least one diff recorded. Dashboard shows readiness widget.
-2. Instrument core flows with usage events into `audit_event` (diff created, consumer registered, csv run started) — closes validation loop.
-3. Define 3 SLOs: diff compute < 5s (p95), blast-radius query < 500ms (p95), CSV row < 10s (p95). Add recording rules to Prometheus scrape.
-4. Improve empty states on Services, Diffs, Consumers pages — replace generic "nothing here" with actionable setup guidance tied to the readiness model.
+1. `GET /v1/readiness` — returns structured checklist: DB connected, migrations current, at least one service registered, at least one diff recorded, at least one consumer registered. Each item has `status` (ok/missing/warn) and a `hint` pointing to the UI page or CLI command that resolves it.
+2. Dashboard wired around readiness — homepage replaces generic summary cards with a readiness model: what is monitored (service count, consumer count), what is missing (items from readiness checklist with hints), what changed recently (last 5 diffs with severity), what needs action (unacknowledged breaking changes, policy blocks).
+3. Instrument three core flows with `audit_event` records — diff created (in `diffs.rs`), consumer registered (in `consumers.rs`), CSV run started (in `csv_runner.rs`).
+4. Empty state improvements — Services, Diffs, Consumers, and Catalog Sources pages: replace generic empty messages with contextual cards stating what the page does, what the prerequisite is, and the command or button to take the next step.
 
-**DoD additions for this phase:**
-- `GET /v1/readiness` has integration test
-- SLO targets documented in `docs/slos.md`
-- Prometheus recording rules validated against test data
+**DoD additions:**
+- `GET /v1/readiness` has an integration test covering each checklist item state
+- Dashboard readiness widget renders in all empty-state permutations (verified manually)
 
 ---
 
 ### Phase 3 — Async Operations Hardening
 
-**Execution mode:** DELIVERY  
-**Target:** v0.3.0  
-**Rationale (from evaluation):** Architecture Health 5/10; no circuit breakers; webhook + scheduled scan async paths lack same rigor as CSV Runner.
+**Execution mode:** DELIVERY
+**Target:** v0.3.0
 
-**CSV Runner is the reference implementation.** It has: per-row retry (safe-method-aware), cancellation at row granularity, `completed_with_failures` status, retention, history UI, export. Apply this pattern to:
+**Agreed scope:**
+- Do not build a generic job platform.
+- CSV Runner is the reference implementation for how long-running user actions should behave. All six maturity findings (error counting, row persistence, history UI, cancellation granularity, retry safety, status clarity) are resolved as of v0.2.0.
+- Apply the same pattern individually to: scheduled scans, webhooks, and release notes generation.
+- Each should have consistent: status semantics, history, cancellation where relevant, retry behavior, audit records, retention, and useful failure reporting.
+
+**Reference implementation — CSV Runner (complete as of v0.2.0):**
+- Status: `pending` → `running` → `completed` / `completed_with_failures` / `failed` / `cancelled`
+- History: paginated list of past runs accessible in the UI
+- Cancellation: checked at row granularity, mid-retry
+- Retry: safe methods always retry; unsafe only with explicit `enable_retry: true`
+- Audit: job start/end recorded in `audit_event`
+- Retention: purged by 1-hour background job after configurable window
+- Failure reporting: per-row `error` + `error_count` on job; amber status badge for partial failures
+
+**Agents to apply:**
 
 | Agent | Task | Deliverable |
 |---|---|---|
-| `@agent-stability-pattern-advisor` | Circuit breaker for webhook outbox; bulkhead for scan executor | `reqwest::redirect::Policy::none()` already done; add circuit-breaker state machine to webhook dispatcher |
-| `@agent-unit-test-coach` | Spawned echo server for CSV Runner tests in CI; async path coverage | Replace `93.184.216.34` test literals with in-process mock server |
-| `@agent-test-architecture-advisor` | Test pyramid: unit + integration + E2E layer design | Playwright config; test recipe for async job assertion |
-| `@agent-reliability-review-facilitator` | PRR checklist for CSV Runner, webhooks, scheduled scans | Production readiness review doc; runbook entries |
+| `@agent-stability-pattern-advisor` | Consistent retry + failure reporting for webhook outbox and scan executor | Webhook: `completed_with_failures`; scan: `failed` with stored error |
+| `@agent-unit-test-coach` | Replace IP-literal test URLs with in-process echo server | Axum server spawned in `#[tokio::test]`; no DNS in CI |
+| `@agent-test-architecture-advisor` | Test recipe for async state transitions | `wait_for_status(pool, job_id, "completed")` helper with timeout |
 
 **Stories:**
-1. Webhook delivery — add `completed_with_failures` status, retry visibility in SettingsPage, delivery history pagination.
-2. Scheduled scan history — add status tracking (running/completed/failed), same status semantics as CSV Runner.
-3. Release notes generation — same async job pattern (currently fire-and-forget with polling; add job row, status endpoint, cancellation).
-4. Circuit breaker for outbound HTTP — simple state machine (closed → open after N failures → half-open after timeout) in `webhooks.rs` and `scans.rs`.
-5. In-process mock HTTP server for async tests (replaces DNS-dependent IP literals).
+1. Webhooks — add per-delivery `status` (`queued`/`delivered`/`failed`), `completed_with_failures` on the webhook record when any delivery fails, failure reason visible in SettingsPage delivery history. Add audit records for delivery attempts.
+2. Scheduled scans — add `last_run_status` + `last_run_error` + `last_run_at` columns; surface in the scheduled scans list UI; retain run history entries under the same retention window as CSV runs. Add audit records for run start/end.
+3. Release notes generation — replace fire-and-forget pattern with async job row; add `GET /v1/release-notes/:id/generate-status`; DiffDetailPage polls until complete or shows inline error. Add audit record for generation start/complete.
+4. In-process mock HTTP server — shared test helper that spawns a local Axum server returning configurable status codes; used by CSV Runner, scan, and webhook tests. Replaces the `93.184.216.34` IP literal workaround throughout.
 
 ---
 
 ### Phase 4 — Security Hardening
 
-**Execution mode:** HARDENING  
-**Target:** v0.3.1  
-**Rationale (from evaluation):** No formal threat model; security decisions are ad-hoc; SSRF guard is implemented but not tested against all bypass vectors.
+**Execution mode:** HARDENING
+**Target:** v0.3.1
+
+**Agreed scope:**
+- Add simple host allowlist / network policy first.
+- Normalize SSRF checks into reusable platform code (currently duplicated between CSV runner and scan executor).
+- Keep "never return raw secrets" as the immediate guarantee.
+- Scope encryption at rest as deployment/enterprise work unless SQLCipher or Postgres column encryption becomes a deliberate architectural choice (record the decision either way).
 
 **Agents to apply:**
 
 | Agent | Task | Deliverable |
 |---|---|---|
 | `@agent-threat-model-facilitator` | DFD for radar-api; trust boundary identification | Data Flow Diagram; trust boundary list |
-| `@agent-stride-threat-analyzer` | STRIDE per element: API inputs, webhook delivery, spec fetch, CSV runner, OIDC callback | Threat enumeration table (element × STRIDE category) |
-| `@agent-secure-design-reviewer` | For each threat: choose strategy (fix/accept/avoid/transfer); select controls | Mitigation table with control descriptions |
-| `@agent-owasp-security-tester` | Map OWASP Top 10 to existing tests; identify gaps | Gap list; 5 new security test stubs |
-| `@agent-privacy-threat-modeler` | PII in audit_event (actor field, meta JSON); org isolation review | Privacy classification; retention policy recommendation |
+| `@agent-stride-threat-analyzer` | STRIDE per element: API inputs, webhook delivery, spec fetch, CSV runner, OIDC callback | Threat table (element × STRIDE × severity) |
+| `@agent-secure-design-reviewer` | For each HIGH/CRITICAL threat: choose control; verify test exists | Mitigation table; test stubs for gaps |
+| `@agent-privacy-threat-modeler` | PII in `audit_event.meta`; org isolation review; bearer token in logs | Privacy classification; redaction rules |
 
 **Stories:**
-1. Host allowlist / network policy — configurable `RADAR_ALLOWED_HOSTS` environment variable; SSRF guard normalized to single implementation used by CSV runner, scan executor, and any future outbound HTTP.
-2. Secret masking hardening — bearer tokens in `audit_event.meta` must be redacted before insert; API keys in sandbox envs stored with `Some(t) if !t.is_empty()` pattern extended to headers.
-3. Input validation — request body size limits per endpoint type (diff specs: existing 4MB; CSV: unlimited bytes today → bound to row limit); OpenAPI schema validation middleware.
-4. ADRs for security decisions — document SSRF guard choice, auth strategy, org isolation approach (5 ADRs in `docs/adr/`).
-5. STRIDE test coverage — at least one test per high/critical threat that verifies the mitigation.
+1. Host allowlist — `RADAR_ALLOWED_HOSTS` env var (comma-separated glob patterns, e.g. `*.internal,api.github.com`); when set, outbound HTTP in CSV runner and scan executor is blocked unless the resolved hostname matches. Default: empty (no restriction beyond SSRF guard).
+2. Normalize SSRF guard — extract `is_ssrf_blocked(url)` from `csv_runner.rs` into `radar_api::utils::ssrf`; both CSV runner and scan executor call the same function; tests cover all bypass vectors (redirect policy already set to `none()`).
+3. Secret masking — bearer tokens and API keys in `audit_event.meta` redacted to `[REDACTED]` before insert; sandbox env `bearer_token` field never returned in `GET /v1/sandbox-envs` response (verify GET path in addition to the existing PUT guard).
+4. Encryption at rest — record the architectural decision as ADR-003: "SQLite deployments rely on OS filesystem encryption (FileVault/BitLocker); Postgres deployments rely on infrastructure-level storage encryption. No SQLCipher dependency introduced. Column-level encryption deferred until a specific compliance requirement names it." No code change.
+5. STRIDE test coverage — one test per HIGH threat asserting the mitigation holds (injection, auth bypass, SSRF redirect, information disclosure via error body).
 
-**DoD additions for HARDENING phase:**
-- `cargo audit` clean (no known CVEs in dependencies)
-- All HIGH threats have a tested mitigation
-- Privacy classification documented for all PII-adjacent fields
+**DoD additions (HARDENING mode):**
+- `cargo audit` returns no HIGH or CRITICAL CVEs
+- All HIGH threats have a passing test for the mitigation
+- Secrets never appear in `audit_event` rows or API response bodies (grep assertion in CI)
 
 ---
 
 ### Phase 5 — Test and Release Maturity
 
-**Execution mode:** HARDENING → DELIVERY  
-**Target:** v0.4.0  
-**Rationale (from evaluation):** Frontend test coverage 0%; no automated release; DORA metrics unknown.
+**Execution mode:** HARDENING → DELIVERY
+**Target:** v0.4.0
+
+**Agreed scope:**
+- Add focused Playwright journeys.
+- For CSV Runner, explicitly include a spawned local echo/test API server in CI.
+- Add backend integration tests around org scoping, security boundaries, and async state transitions.
+- Add smoke coverage for packaged desktop mode, not just Vite dev mode.
 
 **Agents to apply:**
 
 | Agent | Task | Deliverable |
 |---|---|---|
-| `@agent-acceptance-test-designer` | Playwright E2E journeys in domain language | 5 critical journeys: first diff, consumer registration, CSV run, webhook delivery, playground compare |
-| `@agent-deployment-pipeline-designer` | Automated release pipeline | GitHub Actions: tag → build → sign → publish release artifacts |
-| `@agent-dora-metrics-advisor` | Establish DORA baseline | Deployment frequency, lead time, MTTR, CFR measurements |
-| `@agent-evolutionary-architecture-advisor` | Fitness functions in CI | Dependency rule check; bundle size budget; API contract test between CLI and API |
+| `@agent-acceptance-test-designer` | Playwright journeys in domain language | 5 critical golden paths |
+| `@agent-deployment-pipeline-designer` | Automated release pipeline | GitHub Actions: tag → artifacts → GitHub Release |
+| `@agent-evolutionary-architecture-advisor` | Fitness functions in CI | `cargo deny`, dependency rule check, bundle size budget |
 | `@agent-architectural-decision-recorder` | Top 5 ADRs documented | `docs/adr/001` through `docs/adr/005` |
 
 **Stories:**
-1. Playwright E2E suite — 5 golden-path journeys; run on every PR; screenshots on failure.
-2. Vitest + React Testing Library — configure for `radar-ui`; unit tests for `apiClient.ts`, `csvExporter.ts`, `variableResolver.ts`.
-3. Automated release pipeline — GitHub Actions: on `v*` tag push → cargo build release → pnpm build:ui → electron-builder → upload artifacts → create GitHub Release with CHANGELOG entry.
-4. DORA dashboard — weekly GitHub Action that measures deployment frequency and lead time from git history; outputs to a `metrics/dora.json` file.
-5. Fitness functions — (a) `cargo deny` for license + CVE; (b) `import-boundaries` check (no radar-api imports in radar-cli except via HTTP); (c) bundle size < 2MB gzip for radar-ui.
+1. Playwright E2E journeys — 5 critical golden paths: (a) first diff: register service → upload spec → compare → view diff detail; (b) consumer registration → subscription → blast radius shows consumer; (c) CSV run: upload CSV → configure template → run → inspect results → export failed rows; (d) webhook registration → test fire → verify delivery in history; (e) playground compare: paste two specs → diff inline. Each journey runs against a live `radar-api` with a test SQLite DB.
+2. CSV Runner CI with echo server — `cargo test -p radar-api` starts an in-process Axum echo server on a random port (built in Story 4 of Phase 3); CSV run tests use `http://127.0.0.1:{port}/echo`. Verifies retry logic, cancellation, body capture, and `completed_with_failures` status without network access.
+3. Backend integration tests for org scoping, security boundaries, and async state transitions — asserts: (a) data from org A is not returned to org B requests; (b) unauthenticated requests to auth-required endpoints return 401, not 500; (c) async job state machine is enforced (`running` cannot transition to `pending`; `completed` cannot transition to `running`).
+4. Packaged desktop smoke tests — `pnpm --filter radar-desktop dist` produces the installer; a smoke test script launches the packaged Electron binary, waits for the sidecar health check at `http://127.0.0.1:17380/health`, and asserts 200. Runs as a separate CI job on tagged releases only.
+5. Automated release pipeline — GitHub Actions: on push of `v*` tag → `cargo build --release -p radar-api` → `pnpm build:ui` → `electron-builder` → upload `.exe`/`.dmg` as release artifacts → create GitHub Release with the matching CHANGELOG section prepended.
 
 ---
 
@@ -424,12 +448,12 @@ PRODUCT VALUE HEALTH SCORE: 5/10
 | Phase | Primary Agents | Supporting Agents |
 |---|---|---|
 | 1 (done) | `refactoring-catalog-advisor`, `pragmatic-programmer` | — |
-| 2 | `slo-advisor`, `observability-advisor`, `product-owner-coach` | `lean-thinking-advisor` |
-| 3 | `stability-pattern-advisor`, `unit-test-coach`, `test-architecture-advisor` | `reliability-review-facilitator` |
-| 4 | `threat-model-facilitator`, `stride-threat-analyzer`, `secure-design-reviewer` | `owasp-security-tester`, `privacy-threat-modeler` |
-| 5 | `acceptance-test-designer`, `deployment-pipeline-designer`, `dora-metrics-advisor` | `evolutionary-architecture-advisor`, `architectural-decision-recorder` |
+| 2 | `product-owner-coach`, `lean-thinking-advisor` | `observability-advisor` |
+| 3 | `stability-pattern-advisor`, `unit-test-coach` | `test-architecture-advisor` |
+| 4 | `threat-model-facilitator`, `stride-threat-analyzer`, `secure-design-reviewer` | `privacy-threat-modeler` |
+| 5 | `acceptance-test-designer`, `deployment-pipeline-designer` | `evolutionary-architecture-advisor`, `architectural-decision-recorder` |
 
-**All agents sourced from:** `C:\Projects\ClaudeExtras\` — see DDD Full Suite (craft agents), DevOps Suite, Security Engineering Suite, SRE & Observability Suite, Testing Strategy Suite.
+**All agents sourced from:** `C:\Projects\ClaudeExtras\` — DDD Full Suite, DevOps Suite, Security Engineering Suite, SRE & Observability Suite, Testing Strategy Suite.
 
 ---
 
@@ -437,26 +461,26 @@ PRODUCT VALUE HEALTH SCORE: 5/10
 
 | ID | Artifact | Type | Cause | Principal | Interest | Decision |
 |---|---|---|---|---|---|---|
-| TD-01 | No ADRs | Architecture | Speed during EPIC delivery | 2d (onboarding cost) | 0.5d/sprint (re-litigation) | Pay in Phase 5 |
-| TD-02 | No fitness functions | Architecture | CI not extended past lint/test | 1d | 0.2d/sprint (silent drift) | Pay in Phase 5 |
-| TD-03 | No circuit breakers | Architecture | Not needed for EPIC delivery | 1.5d | 0.5d/incident | Pay in Phase 3 |
-| TD-04 | CsvRunnerPanel 700 loc | Code | Feature growth without split | 0.5d | 0.1d/sprint (slow edits) | Pay in Phase 3 |
-| TD-05 | Frontend 0% unit tests | Code | No test runner configured | 2d | 0.3d/sprint (manual verify) | Pay in Phase 5 |
-| TD-06 | No SLOs | Infra | Not a focus during EPIC delivery | 0.5d | Unknown (incidents unmeasured) | Pay in Phase 2 |
-| TD-07 | Manual release | Infra | No release automation built | 1d | 0.5d/release | Pay in Phase 5 |
-| TD-08 | No STRIDE threat model | Infra | Security deferred to Phase 4 | 2d | Risk (unquantified) | Pay in Phase 4 |
+| TD-01 | No ADRs | Architecture | Speed during EPIC delivery | 2d | 0.5d/sprint | Pay in Phase 5 |
+| TD-02 | No fitness functions | Architecture | CI not extended past lint/test | 1d | 0.2d/sprint | Pay in Phase 5 |
+| TD-03 | Webhook/scan/release-note async inconsistency | Architecture | CSV Runner was first; others deferred | 2d | 0.5d/incident | Pay in Phase 3 |
+| TD-04 | SSRF guard duplicated in csv_runner + scans | Code | Organic growth | 0.5d | 0.1d/sprint | Pay in Phase 4 |
+| TD-05 | Frontend 0% unit tests | Code | No test runner configured | 2d | 0.3d/sprint | Pay in Phase 5 |
+| TD-06 | No readiness model or intentional empty states | Infra | Not a focus during EPIC delivery | 1d | Onboarding friction | Pay in Phase 2 |
+| TD-07 | Manual release | Infra | No release automation | 1d | 0.5d/release | Pay in Phase 5 |
+| TD-08 | No threat model | Infra | Security deferred intentionally | 2d | Risk (unquantified) | Pay in Phase 4 |
 | TD-09 | org_id = "default" | Architecture | Multi-tenancy deferred intentionally | 5d | Shotgun surgery when enabled | Accept for now |
-| TD-10 | No usage analytics | Infra | Validation loop absent | 1d | Feature waste (unknown %) | Pay in Phase 2 |
+| TD-10 | IP-literal test URLs (DNS-dependent) | Infra | Offline CI workaround | 0.5d | Flaky in some CI environments | Pay in Phase 3 |
 
-**Total estimated principal:** ~17 engineering days  
-**Recurring interest:** ~2.1 days/sprint  
+**Total estimated principal:** ~17 engineering days
+**Recurring interest:** ~2.1 days/sprint
 **Debt ratio:** ~10% (acceptable; below 15% warning threshold)
 
 ---
 
 ## NEXT EVALUATION
 
-**Date:** 2026-08-26 (quarterly)  
+**Date:** 2026-08-26 (quarterly)
 **Trigger conditions for early evaluation:**
 - Score in any dimension drops by 2+ points
 - New team member joins (onboarding diagnostic)
