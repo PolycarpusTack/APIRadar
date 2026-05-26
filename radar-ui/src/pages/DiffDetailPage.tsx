@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, ExternalLink, CheckCircle, Plus, X, Sparkles } from 'lucide-react'
 import Badge from '../components/Badge'
 import TermTooltip from '../components/TermTooltip'
+import { api } from '../lib/apiClient'
 
 interface DiffChange {
   path: string
@@ -124,8 +125,7 @@ export default function DiffDetailPage() {
 
   function loadAcks() {
     if (!id) return
-    fetch(`/v1/diffs/${id}/acknowledgements`)
-      .then((r) => r.ok ? r.json() as Promise<{ entries: Acknowledgement[] }> : Promise.resolve({ entries: [] }))
+    api.get<{ entries: Acknowledgement[] }>(`/v1/diffs/${id}/acknowledgements`)
       .then((data) => setAcks(data.entries ?? []))
       .catch(() => {})
   }
@@ -135,14 +135,8 @@ export default function DiffDetailPage() {
     setLoading(true)
 
     Promise.all([
-      fetch(`/v1/diffs/${id}`).then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<DiffDetail>
-      }),
-      fetch(`/v1/diffs/${id}/blast-radius`).then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<BlastRadius>
-      }),
+      api.get<DiffDetail>(`/v1/diffs/${id}`),
+      api.get<BlastRadius>(`/v1/diffs/${id}/blast-radius`),
     ])
       .then(([d, b]) => { setDiff(d); setBlast(b) })
       .catch((e: Error) => setError(e.message))
@@ -156,20 +150,12 @@ export default function DiffDetailPage() {
     if (!id) return
     setSubmittingAck(true)
     setAckError(null)
-    fetch('/v1/acknowledgements', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        diff_id: id,
-        acknowledged_by: ackForm.acknowledged_by,
-        reason: ackForm.reason || undefined,
-        expires_at: ackForm.expires_at || undefined,
-      }),
+    api.post('/v1/acknowledgements', {
+      diff_id: id,
+      acknowledged_by: ackForm.acknowledged_by,
+      reason: ackForm.reason || undefined,
+      expires_at: ackForm.expires_at || undefined,
     })
-      .then((r) => {
-        if (!r.ok) return r.text().then((t) => { throw new Error(t || `HTTP ${r.status}`) })
-        return r.json()
-      })
       .then(() => {
         setShowAckForm(false)
         setAckForm(DEFAULT_ACK_FORM)
@@ -184,9 +170,7 @@ export default function DiffDetailPage() {
     setGeneratingNote(true)
     setNoteError(null)
     try {
-      const resp = await fetch(`/v1/diffs/${id}/release-notes/generate`, { method: 'POST' })
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-      const data = await resp.json() as { content: string }
+      const data = await api.post<{ content: string }>(`/v1/diffs/${id}/release-notes/generate`)
       setGeneratedNote(data.content)
     } catch (e) {
       setNoteError((e as Error).message)

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { CheckCircle, XCircle, Webhook, Trash2, Send, ChevronDown, ChevronUp } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import TermTooltip, { TERM_DEFINITIONS } from '../components/TermTooltip'
+import { api, ApiError } from '../lib/apiClient'
 
 interface AppSettings {
   policy_block_on: string
@@ -116,8 +117,7 @@ function WebhooksSection() {
 
   const reload = () => {
     setLoading(true)
-    fetch('/v1/webhooks')
-      .then(r => r.ok ? r.json() as Promise<WebhookEntry[]> : Promise.reject(`HTTP ${r.status}`))
+    api.get<WebhookEntry[]>('/v1/webhooks')
       .then(setWebhooks)
       .catch(() => {})
       .finally(() => setLoading(false))
@@ -130,41 +130,36 @@ function WebhooksSection() {
     if (!newUrl) return
     setCreating(true); setCreateError(null); setNewSecret(null)
     try {
-      const resp = await fetch('/v1/webhooks', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ url: newUrl, events: newEvents }),
-      })
-      const body = await resp.json()
-      if (!resp.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${resp.status}`)
-      if ((body as WebhookEntry).secret) setNewSecret((body as WebhookEntry).secret ?? null)
+      const body = await api.post<WebhookEntry>('/v1/webhooks', { url: newUrl, events: newEvents })
+      if (body.secret) setNewSecret(body.secret ?? null)
       setNewUrl('')
       reload()
     } catch (err) {
-      setCreateError((err as Error).message)
+      setCreateError(err instanceof ApiError ? (err.body as { error?: string })?.error ?? err.message : (err as Error).message)
     } finally {
       setCreating(false)
     }
   }
 
   async function deleteWebhook(id: string) {
-    await fetch(`/v1/webhooks/${id}`, { method: 'DELETE' })
+    await api.del(`/v1/webhooks/${id}`)
     setWebhooks(prev => prev.filter(w => w.id !== id))
     if (expandedId === id) setExpandedId(null)
   }
 
   async function testWebhook(id: string) {
-    await fetch(`/v1/webhooks/${id}/test`, { method: 'POST' })
+    await api.post(`/v1/webhooks/${id}/test`)
   }
 
   async function toggleExpand(id: string) {
     if (expandedId === id) { setExpandedId(null); return }
     setExpandedId(id)
     if (!deliveries[id]) {
-      const resp = await fetch(`/v1/webhooks/${id}/deliveries`)
-      if (resp.ok) {
-        const data = await resp.json() as DeliveryEntry[]
+      try {
+        const data = await api.get<DeliveryEntry[]>(`/v1/webhooks/${id}/deliveries`)
         setDeliveries(prev => ({ ...prev, [id]: data }))
+      } catch {
+        // silently ignore delivery load failures
       }
     }
   }
@@ -290,8 +285,8 @@ export default function SettingsPage() {
 
   useEffect(() => {
     Promise.all([
-      fetch('/v1/settings').then(r => r.ok ? r.json() as Promise<AppSettings> : Promise.reject(`HTTP ${r.status}`)),
-      fetch('/v1/settings/integrations').then(r => r.ok ? r.json() as Promise<Integrations> : Promise.reject(`HTTP ${r.status}`)),
+      api.get<AppSettings>('/v1/settings'),
+      api.get<Integrations>('/v1/settings/integrations'),
     ])
       .then(([s, i]) => { setForm(s); setIntegrations(i) })
       .catch((e: unknown) => setError(String(e)))
@@ -307,18 +302,10 @@ export default function SettingsPage() {
     e.preventDefault()
     setSaving(true); setError(null); setSaved(false)
     try {
-      const resp = await fetch('/v1/settings', {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(form),
-      })
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({}))
-        throw new Error((body as { error?: string }).error ?? `HTTP ${resp.status}`)
-      }
+      await api.put('/v1/settings', form)
       setSaved(true)
     } catch (e) {
-      setError((e as Error).message)
+      setError(e instanceof ApiError ? (e.body as { error?: string })?.error ?? e.message : (e as Error).message)
     } finally {
       setSaving(false)
     }

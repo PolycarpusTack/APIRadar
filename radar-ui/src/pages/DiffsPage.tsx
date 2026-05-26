@@ -6,6 +6,7 @@ import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
 import CompareSpecsPanel from '../components/CompareSpecsPanel'
 import BatchComparePanel from '../components/BatchComparePanel'
+import { api, ApiError } from '../lib/apiClient'
 
 interface DiffSummary {
   id: string
@@ -131,13 +132,9 @@ export default function DiffsPage() {
   const [showBatch, setShowBatch] = useState(false)
 
   useEffect(() => {
-    fetch('/v1/diffs')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<DiffSummary[]>
-      })
+    api.get<DiffSummary[]>('/v1/diffs')
       .then(setRows)
-      .catch((e: Error) => setError(e.message))
+      .catch((e: unknown) => setError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setLoading(false))
   }, [])
 

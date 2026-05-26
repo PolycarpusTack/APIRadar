@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { FileText, ChevronDown, ChevronRight, ArrowRight } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
+import { api, ApiError } from '../lib/apiClient'
 
 interface NoteRow {
   id: string
@@ -56,11 +57,9 @@ function NoteCard({ row, onStatusChange }: { row: NoteRow; onStatusChange: (id: 
     if (detail) return
     setLoading(true); setError(null)
     try {
-      const resp = await fetch(`/v1/release-notes/${row.id}`)
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-      setDetail(await resp.json() as NoteDetail)
+      setDetail(await api.get<NoteDetail>(`/v1/release-notes/${row.id}`))
     } catch (e) {
-      setError((e as Error).message)
+      setError(e instanceof ApiError ? e.message : String(e))
     } finally {
       setLoading(false)
     }
@@ -69,15 +68,10 @@ function NoteCard({ row, onStatusChange }: { row: NoteRow; onStatusChange: (id: 
   async function transition(newStatus: string) {
     setTransitioning(true)
     try {
-      const resp = await fetch(`/v1/release-notes/${row.id}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
-      })
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      await api.patch(`/v1/release-notes/${row.id}/status`, { status: newStatus })
       onStatusChange(row.id, newStatus)
     } catch (e) {
-      setError((e as Error).message)
+      setError(e instanceof ApiError ? e.message : String(e))
     } finally {
       setTransitioning(false)
     }
@@ -159,10 +153,9 @@ export default function ReleaseNotesPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch('/v1/release-notes')
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() as Promise<NoteRow[]> })
+    api.get<NoteRow[]>('/v1/release-notes')
       .then(setRows)
-      .catch((e: Error) => setError(e.message))
+      .catch((e) => setError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setLoading(false))
   }, [])
 

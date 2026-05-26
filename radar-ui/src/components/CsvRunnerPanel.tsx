@@ -7,6 +7,7 @@ import { parseCsv } from '../lib/csvParser'
 import { extractVariables, type PlaygroundRequest } from '../lib/variableExtractor'
 import { resolveRequest, maskSecrets } from '../lib/variableResolver'
 import { exportResults, exportFailedRows, triggerDownload, type RowResult } from '../lib/csvExporter'
+import { api } from '../lib/apiClient'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -208,9 +209,7 @@ export default function CsvRunnerPanel() {
 
   async function loadResults(id: string) {
     try {
-      const resp = await fetch(`/v1/csv-runs/${id}/results?limit=500`)
-      if (!resp.ok) return
-      const data = await resp.json() as Array<{
+      const data = await api.get<Array<{
         row_number: number
         http_status: number | null
         duration_ms: number
@@ -218,7 +217,7 @@ export default function CsvRunnerPanel() {
         url: string
         response_body: string | null
         row_data: string | null
-      }>
+      }>>(`/v1/csv-runs/${id}/results?limit=500`)
       const mapped: RowResult[] = data.map((r, idx) => {
         // Prefer the in-memory CSV row (current session); fall back to server-persisted
         // row_data so historical runs and re-opened tabs still have correct originalRow.
@@ -239,9 +238,7 @@ export default function CsvRunnerPanel() {
 
   async function fetchRecentRuns() {
     try {
-      const resp = await fetch('/v1/csv-runs')
-      if (!resp.ok) return
-      const data = await resp.json() as CsvRunJob[]
+      const data = await api.get<CsvRunJob[]>('/v1/csv-runs')
       setRecentRuns(data)
     } catch { /* non-fatal */ }
   }
@@ -258,9 +255,7 @@ export default function CsvRunnerPanel() {
 
   const pollJob = useCallback(async (id: string) => {
     try {
-      const resp = await fetch(`/v1/csv-runs/${id}`)
-      if (!resp.ok) return
-      const data = await resp.json() as CsvRunJob
+      const data = await api.get<CsvRunJob>(`/v1/csv-runs/${id}`)
       setJob(data)
       if (data.status === 'completed' || data.status === 'completed_with_failures' || data.status === 'failed' || data.status === 'cancelled') {
         if (pollRef.current) clearInterval(pollRef.current)
@@ -283,20 +278,11 @@ export default function CsvRunnerPanel() {
     try {
       setResponseBodies({})
       setExpandedBodies(new Set())
-      const resp = await fetch('/v1/csv-runs', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          name: `CSV run — ${new Date().toLocaleTimeString()}`,
-          request: { ...request, capture_body: captureBody, enable_retry: enableRetry },
-          rows,
-        }),
+      const data = await api.post<{ id: string; status: string; total_rows: number }>('/v1/csv-runs', {
+        name: `CSV run — ${new Date().toLocaleTimeString()}`,
+        request: { ...request, capture_body: captureBody, enable_retry: enableRetry },
+        rows,
       })
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({})) as { error?: string }
-        throw new Error(body.error ?? `HTTP ${resp.status}`)
-      }
-      const data = await resp.json() as { id: string; status: string; total_rows: number }
       setJobId(data.id)
       setJob({
         id: data.id,
@@ -322,7 +308,7 @@ export default function CsvRunnerPanel() {
   async function cancel() {
     if (!jobId) return
     try {
-      await fetch(`/v1/csv-runs/${jobId}`, { method: 'DELETE' })
+      await api.del<void>(`/v1/csv-runs/${jobId}`)
     } catch {
       // Best-effort
     }

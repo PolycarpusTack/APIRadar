@@ -1,6 +1,7 @@
 import { NavLink, Routes, Route, Navigate } from 'react-router-dom'
 import RadarIcon from './components/RadarIcon'
 import { useEffect, useState } from 'react'
+import { api, ApiError } from './lib/apiClient'
 import { LayoutDashboard, GitCompare, Users, FileText, Telescope, FlaskConical, HelpCircle, Settings, Server, LogOut, Database, Shield, Sliders, Activity } from 'lucide-react'
 import HomePage from './pages/HomePage'
 import DiffsPage from './pages/DiffsPage'
@@ -33,22 +34,15 @@ function useAuth(): AuthState {
   const [session, setSession] = useState<AuthState['session']>(null)
 
   useEffect(() => {
-    fetch('/auth/me', { credentials: 'include' })
-      .then(async (res) => {
-        if (res.ok) {
-          const data = await res.json()
-          setSession(data)
-        } else if (res.status === 401) {
-          // OIDC configured but not authenticated
+    api.get<{ sub: string; org_id: string }>('/auth/me', { credentials: 'include' })
+      .then((data) => setSession(data))
+      .catch((e: unknown) => {
+        if (e instanceof ApiError && e.status === 401) {
           setSession(false)
         } else {
-          // 503 = OIDC not configured — let the app run unauthenticated
+          // 503 = OIDC not configured, or network error — allow unauthenticated access
           setSession(null)
         }
-      })
-      .catch(() => {
-        // Network error or OIDC endpoint absent — allow unauthenticated access
-        setSession(null)
       })
   }, [])
 
@@ -245,7 +239,7 @@ function Sidebar({ showSignOut }: { showSignOut: boolean }) {
           className="mt-2 text-[10px]"
           style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}
         >
-          v0.1.0
+          v0.2.0
         </p>
       </div>
     </aside>

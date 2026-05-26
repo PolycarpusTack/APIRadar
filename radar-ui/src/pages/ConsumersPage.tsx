@@ -5,6 +5,7 @@ import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
 import RegisterConsumerForm from '../components/RegisterConsumerForm'
+import { api, ApiError } from '../lib/apiClient'
 
 interface ConsumerRow {
   id: string
@@ -123,13 +124,9 @@ export default function ConsumersPage() {
 
   function loadConsumers() {
     setLoading(true)
-    fetch('/v1/consumers')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<ConsumerRow[]>
-      })
+    api.get<ConsumerRow[]>('/v1/consumers')
       .then(setRows)
-      .catch((e: Error) => setError(e.message))
+      .catch((e: unknown) => setError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setLoading(false))
   }
 

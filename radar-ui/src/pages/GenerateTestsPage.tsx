@@ -3,8 +3,7 @@ import { useState, useEffect } from 'react'
 import { FlaskConical, Download, ChevronDown, ChevronUp, Clock } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
-
-const API = ((import.meta as { env?: { VITE_API_URL?: string } }).env?.VITE_API_URL ?? '') + '/v1'
+import { api, ApiError } from '../lib/apiClient'
 
 interface Suite {
   id: string
@@ -43,10 +42,7 @@ export default function GenerateTestsPage() {
   const [result, setResult] = useState<GenerateResult | null>(null)
 
   useEffect(() => {
-    fetch(`${API}/generate-tests`, {
-      headers: { Authorization: `Bearer ${localStorage.getItem('radarToken') ?? ''}` },
-    })
-      .then((r) => r.json())
+    api.get<Suite[]>('/v1/generate-tests', { bearer: localStorage.getItem('radarToken') ?? undefined })
       .then(setSuites)
       .catch(() => {})
       .finally(() => setLoading(false))
@@ -65,21 +61,11 @@ export default function GenerateTestsPage() {
     }
 
     try {
-      const resp = await fetch(`${API}/generate-tests`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('radarToken') ?? ''}`,
-        },
-        body: JSON.stringify(body),
-      })
-
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: resp.statusText }))
-        throw new Error(err.error ?? resp.statusText)
-      }
-
-      const data: GenerateResult = await resp.json()
+      const data = await api.post<GenerateResult>(
+        '/v1/generate-tests',
+        body,
+        { bearer: localStorage.getItem('radarToken') ?? undefined },
+      )
       setResult(data)
       setSuites((prev) => [
         {
@@ -95,7 +81,7 @@ export default function GenerateTestsPage() {
         ...prev,
       ])
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(err instanceof ApiError ? (err.body as { error?: string })?.error ?? err.message : err instanceof Error ? err.message : String(err))
     } finally {
       setGenerating(false)
     }

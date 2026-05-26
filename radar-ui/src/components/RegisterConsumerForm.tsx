@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { X, UserPlus } from 'lucide-react'
+import { api, ApiError } from '../lib/apiClient'
 
 interface Service {
   id: string
@@ -37,8 +38,7 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
   const [apiError, setApiError] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch('/v1/services')
-      .then((r) => r.json() as Promise<Service[]>)
+    api.get<Service[]>('/v1/services')
       .then(setServices)
       .catch(() => {})
   }, [])
@@ -65,43 +65,28 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
 
     setSaving(true)
     try {
-      const resp = await fetch('/v1/consumers', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          name: name.trim(),
-          repo_url: repoUrl.trim(),
-          owner_team: ownerTeam.trim(),
-          contact: contact.trim(),
-        }),
+      const consumer = await api.post<ConsumerRow>('/v1/consumers', {
+        name: name.trim(),
+        repo_url: repoUrl.trim(),
+        owner_team: ownerTeam.trim(),
+        contact: contact.trim(),
       })
-
-      if (resp.status === 409) {
-        setApiError('A consumer with this name already exists')
-        return
-      }
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({})) as { error?: string }
-        setApiError(body.error ?? `Unexpected error (HTTP ${resp.status})`)
-        return
-      }
-
-      const consumer = await resp.json() as ConsumerRow
 
       // Subscribe to each selected service — fire-and-forget per service.
       await Promise.all(
         selectedServiceIds.map((svcId) =>
-          fetch(`/v1/services/${encodeURIComponent(svcId)}/subscriptions`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ consumer_id: consumer.id }),
-          }).catch(() => {})
+          api.post(`/v1/services/${encodeURIComponent(svcId)}/subscriptions`, { consumer_id: consumer.id })
+            .catch(() => {})
         )
       )
 
       onCreated(consumer)
     } catch (err) {
-      setApiError((err as Error).message)
+      if (err instanceof ApiError && err.status === 409) {
+        setApiError('A consumer with this name already exists')
+      } else {
+        setApiError((err as Error).message)
+      }
     } finally {
       setSaving(false)
     }

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { ExternalLink, AlertCircle, GitCompare } from 'lucide-react'
 import Badge from '../components/Badge'
+import { api, ApiError } from '../lib/apiClient'
 
 interface DiffChange {
   path: string
@@ -37,13 +38,13 @@ export default function ShareDiffPage() {
 
   useEffect(() => {
     if (!token) return
-    fetch(`/share/${token}`)
-      .then(async r => {
-        if (!r.ok) throw new Error(r.status === 404 ? 'This shared diff does not exist or has been revoked.' : `HTTP ${r.status}`)
-        return r.json() as Promise<SharedDiff>
-      })
+    api.get<SharedDiff>(`/share/${token}`)
       .then(setDiff)
-      .catch((e: unknown) => setError(String(e)))
+      .catch((e: unknown) => setError(
+        e instanceof ApiError && e.status === 404
+          ? 'This shared diff does not exist or has been revoked.'
+          : String(e)
+      ))
       .finally(() => setLoading(false))
   }, [token])
 

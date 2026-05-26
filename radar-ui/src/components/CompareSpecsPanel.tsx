@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { GitCompare, Upload, X, AlertCircle } from 'lucide-react'
+import { api, ApiError } from '../lib/apiClient'
 
 interface Service {
   id: string
@@ -118,8 +119,7 @@ export default function CompareSpecsPanel({ onClose }: { onClose?: () => void })
   const preselectedId = searchParams.get('service_id') ?? ''
 
   useEffect(() => {
-    fetch('/v1/services')
-      .then((r) => r.json() as Promise<Service[]>)
+    api.get<Service[]>('/v1/services')
       .then((list) => {
         setServices(list)
         const match = preselectedId && list.find((s) => s.id === preselectedId)
@@ -153,33 +153,23 @@ export default function CompareSpecsPanel({ onClose }: { onClose?: () => void })
 
     setSubmitting(true)
     try {
-      const resp = await fetch(`/v1/services/${encodeURIComponent(serviceId)}/diffs/compare`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
+      const result = await api.post<CompareResult>(
+        `/v1/services/${encodeURIComponent(serviceId)}/diffs/compare`,
+        {
           base_spec: baseSpec,
           head_spec: headSpec,
           spec_format: format,
           base_ref: 'before',
           head_ref: 'after',
-        }),
-      })
-
-      if (resp.status === 422) {
-        const body = await resp.json() as ParseError
-        setParseError(body)
-        return
-      }
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({})) as { error?: string }
-        setGeneralError(body.error ?? `Unexpected error (HTTP ${resp.status})`)
-        return
-      }
-
-      const result = await resp.json() as CompareResult
+        },
+      )
       navigate(`/diffs/${result.diff_id}`)
     } catch (err) {
-      setGeneralError((err as Error).message)
+      if (err instanceof ApiError && err.status === 422) {
+        setParseError(err.body as ParseError)
+      } else {
+        setGeneralError((err as Error).message)
+      }
     } finally {
       setSubmitting(false)
     }

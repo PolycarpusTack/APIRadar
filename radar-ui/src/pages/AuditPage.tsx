@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
+import { api, ApiError } from '../lib/apiClient'
 
 interface PolicyDecision {
   id: string
@@ -115,25 +116,17 @@ export default function AuditPage() {
 
   useEffect(() => {
     setLoadingDecisions(true)
-    fetch(`/v1/policy-decisions?limit=${LIMIT}&offset=${decisionOffset}`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<{ entries: PolicyDecision[] }>
-      })
+    api.get<{ entries: PolicyDecision[] }>(`/v1/policy-decisions?limit=${LIMIT}&offset=${decisionOffset}`)
       .then((data) => setDecisions(data.entries ?? []))
-      .catch((e: Error) => setErrorDecisions(e.message))
+      .catch((e) => setErrorDecisions(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setLoadingDecisions(false))
   }, [decisionOffset])
 
   useEffect(() => {
     setLoadingAcks(true)
-    fetch(`/v1/acknowledgements?limit=${LIMIT}&offset=${ackOffset}`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<{ entries: Acknowledgement[] }>
-      })
+    api.get<{ entries: Acknowledgement[] }>(`/v1/acknowledgements?limit=${LIMIT}&offset=${ackOffset}`)
       .then((data) => setAcks(data.entries ?? []))
-      .catch((e: Error) => setErrorAcks(e.message))
+      .catch((e) => setErrorAcks(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setLoadingAcks(false))
   }, [ackOffset])
 

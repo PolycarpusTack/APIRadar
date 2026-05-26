@@ -5,6 +5,7 @@ import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
 import TermTooltip from '../components/TermTooltip'
+import { api, ApiError } from '../lib/apiClient'
 
 const CALLOUT_DISMISSED_KEY = 'radar_evolution_rules_callout_dismissed'
 
@@ -96,13 +97,9 @@ export default function EvolutionRulesPage() {
 
   function loadRules() {
     setLoading(true)
-    fetch('/v1/evolution-rules')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<{ entries: EvolutionRule[] }>
-      })
+    api.get<{ entries: EvolutionRule[] }>('/v1/evolution-rules')
       .then((data) => setRules(data.entries ?? []))
-      .catch((e: Error) => setError(e.message))
+      .catch((e) => setError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setLoading(false))
   }
 
@@ -112,36 +109,24 @@ export default function EvolutionRulesPage() {
     e.preventDefault()
     setCreating(true)
     setCreateError(null)
-    fetch('/v1/evolution-rules', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: form.name,
-        change_kind: form.change_kind,
-        path_pattern: form.path_pattern || undefined,
-        severity_override: form.severity_override,
-      }),
+    api.post('/v1/evolution-rules', {
+      name: form.name,
+      change_kind: form.change_kind,
+      path_pattern: form.path_pattern || undefined,
+      severity_override: form.severity_override,
     })
-      .then((r) => {
-        if (!r.ok) return r.text().then((t) => { throw new Error(t || `HTTP ${r.status}`) })
-        return r.json()
-      })
       .then(() => {
         setShowCreate(false)
         setForm(DEFAULT_FORM)
         loadRules()
       })
-      .catch((e: Error) => setCreateError(e.message))
+      .catch((e) => setCreateError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setCreating(false))
   }
 
   function handleToggle(rule: EvolutionRule) {
     setToggling((t) => ({ ...t, [rule.id]: true }))
-    fetch(`/v1/evolution-rules/${rule.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !rule.enabled }),
-    })
+    api.patch(`/v1/evolution-rules/${rule.id}`, { enabled: !rule.enabled })
       .then(() => loadRules())
       .catch(() => {})
       .finally(() => setToggling((t) => ({ ...t, [rule.id]: false })))
@@ -150,7 +135,7 @@ export default function EvolutionRulesPage() {
   function handleDelete(id: string) {
     if (!confirm('Delete this evolution rule?')) return
     setDeleting((d) => ({ ...d, [id]: true }))
-    fetch(`/v1/evolution-rules/${id}`, { method: 'DELETE' })
+    api.del(`/v1/evolution-rules/${id}`)
       .then(() => loadRules())
       .catch(() => {})
       .finally(() => setDeleting((d) => ({ ...d, [id]: false })))

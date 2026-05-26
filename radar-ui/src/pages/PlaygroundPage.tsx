@@ -5,8 +5,8 @@ import {
 } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import CsvRunnerPanel from '../components/CsvRunnerPanel'
+import { api, ApiError } from '../lib/apiClient'
 
-const API = ((import.meta as { env?: { VITE_API_URL?: string } }).env?.VITE_API_URL ?? '') + '/v1'
 const DEFAULT_SPEC = 'https://cdn.jsdelivr.net/npm/@scalar/galaxy/dist/latest.yaml'
 const LOCAL_STORAGE_KEY = 'drift-playground-envs-local'
 // Mirrors --bg-base token (#0B0F19). Used inside iframe srcdoc where the parent's
@@ -123,24 +123,19 @@ export default function PlaygroundPage() {
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
 
-  const authHeader = { Authorization: `Bearer ${localStorage.getItem('radarToken') ?? ''}` }
+  const token = localStorage.getItem('radarToken') ?? undefined
 
   // ── Load stored specs ────────────────────────────────────────────────────
   useEffect(() => {
-    fetch(`${API}/spec-versions`, { headers: authHeader })
-      .then((r) => (r.ok ? r.json() : []))
+    api.get<typeof storedSpecs>('/v1/spec-versions', { bearer: token ?? undefined })
       .then(setStoredSpecs)
       .catch(() => {})
   }, [])
 
   // ── Load sandbox environments ────────────────────────────────────────────
   useEffect(() => {
-    fetch(`${API}/sandbox-envs`, { headers: authHeader })
-      .then((r) => {
-        if (!r.ok) throw new Error('server error')
-        return r.json()
-      })
-      .then((data: SandboxEnv[]) => {
+    api.get<SandboxEnv[]>('/v1/sandbox-envs', { bearer: token ?? undefined })
+      .then((data) => {
         setEnvs(data)
         setServerMode(true)
       })
@@ -184,22 +179,9 @@ export default function PlaygroundPage() {
 
     if (serverMode) {
       try {
-        let resp: Response
-        if (editing) {
-          resp = await fetch(`${API}/sandbox-envs/${editing.id}`, {
-            method: 'PUT',
-            headers: { ...authHeader, 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          })
-        } else {
-          resp = await fetch(`${API}/sandbox-envs`, {
-            method: 'POST',
-            headers: { ...authHeader, 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          })
-        }
-        if (!resp.ok) throw new Error('server error')
-        const saved: SandboxEnv = await resp.json()
+        const saved: SandboxEnv = editing
+          ? await api.put<SandboxEnv>(`/v1/sandbox-envs/${editing.id}`, payload, { bearer: token ?? undefined })
+          : await api.post<SandboxEnv>('/v1/sandbox-envs', payload, { bearer: token ?? undefined })
         setEnvs((prev) =>
           editing
             ? prev.map((e) => (e.id === editing.id ? saved : e))
@@ -208,7 +190,9 @@ export default function PlaygroundPage() {
         if (!editing) setActiveEnvId(saved.id)
         setSaveState('saved')
         setTimeout(() => { setSaveState('idle'); setFormOpen(false) }, 800)
-      } catch {
+      } catch (err) {
+        // ApiError carries HTTP status; non-ApiError means network failure
+        if (!(err instanceof ApiError)) console.error(err)
         setSaveState('error')
       }
     } else {
@@ -233,7 +217,7 @@ export default function PlaygroundPage() {
   async function handleDelete(id: string) {
     if (serverMode) {
       try {
-        await fetch(`${API}/sandbox-envs/${id}`, { method: 'DELETE', headers: authHeader })
+        await api.del(`/v1/sandbox-envs/${id}`, { bearer: token ?? undefined })
       } catch {}
     }
     const next = envs.filter((e) => e.id !== id)
@@ -257,7 +241,8 @@ export default function PlaygroundPage() {
   )
 
   function loadStoredSpec(id: string) {
-    const url = `${API}/spec-versions/${id}/raw`
+    const apiBase = ((import.meta as { env?: { VITE_API_URL?: string } }).env?.VITE_API_URL ?? '') + '/v1'
+    const url = `${apiBase}/spec-versions/${id}/raw`
     setInputUrl(url)
     setActiveUrl(url)
     setSpecsOpen(false)

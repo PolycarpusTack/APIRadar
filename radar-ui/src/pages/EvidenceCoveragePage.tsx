@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Activity, AlertTriangle, CheckCircle, Clock } from 'lucide-react'
+import { api, ApiError } from '../lib/apiClient'
 
 interface CoverageRow {
   consumer_id: string
@@ -72,12 +73,9 @@ export default function EvidenceCoveragePage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch('/v1/evidence/coverage')
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        setRows(await res.json())
-      })
-      .catch((e) => setError(e.message))
+    api.get<CoverageRow[]>('/v1/evidence/coverage')
+      .then((data) => setRows(data))
+      .catch((e) => setError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setLoading(false))
   }, [])
 

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Rows, Upload, X, CheckCircle, XCircle, Loader, Play, AlertCircle } from 'lucide-react'
 import Badge from './Badge'
 import { parseCsv } from '../lib/csvParser'
+import { api } from '../lib/apiClient'
 
 interface BatchItem {
   label: string
@@ -79,16 +80,7 @@ export default function BatchComparePanel({ onClose }: { onClose?: () => void })
 
     setRunning(true)
     try {
-      const resp = await fetch('/v1/compare/batch', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(items),
-      })
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({})) as { error?: string }
-        throw new Error(body.error ?? `HTTP ${resp.status}`)
-      }
-      const data = await resp.json() as BatchResult[]
+      const data = await api.post<BatchResult[]>('/v1/compare/batch', items)
       setResults(data)
     } catch (err) {
       setError((err as Error).message)

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import Badge from '../components/Badge'
+import { api, ApiError } from '../lib/apiClient'
 
 interface Consumer {
   id: string
@@ -41,28 +42,20 @@ export default function ConsumerDetailPage() {
     if (!id) return
 
     // Load the consumer from the list endpoint (no single-consumer GET yet).
-    fetch('/v1/consumers')
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<Consumer[]>
-      })
+    api.get<Consumer[]>('/v1/consumers')
       .then(all => {
         const found = all.find(c => c.id === id) ?? null
         if (!found) throw new Error('Consumer not found')
         setConsumer(found)
         // Load subscriptions from the service-scoped endpoint indirectly
         // by fetching services and their consumers.
-        return fetch('/v1/services')
-      })
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<{ id: string; name: string }[]>
+        return api.get<{ id: string; name: string }[]>('/v1/services')
       })
       .then(services =>
         Promise.all(
           services.map(svc =>
-            fetch(`/v1/services/${svc.id}/consumers`)
-              .then(r => r.ok ? r.json() as Promise<{ id: string; name: string }[]> : [])
+            api.get<{ id: string; name: string }[]>(`/v1/services/${svc.id}/consumers`)
+              .catch(() => [] as { id: string; name: string }[])
               .then((consumers: { id: string; name: string }[]) => {
                 const found = consumers.find(c => c.id === id)
                 if (!found) return null
@@ -72,7 +65,7 @@ export default function ConsumerDetailPage() {
         )
       )
       .then(results => setSubs(results.filter(Boolean) as Subscription[]))
-      .catch((e: Error) => setError(e.message))
+      .catch((e: unknown) => setError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setLoading(false))
   }, [id])
 

@@ -3,6 +3,7 @@ import { Activity } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import KpiCard from '../components/KpiCard'
 import FirstRunBanner from '../components/FirstRunBanner'
+import { api } from '../lib/apiClient'
 
 type ApiStatus = 'checking' | 'online' | 'offline'
 
@@ -20,8 +21,8 @@ function ApiStatusBadge() {
 
     async function check() {
       try {
-        const res = await fetch('/health', { signal: AbortSignal.timeout(4000) })
-        if (!cancelled) setStatus(res.ok ? 'online' : 'offline')
+        await api.get<{ status: string }>('/health', { signal: AbortSignal.timeout(4000) })
+        if (!cancelled) setStatus('online')
       } catch {
         if (!cancelled) setStatus('offline')
       }
@@ -236,13 +237,11 @@ export default function HomePage() {
   const [diffs, setDiffs] = useState<DiffEntry[]>([])
 
   useEffect(() => {
-    fetch('/v1/summary')
-      .then((r) => r.ok ? r.json() as Promise<Summary> : Promise.reject())
+    api.get<Summary>('/v1/summary')
       .then(setSummary)
       .catch(() => { /* server may not be reachable yet — KPIs stay as — */ })
 
-    fetch('/v1/diffs?limit=200')
-      .then((r) => r.ok ? r.json() as Promise<DiffEntry[]> : Promise.reject())
+    api.get<DiffEntry[]>('/v1/diffs?limit=200')
       .then(setDiffs)
       .catch(() => { /* non-fatal */ })
   }, [])

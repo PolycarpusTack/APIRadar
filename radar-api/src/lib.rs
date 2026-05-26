@@ -20,6 +20,7 @@ pub(crate) mod webhooks;
 pub(crate) mod scans;
 pub(crate) mod notifications;
 pub(crate) mod csv_runner;
+pub(crate) mod audit;
 
 pub(crate) use errors::get_prometheus_handle;
 pub(crate) use auth::{
@@ -319,6 +320,7 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
         .route("/csv-runs", get(csv_runner::list_csv_runs).post(csv_runner::create_csv_run))
         .route("/csv-runs/:id", get(csv_runner::get_csv_run).delete(csv_runner::cancel_csv_run))
         .route("/csv-runs/:id/results", get(csv_runner::get_csv_run_results))
+        .route("/audit-events", get(audit::list_audit_events).post(audit::create_audit_event))
         .layer(middleware::from_fn_with_state(pool.clone(), auth_middleware))
         // Outermost layer: inject RequireAuth + JwtSecretExt before auth_middleware runs.
         .layer(middleware::from_fn({

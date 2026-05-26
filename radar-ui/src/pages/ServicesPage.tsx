@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Server, Plus, X, ArrowRight } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
+import { api, ApiError } from '../lib/apiClient'
 
 interface ServiceRow {
   id: string
@@ -32,20 +33,11 @@ function RegisterForm({ onCreated }: { onCreated: (svc: ServiceRow) => void }) {
     e.preventDefault()
     setSaving(true); setErr(null)
     try {
-      const resp = await fetch('/v1/services', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name, repo_url: repoUrl, owner_team: ownerTeam, spec_format: specFormat }),
-      })
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({}))
-        throw new Error((body as { error?: string }).error ?? `HTTP ${resp.status}`)
-      }
-      const svc = await resp.json() as ServiceRow
+      const svc = await api.post<ServiceRow>('/v1/services', { name, repo_url: repoUrl, owner_team: ownerTeam, spec_format: specFormat })
       onCreated(svc)
       reset()
-    } catch (e) {
-      setErr((e as Error).message)
+    } catch (e: unknown) {
+      setErr(e instanceof ApiError ? e.message : String(e))
     } finally {
       setSaving(false)
     }
@@ -219,13 +211,9 @@ export default function ServicesPage() {
   const [nudgeServiceId, setNudgeServiceId] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch('/v1/services')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<ServiceRow[]>
-      })
+    api.get<ServiceRow[]>('/v1/services')
       .then(setRows)
-      .catch((e: Error) => setError(e.message))
+      .catch((e: unknown) => setError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setLoading(false))
   }, [])
 

@@ -3,6 +3,7 @@ import { Database, RefreshCw, Plus, X } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
+import { api, ApiError } from '../lib/apiClient'
 
 interface CatalogSource {
   id: string
@@ -77,13 +78,9 @@ export default function CatalogSourcesPage() {
 
   function loadSources() {
     setLoading(true)
-    fetch('/v1/catalog-sources')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<{ entries: CatalogSource[] }>
-      })
+    api.get<{ entries: CatalogSource[] }>('/v1/catalog-sources')
       .then((data) => setSources(data.entries ?? []))
-      .catch((e: Error) => setError(e.message))
+      .catch((e) => setError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setLoading(false))
   }
 
@@ -91,17 +88,14 @@ export default function CatalogSourcesPage() {
 
   function handleSync(id: string) {
     setSyncing((s) => ({ ...s, [id]: true }))
-    fetch(`/v1/catalog-sources/${id}/sync`, { method: 'POST' })
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<SyncResult>
-      })
+    api.post<SyncResult>(`/v1/catalog-sources/${id}/sync`)
       .then((result) => {
         setSyncResults((s) => ({ ...s, [id]: result }))
         loadSources()
       })
-      .catch((e: Error) => {
-        setSyncResults((s) => ({ ...s, [id]: { source_id: id, synced_at: '', status: 'error', consumers_upserted: 0, error: e.message } }))
+      .catch((e) => {
+        const msg = e instanceof ApiError ? e.message : String(e)
+        setSyncResults((s) => ({ ...s, [id]: { source_id: id, synced_at: '', status: 'error', consumers_upserted: 0, error: msg } }))
       })
       .finally(() => setSyncing((s) => ({ ...s, [id]: false })))
   }
@@ -117,21 +111,13 @@ export default function CatalogSourcesPage() {
       token_env: form.token_env || undefined,
       sync_interval_secs: form.sync_interval_secs ? Number(form.sync_interval_secs) : undefined,
     }
-    fetch('/v1/catalog-sources', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-      .then((r) => {
-        if (!r.ok) return r.text().then((t) => { throw new Error(t || `HTTP ${r.status}`) })
-        return r.json()
-      })
+    api.post('/v1/catalog-sources', body)
       .then(() => {
         setShowCreate(false)
         setForm(DEFAULT_FORM)
         loadSources()
       })
-      .catch((e: Error) => setCreateError(e.message))
+      .catch((e) => setCreateError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setCreating(false))
   }
 
