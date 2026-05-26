@@ -1,9 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import {
   Telescope, ChevronDown, ChevronUp, Plus, Trash2,
-  Database, Cloud, HardDrive, Loader2, Check, X,
+  Database, Cloud, HardDrive, Loader2, Check, X, Rows,
 } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
+import CsvRunnerPanel from '../components/CsvRunnerPanel'
 
 const API = ((import.meta as { env?: { VITE_API_URL?: string } }).env?.VITE_API_URL ?? '') + '/v1'
 const DEFAULT_SPEC = 'https://cdn.jsdelivr.net/npm/@scalar/galaxy/dist/latest.yaml'
@@ -257,6 +258,9 @@ export default function PlaygroundPage() {
 
   const iframeKey = `${activeUrl}::${activeEnvId ?? 'none'}`
 
+  // Mode toggle: 'explorer' | 'csv'
+  const [mode, setMode] = useState<'explorer' | 'csv'>('explorer')
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -459,16 +463,53 @@ export default function PlaygroundPage() {
         )}
       </div>
 
-      {/* ── Scalar iframe ─────────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-hidden">
-        <iframe
-          key={iframeKey}
-          srcDoc={buildScalarHtml(activeUrl, activeEnv)}
-          title="API Playground"
-          sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-          style={{ width: '100%', height: '100%', border: 'none' }}
-        />
+      {/* ── Mode tabs ─────────────────────────────────────────────────────── */}
+      <div className="flex items-center gap-0 px-14 pt-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+        <button
+          onClick={() => setMode('explorer')}
+          className="flex items-center gap-1.5 px-4 py-2 text-[12px] font-medium border-b-2 transition-colors"
+          style={{
+            color: mode === 'explorer' ? 'var(--cobalt-mid)' : 'var(--text-3)',
+            borderColor: mode === 'explorer' ? 'var(--cobalt)' : 'transparent',
+            marginBottom: '-1px',
+          }}
+        >
+          <Telescope className="h-3.5 w-3.5" />
+          API Explorer
+        </button>
+        <button
+          onClick={() => setMode('csv')}
+          className="flex items-center gap-1.5 px-4 py-2 text-[12px] font-medium border-b-2 transition-colors"
+          style={{
+            color: mode === 'csv' ? 'var(--cobalt-mid)' : 'var(--text-3)',
+            borderColor: mode === 'csv' ? 'var(--cobalt)' : 'transparent',
+            marginBottom: '-1px',
+          }}
+        >
+          <Rows className="h-3.5 w-3.5" />
+          CSV Data Runner
+        </button>
       </div>
+
+      {/* ── Scalar iframe ─────────────────────────────────────────────────── */}
+      {mode === 'explorer' && (
+        <div className="flex-1 overflow-hidden">
+          <iframe
+            key={iframeKey}
+            srcDoc={buildScalarHtml(activeUrl, activeEnv)}
+            title="API Playground"
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+            style={{ width: '100%', height: '100%', border: 'none' }}
+          />
+        </div>
+      )}
+
+      {/* ── CSV Runner ────────────────────────────────────────────────────── */}
+      {mode === 'csv' && (
+        <div className="flex-1 overflow-y-auto">
+          <CsvRunnerPanel />
+        </div>
+      )}
     </div>
   )
 }
