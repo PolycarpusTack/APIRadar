@@ -250,6 +250,14 @@ pub(crate) async fn create_diff(
 
     metrics::counter!("radar_diffs_created_total").increment(1);
 
+    // Fire webhook events in background (non-blocking)
+    {
+        let pool2 = pool.clone();
+        let did = diff_id.clone();
+        let oid = org_id.clone();
+        tokio::spawn(async move { crate::webhooks::dispatch_diff_event(pool2, did, oid).await });
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -274,7 +282,7 @@ pub(crate) async fn get_diff(
     let row = sqlx::query(
         r#"
         SELECT d.id, sv_from.git_ref AS from_git_ref, sv_to.git_ref AS to_git_ref,
-               d.pr_url, d.created_at, sv_to.spec_yaml, s.org_id AS service_org_id
+               d.pr_url, d.created_at, d.share_token, sv_to.spec_yaml, s.org_id AS service_org_id
         FROM diff d
         JOIN spec_version sv_from ON sv_from.id = d.from_version
         JOIN spec_version sv_to   ON sv_to.id   = d.to_version
@@ -293,6 +301,20 @@ pub(crate) async fn get_diff(
 
     let row_org_id: String = row.try_get("service_org_id").unwrap_or_default();
     assert_org_access(&row_org_id, &caller_org_id, &format!("diff {diff_id}"))?;
+
+    // Generate share token if absent (back-fill)
+    let share_token: Option<String> = row.try_get("share_token").ok().flatten();
+    let share_token = if let Some(t) = share_token {
+        t
+    } else {
+        let token = Uuid::new_v5(&Uuid::NAMESPACE_URL, diff_id.as_bytes()).to_string();
+        let _ = sqlx::query("UPDATE diff SET share_token = ? WHERE id = ?")
+            .bind(&token)
+            .bind(&diff_id)
+            .execute(&pool)
+            .await;
+        token
+    };
 
     let change_rows = sqlx::query(
         r#"
@@ -352,9 +374,60 @@ pub(crate) async fn get_diff(
             "pr_url":       row.try_get::<Option<String>, _>("pr_url").unwrap_or(None),
             "created_at":   row.get::<String, _>("created_at"),
             "spec_yaml":    row.try_get::<Option<String>, _>("spec_yaml").unwrap_or(None),
+            "share_token":  share_token,
             "changes":      changes,
         })),
     ))
+}
+
+// GET /share/:token — public, unauthenticated diff view (K-4)
+pub(crate) async fn get_shared_diff(
+    Path(token): Path<String>,
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<impl IntoResponse, ApiError> {
+    use sqlx::Row;
+
+    let diff_row = sqlx::query(
+        r#"SELECT d.id, sv_from.git_ref AS from_git_ref, sv_to.git_ref AS to_git_ref,
+                  d.pr_url, d.created_at, s.name AS service_name
+           FROM diff d
+           JOIN spec_version sv_from ON sv_from.id = d.from_version
+           JOIN spec_version sv_to   ON sv_to.id   = d.to_version
+           JOIN service s            ON s.id        = sv_to.service_id
+           WHERE d.share_token = ?"#,
+    )
+    .bind(&token)
+    .fetch_optional(&pool)
+    .await?;
+
+    let diff_row = diff_row.ok_or_else(|| ApiError::NotFound("shared diff not found".into()))?;
+    let diff_id: String = diff_row.get("id");
+
+    let change_rows = sqlx::query(
+        "SELECT path, kind, severity, description FROM change WHERE diff_id = ? ORDER BY path, kind",
+    )
+    .bind(&diff_id)
+    .fetch_all(&pool)
+    .await?;
+
+    let changes: Vec<serde_json::Value> = change_rows.iter().map(|c| {
+        json!({
+            "path":        c.get::<String, _>("path"),
+            "kind":        c.get::<String, _>("kind"),
+            "severity":    c.get::<String, _>("severity"),
+            "description": c.try_get::<Option<String>, _>("description").unwrap_or(None),
+        })
+    }).collect();
+
+    Ok(Json(json!({
+        "id":           diff_id,
+        "service_name": diff_row.get::<String, _>("service_name"),
+        "from_git_ref": diff_row.get::<String, _>("from_git_ref"),
+        "to_git_ref":   diff_row.get::<String, _>("to_git_ref"),
+        "pr_url":       diff_row.try_get::<Option<String>, _>("pr_url").unwrap_or(None),
+        "created_at":   diff_row.get::<String, _>("created_at"),
+        "changes":      changes,
+    })))
 }
 
 // GET /v1/diffs/:id/blast-radius?max_age_days=N
@@ -920,6 +993,14 @@ pub(crate) async fn compare_specs(
 
     metrics::counter!("radar_diffs_created_total").increment(1);
 
+    // Fire webhook events in background (non-blocking)
+    {
+        let pool2 = pool.clone();
+        let did = diff_id.clone();
+        let oid = org_id.clone();
+        tokio::spawn(async move { crate::webhooks::dispatch_diff_event(pool2, did, oid).await });
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -928,4 +1009,196 @@ pub(crate) async fn compare_specs(
             "breaking_count": breaking_count,
         })),
     ))
+}
+
+// ── Batch compare (POST /v1/compare/batch) ────────────────────────────────────
+// Accepts up to 50 {base_url, head_url} pairs. The sidecar fetches each URL
+// server-side (bypassing browser CSP) and persists a diff per row.
+
+#[derive(serde::Deserialize)]
+pub(crate) struct BatchCompareItem {
+    pub(crate) label: Option<String>,
+    pub(crate) service_id: Option<String>,
+    #[serde(default = "default_batch_format")]
+    pub(crate) format: String,
+    pub(crate) base_url: String,
+    pub(crate) head_url: String,
+}
+
+fn default_batch_format() -> String { "openapi".to_string() }
+
+#[derive(serde::Serialize)]
+struct BatchResultItem {
+    label: String,
+    status: String,
+    diff_id: Option<String>,
+    breaking_count: i64,
+    changes_count: i64,
+    error: Option<String>,
+}
+
+pub(crate) async fn batch_compare(
+    State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
+    Json(items): Json<Vec<BatchCompareItem>>,
+) -> Result<impl IntoResponse, ApiError> {
+    if items.len() > 50 {
+        return Err(ApiError::BadRequest("batch too large, max 50 items".into()));
+    }
+
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("radar-api/batch-compare")
+        .build()
+        .unwrap_or_default();
+    let mut results: Vec<BatchResultItem> = Vec::new();
+
+    for item in &items {
+        let label = item.label.as_deref().unwrap_or(item.base_url.as_str()).to_string();
+        match run_batch_item(&pool, &http, item, &org_id, &label).await {
+            Ok(r) => results.push(r),
+            Err(e) => results.push(BatchResultItem {
+                label,
+                status: "error".into(),
+                diff_id: None,
+                breaking_count: 0,
+                changes_count: 0,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+
+    Ok((StatusCode::OK, Json(results)))
+}
+
+async fn run_batch_item(
+    pool: &sqlx::AnyPool,
+    http: &reqwest::Client,
+    item: &BatchCompareItem,
+    org_id: &str,
+    label: &str,
+) -> anyhow::Result<BatchResultItem> {
+    let base_content = http.get(&item.base_url)
+        .send().await.map_err(|e| anyhow::anyhow!("fetch base_url: {e}"))?
+        .error_for_status().map_err(|e| anyhow::anyhow!("base_url HTTP error: {e}"))?
+        .text().await.map_err(|e| anyhow::anyhow!("read base_url: {e}"))?;
+
+    let head_content = http.get(&item.head_url)
+        .send().await.map_err(|e| anyhow::anyhow!("fetch head_url: {e}"))?
+        .error_for_status().map_err(|e| anyhow::anyhow!("head_url HTTP error: {e}"))?
+        .text().await.map_err(|e| anyhow::anyhow!("read head_url: {e}"))?;
+
+    let format = item.format.to_lowercase();
+
+    let changes: Vec<radar_core::diff::DiffChange> = match format.as_str() {
+        "graphql" | "gql" => {
+            let bm = radar_core::graphql::parse_graphql(&base_content)
+                .map_err(|e| anyhow::anyhow!("parse base graphql: {e}"))?;
+            let hm = radar_core::graphql::parse_graphql(&head_content)
+                .map_err(|e| anyhow::anyhow!("parse head graphql: {e}"))?;
+            radar_core::graphql::diff_graphql(&bm, &hm)
+        }
+        "protobuf" | "proto" => {
+            let bs = radar_core::proto::parse_proto(&base_content)
+                .map_err(|e| anyhow::anyhow!("parse base proto: {e}"))?;
+            let hs = radar_core::proto::parse_proto(&head_content)
+                .map_err(|e| anyhow::anyhow!("parse head proto: {e}"))?;
+            radar_core::proto::diff_proto(&bs, &hs)
+        }
+        _ => {
+            let bp = radar_core::diff::parse_openapi(&base_content)
+                .map_err(|e| anyhow::anyhow!("parse base openapi: {e}"))?;
+            let hp = radar_core::diff::parse_openapi(&head_content)
+                .map_err(|e| anyhow::anyhow!("parse head openapi: {e}"))?;
+            radar_core::diff::diff_openapi(&bp, &hp)
+        }
+    };
+
+    // Stable service_id: use provided, or derive from label so the same label
+    // always maps to the same service entry in the DB.
+    let service_id = item.service_id.clone().unwrap_or_else(|| {
+        Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("batch:{label}").as_bytes()).to_string()
+    });
+
+    let now = Utc::now().to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET spec_format = excluded.spec_format",
+    )
+    .bind(&service_id).bind(label).bind("").bind("").bind(&format).bind(org_id)
+    .execute(pool).await.map_err(|e| anyhow::anyhow!("upsert service: {e}"))?;
+
+    // Use URL strings as git refs — keeps spec_version IDs stable across reruns.
+    let from_ver = spec_version_id(&service_id, &item.base_url);
+    sqlx::query(
+        "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+    )
+    .bind(&from_ver).bind(&service_id).bind(&item.base_url)
+    .bind(&now).bind(&format).bind(&base_content)
+    .execute(pool).await.map_err(|e| anyhow::anyhow!("insert base spec_version: {e}"))?;
+
+    let to_ver = spec_version_id(&service_id, &item.head_url);
+    sqlx::query(
+        "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET spec_yaml = COALESCE(excluded.spec_yaml, spec_version.spec_yaml)",
+    )
+    .bind(&to_ver).bind(&service_id).bind(&item.head_url)
+    .bind(&now).bind(&format).bind(&head_content)
+    .execute(pool).await.map_err(|e| anyhow::anyhow!("insert head spec_version: {e}"))?;
+
+    // Re-use an existing diff for the same (from, to) pair.
+    if let Some(row) = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
+        .bind(&from_ver).bind(&to_ver)
+        .fetch_optional(pool).await.map_err(|e| anyhow::anyhow!("select diff: {e}"))?
+    {
+        use sqlx::Row;
+        let existing_id: String = row.try_get("id").map_err(|e| anyhow::anyhow!("get id: {e}"))?;
+        let bc = changes.iter()
+            .filter(|c| c.severity == radar_core::models::Severity::Breaking)
+            .count() as i64;
+        return Ok(BatchResultItem {
+            label: label.to_string(),
+            status: "done".into(),
+            diff_id: Some(existing_id),
+            breaking_count: bc,
+            changes_count: changes.len() as i64,
+            error: None,
+        });
+    }
+
+    let diff_id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, NULL, ?)")
+        .bind(&diff_id).bind(&from_ver).bind(&to_ver).bind(&now)
+        .execute(pool).await.map_err(|e| anyhow::anyhow!("insert diff: {e}"))?;
+
+    let mut breaking_count: i64 = 0;
+    for change in &changes {
+        let sev = match change.severity {
+            radar_core::models::Severity::Breaking => { breaking_count += 1; "breaking" }
+            radar_core::models::Severity::NonBreakingRisky => "non_breaking_risky",
+            radar_core::models::Severity::Safe => "safe",
+        };
+        sqlx::query(
+            "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string()).bind(&diff_id)
+        .bind(&change.path).bind(change.kind.as_str()).bind(sev).bind(&change.description)
+        .execute(pool).await.map_err(|e| anyhow::anyhow!("insert change: {e}"))?;
+    }
+
+    metrics::counter!("radar_diffs_created_total").increment(1);
+
+    Ok(BatchResultItem {
+        label: label.to_string(),
+        status: "done".into(),
+        diff_id: Some(diff_id),
+        breaking_count,
+        changes_count: changes.len() as i64,
+        error: None,
+    })
 }

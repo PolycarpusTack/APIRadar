@@ -16,6 +16,9 @@ pub(crate) mod ingestion;
 pub(crate) mod ai_tests;
 pub(crate) mod release_notes;
 pub(crate) mod summary;
+pub(crate) mod webhooks;
+pub(crate) mod scans;
+pub(crate) mod notifications;
 
 pub(crate) use errors::get_prometheus_handle;
 pub(crate) use auth::{
@@ -205,6 +208,12 @@ pub async fn run(
 
     info!("migrations applied");
 
+    // Start background scheduler for scheduled spec scans (K-3)
+    scans::start_scan_scheduler(pool.clone());
+
+    // Start weekly email digest scheduler (K-5)
+    notifications::start_digest_scheduler(pool.clone());
+
     let require_auth = std::env::var("RADAR_REQUIRE_AUTH")
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(false);
@@ -255,6 +264,7 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
         .route("/services/:id", get(services::get_service))
         .route("/services/:id/diffs", get(diffs::list_diffs).post(diffs::create_diff))
         .route("/services/:id/diffs/compare", post(diffs::compare_specs))
+        .route("/compare/batch", post(diffs::batch_compare))
         .route("/services/:id/consumers", get(consumers::list_consumers))
         .route("/services/:id/subscriptions", post(consumers::create_subscription))
         .route("/consumers", get(consumers::list_all_consumers).post(consumers::create_consumer))
@@ -293,6 +303,14 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
         .route("/catalog-sources/:id/sync", post(catalog::sync_catalog_source))
         .route("/evolution-rules", get(evolution::list_evolution_rules).post(evolution::create_evolution_rule))
         .route("/evolution-rules/:id", axum::routing::delete(evolution::delete_evolution_rule).patch(evolution::toggle_evolution_rule))
+        .route("/webhooks", get(webhooks::list_webhooks).post(webhooks::create_webhook))
+        .route("/webhooks/:id", axum::routing::delete(webhooks::delete_webhook))
+        .route("/webhooks/:id/test", post(webhooks::test_webhook))
+        .route("/webhooks/:id/deliveries", get(webhooks::list_deliveries))
+        .route("/scheduled-scans", get(scans::list_scans).post(scans::create_scan))
+        .route("/scheduled-scans/:id", axum::routing::delete(scans::delete_scan))
+        .route("/scheduled-scans/history", get(scans::run_history))
+        .route("/notifications/digest/preview", post(notifications::preview_digest))
         .layer(middleware::from_fn_with_state(pool.clone(), auth_middleware))
         // Outermost layer: inject RequireAuth + JwtSecretExt before auth_middleware runs.
         .layer(middleware::from_fn({
@@ -343,6 +361,7 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
         .route("/auth/callback", get(oidc_callback))
         .route("/auth/me", get(oidc_me))
         .route("/auth/logout", get(oidc_logout))
+        .route("/share/:token", get(diffs::get_shared_diff))
         .nest("/v1", v1)
         .with_state(pool.clone())
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(timeout_secs)))

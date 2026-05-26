@@ -18,6 +18,7 @@ import GenerateTestsPage from './pages/GenerateTestsPage'
 import HelpPage from './pages/HelpPage'
 import SettingsPage from './pages/SettingsPage'
 import LoginPage from './pages/LoginPage'
+import ShareDiffPage from './pages/ShareDiffPage'
 
 // ---------------------------------------------------------------------------
 // D-4: OIDC auth hook
@@ -258,6 +259,16 @@ export default function App() {
   // session === null   → still loading or OIDC not configured (allow through)
   // session === object → authenticated
 
+  // Public share pages — render without sidebar and bypass auth gate
+  const path = window.location.pathname
+  if (path.startsWith('/share/')) {
+    return (
+      <Routes>
+        <Route path="/share/:token" element={<ShareDiffPage />} />
+      </Routes>
+    )
+  }
+
   // Render login page for unauthenticated visits when OIDC is active.
   // While loading (null) we fall through to the main layout to avoid flash.
   if (session === false) {
@@ -291,6 +302,7 @@ export default function App() {
           <Route path="/generate-tests" element={<GenerateTestsPage />} />
           <Route path="/help" element={<HelpPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/share/:token" element={<ShareDiffPage />} />
           <Route path="/login" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

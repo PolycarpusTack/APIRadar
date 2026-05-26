@@ -1,0 +1,1 @@
+ALTER TABLE webhook ADD COLUMN type TEXT NOT NULL DEFAULT 'generic';

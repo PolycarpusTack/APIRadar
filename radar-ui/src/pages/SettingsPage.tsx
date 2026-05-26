@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { CheckCircle, XCircle } from 'lucide-react'
+import { CheckCircle, XCircle, Webhook, Trash2, Send, ChevronDown, ChevronUp } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import TermTooltip, { TERM_DEFINITIONS } from '../components/TermTooltip'
 
@@ -77,6 +77,208 @@ function IntegrationChip({ label, active }: { label: string; active: boolean }) 
     </div>
   )
 }
+
+// ---------------------------------------------------------------------------
+// Webhook types
+// ---------------------------------------------------------------------------
+
+interface WebhookEntry {
+  id: string
+  url: string
+  events: string[]
+  secret?: string
+  secret_hint: string
+  active: boolean
+  created_at: string
+}
+
+interface DeliveryEntry {
+  id: string
+  event: string
+  status: string
+  attempt: number
+  error?: string
+  delivered_at?: string
+}
+
+const ALL_EVENTS = ['diff.created']
+
+function WebhooksSection() {
+  const [webhooks, setWebhooks] = useState<WebhookEntry[]>([])
+  const [loading, setLoading] = useState(true)
+  const [newUrl, setNewUrl] = useState('')
+  const [newEvents, setNewEvents] = useState(['diff.created'])
+  const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
+  const [newSecret, setNewSecret] = useState<string | null>(null)
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [deliveries, setDeliveries] = useState<Record<string, DeliveryEntry[]>>({})
+
+  const reload = () => {
+    setLoading(true)
+    fetch('/v1/webhooks')
+      .then(r => r.ok ? r.json() as Promise<WebhookEntry[]> : Promise.reject(`HTTP ${r.status}`))
+      .then(setWebhooks)
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(reload, [])
+
+  async function createWebhook(e: React.FormEvent) {
+    e.preventDefault()
+    if (!newUrl) return
+    setCreating(true); setCreateError(null); setNewSecret(null)
+    try {
+      const resp = await fetch('/v1/webhooks', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url: newUrl, events: newEvents }),
+      })
+      const body = await resp.json()
+      if (!resp.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${resp.status}`)
+      if ((body as WebhookEntry).secret) setNewSecret((body as WebhookEntry).secret ?? null)
+      setNewUrl('')
+      reload()
+    } catch (err) {
+      setCreateError((err as Error).message)
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  async function deleteWebhook(id: string) {
+    await fetch(`/v1/webhooks/${id}`, { method: 'DELETE' })
+    setWebhooks(prev => prev.filter(w => w.id !== id))
+    if (expandedId === id) setExpandedId(null)
+  }
+
+  async function testWebhook(id: string) {
+    await fetch(`/v1/webhooks/${id}/test`, { method: 'POST' })
+  }
+
+  async function toggleExpand(id: string) {
+    if (expandedId === id) { setExpandedId(null); return }
+    setExpandedId(id)
+    if (!deliveries[id]) {
+      const resp = await fetch(`/v1/webhooks/${id}/deliveries`)
+      if (resp.ok) {
+        const data = await resp.json() as DeliveryEntry[]
+        setDeliveries(prev => ({ ...prev, [id]: data }))
+      }
+    }
+  }
+
+  const statusColor = (s: string) => s === 'delivered' ? 'var(--green)' : s === 'failed' ? 'var(--red)' : 'var(--text-dim)'
+
+  return (
+    <SectionCard title="Webhooks" description="Register HTTP callbacks to receive push notifications when diffs are created.">
+      {loading ? (
+        <p className="text-[12px]" style={{ color: 'var(--text-dim)' }}>Loading…</p>
+      ) : (
+        <div className="space-y-3">
+          {webhooks.length === 0 && (
+            <p className="text-[12px]" style={{ color: 'var(--text-dim)' }}>No webhooks registered yet.</p>
+          )}
+          {webhooks.map(wh => (
+            <div key={wh.id} className="rounded border" style={{ border: '1px solid var(--border)', background: 'var(--bg-raised)' }}>
+              <div className="flex items-center gap-3 px-3 py-2">
+                <Webhook className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--text-dim)' }} />
+                <span className="flex-1 text-[12px] font-mono truncate" style={{ color: 'var(--text-1)' }}>{wh.url}</span>
+                <span className="text-[10.5px] rounded px-1.5 py-px" style={{ background: 'var(--bg-active)', color: 'var(--text-dim)' }}>
+                  {wh.events.join(', ')}
+                </span>
+                <span className="text-[10.5px]" style={{ color: 'var(--text-dim)' }}>secret: {wh.secret_hint}</span>
+                <button
+                  onClick={() => testWebhook(wh.id)}
+                  title="Send test ping"
+                  className="rounded p-1 transition-colors hover:opacity-70"
+                  style={{ color: 'var(--cobalt-mid)' }}
+                >
+                  <Send className="h-3 w-3" />
+                </button>
+                <button
+                  onClick={() => deleteWebhook(wh.id)}
+                  title="Delete webhook"
+                  className="rounded p-1 transition-colors hover:opacity-70"
+                  style={{ color: 'var(--red)' }}
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+                <button
+                  onClick={() => toggleExpand(wh.id)}
+                  className="rounded p-1 transition-colors hover:opacity-70"
+                  style={{ color: 'var(--text-dim)' }}
+                >
+                  {expandedId === wh.id ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                </button>
+              </div>
+              {expandedId === wh.id && (
+                <div className="px-3 pb-3">
+                  <p className="text-[10.5px] font-semibold uppercase tracking-[0.7px] mb-1.5" style={{ color: 'var(--text-dim)' }}>Recent deliveries</p>
+                  {(deliveries[wh.id] ?? []).length === 0 ? (
+                    <p className="text-[11.5px]" style={{ color: 'var(--text-dim)' }}>No deliveries yet.</p>
+                  ) : (deliveries[wh.id] ?? []).map(d => (
+                    <div key={d.id} className="flex items-center gap-3 py-0.5">
+                      <span className="text-[11px] font-medium w-20" style={{ color: statusColor(d.status) }}>{d.status}</span>
+                      <span className="text-[11px] font-mono" style={{ color: 'var(--text-2)' }}>{d.event}</span>
+                      <span className="text-[10.5px]" style={{ color: 'var(--text-dim)' }}>attempt {d.attempt}</span>
+                      {d.error && <span className="text-[10.5px]" style={{ color: 'var(--red)' }}>{d.error}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+
+          {newSecret && (
+            <div className="rounded border px-3 py-2 text-[12px]" style={{ border: '1px solid var(--green)', background: 'var(--bg-raised)', color: 'var(--green)' }}>
+              Webhook created. Secret (shown once): <span className="font-mono">{newSecret}</span>
+              <button className="ml-3 underline text-[11px]" onClick={() => setNewSecret(null)}>dismiss</button>
+            </div>
+          )}
+
+          <form onSubmit={createWebhook} className="flex items-end gap-2 pt-1">
+            <div className="flex-1">
+              <label className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>HTTPS endpoint URL</label>
+              <input
+                type="url"
+                value={newUrl}
+                onChange={e => setNewUrl(e.target.value)}
+                placeholder="https://hooks.example.com/radar"
+                className="w-full rounded border px-2.5 py-1.5 text-[12.5px] outline-none focus:ring-1 font-mono"
+                style={{ background: 'var(--bg-raised)', border: '1px solid var(--border)', color: 'var(--text-1)' }}
+                required
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Events</label>
+              <select
+                value={newEvents[0]}
+                onChange={e => setNewEvents([e.target.value])}
+                className="rounded border px-2 py-1.5 text-[12px] outline-none"
+                style={{ background: 'var(--bg-raised)', border: '1px solid var(--border)', color: 'var(--text-1)' }}
+              >
+                {ALL_EVENTS.map(ev => <option key={ev} value={ev}>{ev}</option>)}
+              </select>
+            </div>
+            <button
+              type="submit"
+              disabled={creating}
+              className="rounded-md px-3 py-1.5 text-[12px] font-semibold"
+              style={{ background: 'var(--cobalt)', color: 'var(--text-inverse)', opacity: creating ? 0.7 : 1 }}
+            >
+              {creating ? 'Registering…' : 'Register'}
+            </button>
+          </form>
+          {createError && <p className="text-[12px]" style={{ color: 'var(--red)' }}>{createError}</p>}
+        </div>
+      )}
+    </SectionCard>
+  )
+}
+
+// ---------------------------------------------------------------------------
 
 export default function SettingsPage() {
   const [form, setForm] = useState<AppSettings>(DEFAULTS)
@@ -240,6 +442,8 @@ export default function SettingsPage() {
                 <p className="text-[12px]" style={{ color: 'var(--text-dim)' }}>Unable to load integration status.</p>
               )}
             </SectionCard>
+
+            <WebhooksSection />
 
             {error && (
               <p className="mb-4 text-[12.5px]" style={{ color: 'var(--red)' }}>{error}</p>

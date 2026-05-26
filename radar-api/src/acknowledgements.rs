@@ -54,6 +54,24 @@ pub(crate) async fn create_acknowledgement(
     .execute(&pool)
     .await?;
 
+    // K-6: post GitHub status check if this acknowledgement is for a diff with a PR URL
+    if let Some(ref diff_id) = body.diff_id {
+        use sqlx::Row;
+        let pr_url: Option<String> = sqlx::query("SELECT pr_url FROM diff WHERE id = ?")
+            .bind(diff_id)
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.try_get("pr_url").ok());
+
+        if let Some(Some(url)) = pr_url.map(Some) {
+            tokio::spawn(async move {
+                crate::notifications::post_github_status_acknowledged(&url).await;
+            });
+        }
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(json!({

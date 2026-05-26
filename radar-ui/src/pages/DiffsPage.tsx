@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { GitCompare, Plus } from 'lucide-react'
+import { GitCompare, Plus, Rows } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
 import CompareSpecsPanel from '../components/CompareSpecsPanel'
+import BatchComparePanel from '../components/BatchComparePanel'
 
 interface DiffSummary {
   id: string
@@ -127,6 +128,7 @@ export default function DiffsPage() {
   const [error, setError] = useState<string | null>(null)
   // Auto-open when navigated here with ?compare=open (e.g. from FirstRunBanner)
   const [showCompare, setShowCompare] = useState(searchParams.get('compare') === 'open')
+  const [showBatch, setShowBatch] = useState(false)
 
   useEffect(() => {
     fetch('/v1/diffs')
@@ -148,9 +150,14 @@ export default function DiffsPage() {
       />
 
       <div className="px-14 py-8 flex flex-col gap-6">
-        {/* Compare panel — toggled by the button in the toolbar */}
+        {/* Single compare panel */}
         {showCompare && (
           <CompareSpecsPanel onClose={() => setShowCompare(false)} />
+        )}
+
+        {/* Batch compare panel */}
+        {showBatch && (
+          <BatchComparePanel onClose={() => setShowBatch(false)} />
         )}
 
         <div
@@ -161,16 +168,28 @@ export default function DiffsPage() {
             <p className="text-[11px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
               {loading ? 'Loading…' : `${rows.length} diff${rows.length !== 1 ? 's' : ''}`}
             </p>
-            {!showCompare && (
-              <button
-                onClick={() => setShowCompare(true)}
-                className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
-                style={{ borderColor: 'var(--border-mid)', color: 'var(--text-2)' }}
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Compare Specs
-              </button>
-            )}
+            <div className="flex items-center gap-2">
+              {!showCompare && (
+                <button
+                  onClick={() => { setShowCompare(true); setShowBatch(false) }}
+                  className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
+                  style={{ borderColor: 'var(--border-mid)', color: 'var(--text-2)' }}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Compare Specs
+                </button>
+              )}
+              {!showBatch && (
+                <button
+                  onClick={() => { setShowBatch(true); setShowCompare(false) }}
+                  className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
+                  style={{ borderColor: 'var(--border-mid)', color: 'var(--text-2)' }}
+                >
+                  <Rows className="h-3.5 w-3.5" />
+                  Batch Compare
+                </button>
+              )}
+            </div>
           </div>
           {error ? (
             <div className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>

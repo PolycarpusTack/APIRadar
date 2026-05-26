@@ -257,6 +257,29 @@ enum Commands {
         action: RuleAction,
     },
 
+    /// Compare multiple spec pairs listed in a CSV file.
+    Batch {
+        /// Path to CSV file. Required columns: base, head. Optional: label, format, service_id.
+        #[arg(long)]
+        csv: PathBuf,
+
+        /// Emit machine-readable JSON output.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// Disable ANSI colour codes in output.
+        #[arg(long, default_value_t = false)]
+        no_color: bool,
+
+        /// Base URL of the radar-api server (optional; enables posting results).
+        #[arg(long, env = "RADAR_API_URL")]
+        api_url: Option<String>,
+
+        /// Optional bearer token.
+        #[arg(long, env = "RADAR_SERVICE_TOKEN")]
+        token: Option<String>,
+    },
+
     /// Print shell completion script to stdout.
     Completions {
         /// Shell to generate completions for: bash, zsh, fish, powershell, elvish.
@@ -652,6 +675,156 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Batch { csv, json, no_color, api_url, token } => {
+            let content = std::fs::read_to_string(&csv)
+                .map_err(|e| anyhow::anyhow!("cannot read '{}': {e}", csv.display()))?;
+            let rows = parse_batch_csv(&content)?;
+            if rows.is_empty() {
+                anyhow::bail!(
+                    "No valid rows found in '{}'. CSV must have 'base' and 'head' columns.",
+                    csv.display()
+                );
+            }
+
+            let use_color = !no_color && std::env::var("NO_COLOR").is_err();
+
+            struct RowResult {
+                label: String,
+                total: usize,
+                breaking: usize,
+                diff_id: Option<String>,
+                error: Option<String>,
+            }
+            let mut row_results: Vec<RowResult> = Vec::new();
+
+            for row in &rows {
+                let base_content = match std::fs::read_to_string(&row.base) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("[{}] Error reading '{}': {e}", row.label, row.base);
+                        row_results.push(RowResult {
+                            label: row.label.clone(), total: 0, breaking: 0,
+                            diff_id: None,
+                            error: Some(format!("cannot read '{}': {e}", row.base)),
+                        });
+                        continue;
+                    }
+                };
+                let head_content = match std::fs::read_to_string(&row.head) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("[{}] Error reading '{}': {e}", row.label, row.head);
+                        row_results.push(RowResult {
+                            label: row.label.clone(), total: 0, breaking: 0,
+                            diff_id: None,
+                            error: Some(format!("cannot read '{}': {e}", row.head)),
+                        });
+                        continue;
+                    }
+                };
+
+                let detected = row.format.clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| detect_format(&row.head));
+
+                let changes_result = match detected.as_str() {
+                    "graphql" | "gql" => radar_core::graphql::parse_graphql(&base_content)
+                        .and_then(|bm| radar_core::graphql::parse_graphql(&head_content)
+                            .map(|hm| radar_core::graphql::diff_graphql(&bm, &hm))),
+                    "protobuf" | "proto" => radar_core::proto::parse_proto(&base_content)
+                        .and_then(|bs| radar_core::proto::parse_proto(&head_content)
+                            .map(|hs| radar_core::proto::diff_proto(&bs, &hs))),
+                    _ => radar_core::diff::parse_openapi(&base_content)
+                        .and_then(|bp| radar_core::diff::parse_openapi(&head_content)
+                            .map(|hp| radar_core::diff::diff_openapi(&bp, &hp))),
+                };
+
+                let changes = match changes_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("[{}] Parse error: {e}", row.label);
+                        row_results.push(RowResult {
+                            label: row.label.clone(), total: 0, breaking: 0,
+                            diff_id: None,
+                            error: Some(e.to_string()),
+                        });
+                        continue;
+                    }
+                };
+
+                let breaking = changes.iter()
+                    .filter(|c| c.severity == radar_core::models::Severity::Breaking)
+                    .count();
+
+                if !json {
+                    println!("\n── {} ─────────────────────────", row.label);
+                    render::print_table(&changes, use_color);
+                }
+
+                // Post to API if service_id is provided for this row.
+                let mut posted_diff_id: Option<String> = None;
+                if let (Some(ref url), Some(ref svc_id)) = (&api_url, &row.service_id) {
+                    match api_client::post_diff(
+                        url,
+                        api_client::PostDiffParams {
+                            service_id: svc_id,
+                            service_name: &row.label,
+                            from_ref: &row.base,
+                            to_ref: &row.head,
+                            pr_url: None,
+                            spec_format: &detected,
+                            changes: &changes,
+                            token: token.as_deref(),
+                        },
+                    ).await {
+                        Ok(diff_id) => {
+                            if !json { println!("  Diff posted: {diff_id}"); }
+                            posted_diff_id = Some(diff_id);
+                        }
+                        Err(e) => eprintln!("  Warning: failed to post diff: {e}"),
+                    }
+                }
+
+                row_results.push(RowResult {
+                    label: row.label.clone(),
+                    total: changes.len(),
+                    breaking,
+                    diff_id: posted_diff_id,
+                    error: None,
+                });
+            }
+
+            if json {
+                let out: Vec<serde_json::Value> = row_results.iter().map(|r| {
+                    serde_json::json!({
+                        "label":    r.label,
+                        "total":    r.total,
+                        "breaking": r.breaking,
+                        "diff_id":  r.diff_id,
+                        "error":    r.error,
+                    })
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                let sep = "─".repeat(78);
+                println!("\n{sep}");
+                println!("Batch Summary — {} comparison(s)", row_results.len());
+                println!("{sep}");
+                println!("{:<42} {:>7} {:>10}  Status", "Label", "Changes", "Breaking");
+                println!("{sep}");
+                for r in &row_results {
+                    let status = if r.error.is_some() { "ERROR" }
+                        else if r.breaking > 0 { "BREAKING" }
+                        else { "PASS" };
+                    println!("{:<42} {:>7} {:>10}  {}", r.label, r.total, r.breaking, status);
+                }
+                println!("{sep}");
+            }
+
+            let has_failures = row_results.iter().any(|r| r.breaking > 0 || r.error.is_some());
+            if has_failures { std::process::exit(1); }
+        }
+
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "radar", &mut std::io::stdout());
         }
@@ -913,4 +1086,69 @@ fn detect_format(path: &str) -> String {
         "proto" => "protobuf".to_string(),
         _ => "openapi".to_string(),
     }
+}
+
+// ── Batch CSV helpers ─────────────────────────────────────────────────────────
+
+struct BatchCsvRow {
+    label: String,
+    base: String,
+    head: String,
+    format: Option<String>,
+    service_id: Option<String>,
+}
+
+fn parse_batch_csv(content: &str) -> anyhow::Result<Vec<BatchCsvRow>> {
+    let lines: Vec<&str> = content.lines()
+        .filter(|l| { let t = l.trim(); !t.is_empty() && !t.starts_with('#') })
+        .collect();
+
+    if lines.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let headers: Vec<String> = split_csv_line(lines[0])
+        .into_iter()
+        .map(|h| h.to_lowercase())
+        .collect();
+
+    let mut rows = Vec::new();
+    for &line in &lines[1..] {
+        let cols = split_csv_line(line);
+
+        let get = |name: &str| -> Option<String> {
+            headers.iter().position(|h| h == name)
+                .and_then(|i| cols.get(i))
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim().to_owned())
+        };
+
+        let base = get("base").unwrap_or_default();
+        let head = get("head").unwrap_or_default();
+        if base.is_empty() || head.is_empty() { continue; }
+
+        rows.push(BatchCsvRow {
+            label: get("label").unwrap_or_else(|| base.clone()),
+            base,
+            head,
+            format: get("format"),
+            service_id: get("service_id"),
+        });
+    }
+    Ok(rows)
+}
+
+fn split_csv_line(line: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => { result.push(current.trim().to_owned()); current = String::new(); }
+            _ => current.push(ch),
+        }
+    }
+    result.push(current.trim().to_owned());
+    result
 }
