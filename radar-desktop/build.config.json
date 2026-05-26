@@ -1,7 +1,6 @@
 {
   "appId": "com.radarmonitor.desktop",
   "productName": "API Radar",
-  "icon": "resources/icon.ico",
   "directories": {
     "output": "dist",
     "buildResources": "resources"
@@ -19,7 +18,7 @@
     ],
     "extraResources": [
       {
-        "from": "../../target/release/radar-api.exe",
+        "from": "../target/release/radar-api.exe",
         "to": "radar-api.exe"
       }
     ]
@@ -34,7 +33,7 @@
     "category": "public.app-category.developer-tools",
     "extraResources": [
       {
-        "from": "../../target/release/radar-api",
+        "from": "../target/release/radar-api",
         "to": "radar-api"
       }
     ]
@@ -49,7 +48,7 @@
     "category": "Development",
     "extraResources": [
       {
-        "from": "../../target/release/radar-api",
+        "from": "../target/release/radar-api",
         "to": "radar-api"
       }
     ]

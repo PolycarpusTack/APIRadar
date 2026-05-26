@@ -271,9 +271,12 @@ function closeSplash(splash: BrowserWindow): void {
 function createWindow(): BrowserWindow {
   const preloadPath = join(__dirname, '../preload/index.js')
 
+  // resources/icon.ico is used for the installer; runtime taskbar icon falls back
+  // to the source asset in dev. A valid multi-size ICO (must include 256x256) must
+  // be placed at radar-desktop/resources/icon.ico before running pnpm dist.
   const iconPath = app.isPackaged
     ? join(process.resourcesPath ?? '', 'icon.ico')
-    : join(__dirname, '..', '..', '..', 'radar-desktop', 'resources', 'icon.ico')
+    : join(__dirname, '..', '..', '..', 'docs', 'APIRadar_Icon.ico')
 
   const win = new BrowserWindow({
     width: 1280,

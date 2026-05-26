@@ -9,7 +9,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "dist": "electron-builder"
+    "dist": "electron-builder --config build.config.json"
   },
   "dependencies": {
     "radar-ui": "workspace:*",
