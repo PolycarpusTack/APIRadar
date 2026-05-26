@@ -388,6 +388,16 @@ async fn dispatch_row(
         };
     }
 
+    const ALLOWED_METHODS: [&str; 6] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"];
+    let method_upper = template.method.to_uppercase();
+    if !ALLOWED_METHODS.contains(&method_upper.as_str()) {
+        return RowOutcome {
+            row_number, http_status: None, duration_ms: 0,
+            error: Some(format!("unsupported HTTP method: {}", template.method)),
+            url: resolved_url, response_body: None,
+        };
+    }
+
     let resolved_body = resolve_vars(&template.body, row_obj);
     let start = std::time::Instant::now();
     let mut last_http_status: Option<i64> = None;
@@ -478,7 +488,7 @@ fn build_request(
         "PATCH"  => client.patch(url),
         "DELETE" => client.delete(url),
         "HEAD"   => client.head(url),
-        _        => client.get(url),
+        _        => client.get(url), // unreachable after dispatch_row method guard
     };
     for h in headers {
         let key = resolve_vars(&h.key, row);
