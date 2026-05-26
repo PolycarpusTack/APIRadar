@@ -4,7 +4,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::auth::JwtClaims;
 use crate::errors::ApiError;
+use crate::utils::is_ssrf_blocked;
 use crate::webhooks::dispatch_diff_event;
 
 // ---------------------------------------------------------------------------
@@ -78,6 +79,11 @@ pub(crate) async fn create_scan(
     }
     if body.spec_url.is_empty() {
         return Err(ApiError::BadRequest("spec_url is required".into()));
+    }
+    if is_ssrf_blocked(&body.spec_url) {
+        return Err(ApiError::BadRequest(
+            "spec_url must be a reachable HTTPS endpoint outside private address space".into(),
+        ));
     }
 
     // Upsert on (org_id, service_id, spec_url)
@@ -199,18 +205,18 @@ pub(crate) fn start_scan_scheduler(pool: sqlx::AnyPool) {
 }
 
 async fn run_due_scans(pool: sqlx::AnyPool) {
-    // Due = active scans where last_run_at is NULL or older than interval_minutes
+    let now = Utc::now();
+
+    // Fetch all active scans; due-time arithmetic is done in Rust to avoid
+    // SQLite-only datetime() syntax (datetime(last_run_at, '+N minutes') is not
+    // valid on PostgreSQL — the production deployment target).
     let rows = match sqlx::query(
-        r#"SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_spec_hash
-           FROM scheduled_scan
-           WHERE active = 1
-             AND (
-               last_run_at IS NULL
-               OR datetime(last_run_at, '+' || interval_minutes || ' minutes') <= datetime('now')
-             )"#,
+        "SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_run_at, last_spec_hash
+         FROM scheduled_scan WHERE active = 1",
     )
     .fetch_all(&pool)
-    .await {
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("scan scheduler: query failed: {e}");
@@ -219,6 +225,21 @@ async fn run_due_scans(pool: sqlx::AnyPool) {
     };
 
     for row in rows {
+        let interval_minutes: i32 = row.get("interval_minutes");
+        let last_run_at: Option<String> = row.try_get("last_run_at").ok().flatten();
+
+        let is_due = match &last_run_at {
+            None => true,
+            Some(ts) => match ts.parse::<DateTime<Utc>>() {
+                Ok(last) => (now - last).num_minutes() >= i64::from(interval_minutes),
+                Err(_) => true, // unparseable timestamp — treat as overdue
+            },
+        };
+
+        if !is_due {
+            continue;
+        }
+
         let pool2 = pool.clone();
         let id: String = row.get("id");
         let org_id: String = row.get("org_id");
@@ -243,6 +264,13 @@ async fn execute_scan(
 ) {
     let now = Utc::now().to_rfc3339();
 
+    // Defense-in-depth SSRF check — spec_url is also validated at scan creation time,
+    // but we re-check here in case records were inserted before the guard was added.
+    if is_ssrf_blocked(&spec_url) {
+        tracing::warn!("scan {scan_id}: SSRF-blocked spec_url — skipping execution");
+        return;
+    }
+
     // Mark run started
     let _ = sqlx::query("UPDATE scheduled_scan SET last_run_at = ? WHERE id = ?")
         .bind(&now)
@@ -250,7 +278,6 @@ async fn execute_scan(
         .execute(&pool)
         .await;
 
-    // Fetch spec (SSRF protection: only allow https, block RFC1918 via SSRF check)
     let http = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .user_agent("radar-api/scheduled-scan")
@@ -483,8 +510,9 @@ pub(crate) async fn run_history(
     org: Option<axum::extract::Extension<JwtClaims>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    // NULLS LAST is PostgreSQL-only syntax; use CASE to sort nulls last on both SQLite and PostgreSQL.
     let rows = sqlx::query(
-        "SELECT id, service_id, spec_url, last_run_at, last_spec_hash FROM scheduled_scan WHERE org_id = ? ORDER BY last_run_at DESC NULLS LAST",
+        "SELECT id, service_id, spec_url, last_run_at, last_spec_hash FROM scheduled_scan WHERE org_id = ? ORDER BY CASE WHEN last_run_at IS NULL THEN 1 ELSE 0 END ASC, last_run_at DESC",
     )
     .bind(&org_id)
     .fetch_all(&pool)

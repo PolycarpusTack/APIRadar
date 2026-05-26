@@ -14,53 +14,7 @@ use uuid::Uuid;
 
 use crate::auth::JwtClaims;
 use crate::errors::ApiError;
-
-// ---------------------------------------------------------------------------
-// SSRF protection — block RFC 1918 + loopback + link-local
-// ---------------------------------------------------------------------------
-
-fn is_ssrf_blocked(url_str: &str) -> bool {
-    let Ok(url) = url::Url::parse(url_str) else {
-        return true;
-    };
-    if url.scheme() != "https" {
-        return true;
-    }
-    let Some(host) = url.host_str() else {
-        return true;
-    };
-    // Resolve host to IP; if it fails block it (fail-safe)
-    use std::net::ToSocketAddrs;
-    let addrs = match (host, 443u16).to_socket_addrs() {
-        Ok(a) => a,
-        Err(_) => return true,
-    };
-    for addr in addrs {
-        if is_rfc1918_or_loopback(addr.ip()) {
-            return true;
-        }
-    }
-    false
-}
-
-fn is_rfc1918_or_loopback(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let oct = v4.octets();
-            // 10.0.0.0/8
-            oct[0] == 10
-            // 172.16.0.0/12
-            || (oct[0] == 172 && (oct[1] & 0xf0) == 16)
-            // 192.168.0.0/16
-            || (oct[0] == 192 && oct[1] == 168)
-            // 127.0.0.0/8
-            || oct[0] == 127
-            // 169.254.0.0/16 link-local
-            || (oct[0] == 169 && oct[1] == 254)
-        }
-        std::net::IpAddr::V6(v6) => v6.is_loopback(),
-    }
-}
+use crate::utils::is_ssrf_blocked;
 
 // ---------------------------------------------------------------------------
 // HMAC-SHA256 payload signing (ADR-K-2)
@@ -108,7 +62,9 @@ struct WebhookResponse {
 }
 
 fn mask_secret(secret: &str, reveal: bool) -> (Option<String>, String) {
-    let hint = format!("{}****", &secret[..secret.len().min(4)]);
+    // Use char_indices to avoid panicking on multi-byte UTF-8 characters.
+    let boundary = secret.char_indices().nth(4).map(|(i, _)| i).unwrap_or(secret.len());
+    let hint = format!("{}****", &secret[..boundary]);
     if reveal {
         (Some(secret.to_string()), hint)
     } else {
@@ -363,9 +319,18 @@ pub(crate) async fn dispatch_diff_event(pool: sqlx::AnyPool, diff_id: String, or
 }
 
 async fn build_diff_payload(pool: &sqlx::AnyPool, diff_id: &str) -> anyhow::Result<serde_json::Value> {
+    // diff has no service_id or change counts directly — join through spec_version → service
+    // and aggregate change counts from the change table (portable SQL, no dialect-specific syntax).
     let row = sqlx::query(
-        "SELECT d.id, d.service_id, d.created_at, d.breaking_change_count, d.total_change_count, s.name as service_name
-         FROM diff d JOIN service s ON s.id = d.service_id WHERE d.id = ?",
+        "SELECT d.id, d.created_at, sv.service_id, s.name as service_name,
+                COALESCE(SUM(CASE WHEN c.severity = 'breaking' THEN 1 ELSE 0 END), 0) as breaking_change_count,
+                COUNT(c.id) as total_change_count
+         FROM diff d
+         JOIN spec_version sv ON sv.id = d.to_version
+         JOIN service s ON s.id = sv.service_id
+         LEFT JOIN change c ON c.diff_id = d.id
+         WHERE d.id = ?
+         GROUP BY d.id, d.created_at, sv.service_id, s.name",
     )
     .bind(diff_id)
     .fetch_one(pool)
@@ -376,8 +341,8 @@ async fn build_diff_payload(pool: &sqlx::AnyPool, diff_id: &str) -> anyhow::Resu
         "diff_id": row.get::<String, _>("id"),
         "service_id": row.get::<String, _>("service_id"),
         "service_name": row.get::<String, _>("service_name"),
-        "breaking_count": row.get::<i32, _>("breaking_change_count"),
-        "changes_count": row.get::<i32, _>("total_change_count"),
+        "breaking_count": row.get::<i64, _>("breaking_change_count"),
+        "changes_count": row.get::<i64, _>("total_change_count"),
         "created_at": row.get::<String, _>("created_at"),
     }))
 }

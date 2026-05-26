@@ -1,6 +1,43 @@
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+// ---------------------------------------------------------------------------
+// SSRF protection — shared guard for webhooks and scheduled scans
+// ---------------------------------------------------------------------------
+
+/// Returns true if the URL must be blocked (non-HTTPS, private address space, or unresolvable).
+/// Shared by webhook creation and scheduled-scan registration/execution.
+pub(crate) fn is_ssrf_blocked(url_str: &str) -> bool {
+    let Ok(url) = url::Url::parse(url_str) else {
+        return true;
+    };
+    if url.scheme() != "https" {
+        return true;
+    }
+    let Some(host) = url.host_str() else {
+        return true;
+    };
+    use std::net::ToSocketAddrs;
+    match (host, 443u16).to_socket_addrs() {
+        Ok(addrs) => addrs.into_iter().any(|a| is_rfc1918_or_loopback(a.ip())),
+        Err(_) => true, // fail-safe: block if DNS resolution fails
+    }
+}
+
+fn is_rfc1918_or_loopback(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let oct = v4.octets();
+            oct[0] == 10                                         // 10.0.0.0/8
+            || (oct[0] == 172 && (oct[1] & 0xf0) == 16)         // 172.16.0.0/12
+            || (oct[0] == 192 && oct[1] == 168)                  // 192.168.0.0/16
+            || oct[0] == 127                                     // 127.0.0.0/8
+            || (oct[0] == 169 && oct[1] == 254)                  // 169.254.0.0/16 link-local
+        }
+        std::net::IpAddr::V6(v6) => v6.is_loopback(),
+    }
+}
+
 /// Compute a deterministic evidence ID for collection file evidence.
 /// Stable across re-scans and server restarts → enables idempotent insert.
 pub(crate) fn collection_evidence_id(

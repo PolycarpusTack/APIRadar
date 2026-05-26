@@ -68,6 +68,10 @@ struct OidcDiscovery {
     token_endpoint: String,
     #[serde(default)]
     userinfo_endpoint: Option<String>,
+    /// Used to verify id_token signature when no userinfo_endpoint is available.
+    /// Per OIDC Core §3.1.3.7, id_token signature MUST be verified before trusting any claim.
+    #[serde(default)]
+    jwks_uri: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -143,15 +147,6 @@ fn urlencoding_encode(s: &str) -> String {
     utf8_percent_encode(s, UNRESERVED).to_string()
 }
 
-fn base64_decode_url(s: &str) -> Option<Vec<u8>> {
-    use base64::Engine as _;
-    // Re-pad to a multiple of 4 bytes; convert URL-safe alphabet to standard.
-    let pad = (4 - s.len() % 4) % 4;
-    let padded = format!("{}{}", s, "=".repeat(pad));
-    base64::engine::general_purpose::URL_SAFE
-        .decode(padded)
-        .ok()
-}
 
 /// GET /auth/login — redirect to OIDC provider authorization endpoint.
 pub(crate) async fn oidc_login() -> Response {
@@ -261,17 +256,51 @@ pub(crate) async fn oidc_callback(Query(params): Query<HashMap<String, String>>,
             Err(_) => OidcUserInfo::default(),
         }
     } else {
-        // Try to decode claims from id_token JWT payload (middle segment).
-        // We only extract claims from the payload — no signature verification needed here
-        // since the session JWT we issue is what we sign and verify for auth.
-        token_resp.id_token.as_deref()
-            .and_then(|t| t.split('.').nth(1))
-            .and_then(|b| {
-                let padded = format!("{b}{}", "=".repeat((4 - b.len() % 4) % 4));
-                base64_decode_url(&padded)
-                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            })
-            .unwrap_or_default()
+        // No userinfo endpoint — must verify id_token signature via JWKS before trusting
+        // any claim. Per OIDC Core §3.1.3.7, skipping signature verification allows an
+        // attacker to inject arbitrary org_id claims and bypass tenant isolation.
+        let id_token_str = match token_resp.id_token.as_deref().filter(|t| !t.is_empty()) {
+            Some(t) => t,
+            None => return (StatusCode::BAD_GATEWAY, Json(json!({"error": "provider returned no id_token and no userinfo endpoint"}))).into_response(),
+        };
+        let jwks_uri = match disc.jwks_uri.as_deref().filter(|u| !u.is_empty()) {
+            Some(u) => u.to_string(),
+            None => return (StatusCode::BAD_GATEWAY, Json(json!({"error": "provider has no userinfo_endpoint and no jwks_uri — cannot verify id_token"}))).into_response(),
+        };
+
+        let header = match jsonwebtoken::decode_header(id_token_str) {
+            Ok(h) => h,
+            Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("id_token header invalid: {e}")}))).into_response(),
+        };
+
+        let jwks: jsonwebtoken::jwk::JwkSet = match client.get(&jwks_uri).send().await {
+            Ok(r) if r.status().is_success() => match r.json().await {
+                Ok(j) => j,
+                Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("jwks parse failed: {e}")}))).into_response(),
+            },
+            Ok(r) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("jwks fetch returned HTTP {}", r.status())}))).into_response(),
+            Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("jwks fetch failed: {e}")}))).into_response(),
+        };
+
+        let kid = header.kid.as_deref().unwrap_or("");
+        let jwk = match jwks.find(kid) {
+            Some(j) => j,
+            None => return (StatusCode::BAD_GATEWAY, Json(json!({"error": "no JWK matching id_token kid"}))).into_response(),
+        };
+
+        let decoding_key = match jsonwebtoken::DecodingKey::from_jwk(jwk) {
+            Ok(k) => k,
+            Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("jwk key load failed: {e}")}))).into_response(),
+        };
+
+        let mut validation = jsonwebtoken::Validation::new(header.alg);
+        validation.set_audience(&[cfg.client_id.as_str()]);
+        validation.validate_exp = true;
+
+        match jsonwebtoken::decode::<OidcUserInfo>(id_token_str, &decoding_key, &validation) {
+            Ok(data) => data.claims,
+            Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("id_token verification failed: {e}")}))).into_response(),
+        }
     };
 
     // Derive org_id from configured claim
