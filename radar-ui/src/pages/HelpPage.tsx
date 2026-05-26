@@ -412,9 +412,15 @@ function BeginnersGuide() {
               colour-coded by severity.
             </p>
             <p>
-              Click any row to open the detail view: you'll see a timeline chart, the exact list of
-              changes (with field paths like <em>"user.address.postalCode"</em>), and which consumers
-              are in the blast radius.
+              Click any row to open the detail view: you'll see the exact list of changes (with field paths
+              like <em>"user.address.postalCode"</em>), which consumers are in the blast radius, and a
+              <strong style={{ color: 'var(--text-1)' }}> Generate Release Notes</strong> button that
+              instantly produces a structured Markdown changelog from the stored changes.
+            </p>
+            <p>
+              The <strong style={{ color: 'var(--text-1)' }}>Compare Specs</strong> button (top-right toolbar)
+              opens a side-by-side editor where you can paste or upload two spec files and run a diff
+              without needing the CLI at all.
             </p>
             <Callout variant="analogy">
               A Diff is like a "track changes" view in Word — except instead of paragraphs, you're
@@ -441,9 +447,11 @@ function BeginnersGuide() {
               "these three teams will be broken on Monday."
             </p>
             <p>
-              The consumer detail page shows which fields each consumer has been seen accessing —
-              and the last time they did. That timestamp is what determines whether they're "active"
-              and therefore inside the blast radius.
+              You can register a consumer directly from this page — click
+              <strong style={{ color: 'var(--text-1)' }}> Register Consumer</strong>, fill in the name,
+              team, and contact email, and subscribe to one or more services. No CLI needed.
+              The consumer detail page then shows which fields each consumer has been seen accessing
+              and the last time they did.
             </p>
             <Callout variant="tip">
               Even one registered consumer makes the tool dramatically more useful. Start with your most
@@ -451,15 +459,18 @@ function BeginnersGuide() {
             </Callout>
           </TourStop>
 
-          <TourStop icon={FileText} page="Release Notes" badge="Docs & Demo" tagline="AI-written changelogs">
+          <TourStop icon={FileText} page="Release Notes" badge="Docs & Demo" tagline="Auto-generated changelogs">
             <p>
-              After a diff is run, the CLI can ask an AI to write human-readable release notes explaining
-              what changed and why it matters — with per-consumer migration guides.
-              This page shows all the release notes that have been stored.
+              After a diff is run, you can generate human-readable release notes in two ways:
+              click <strong style={{ color: 'var(--text-1)' }}>Generate Release Notes</strong> on
+              the Diff detail page for an instant Markdown summary, or use the CLI with
+              <code className="mx-1 text-[11.5px]" style={{ color: 'var(--teal)', fontFamily: 'var(--font-mono)' }}>radar explain</code>
+              to add AI-powered per-consumer migration guides.
             </p>
             <p>
-              Click a note to expand it. The Markdown content is formatted for engineers
-              who need to know exactly what to update in their code.
+              This page lists all stored release notes. Click a note to expand it and review the changes.
+              Use the status workflow (draft → reviewed → published) to track sign-off before communicating
+              changes to consumers.
             </p>
           </TourStop>
 
@@ -543,8 +554,13 @@ function BeginnersGuide() {
             <GuideStep n={2} emoji="📋" title="Register your first Service">
               <p>
                 Go to <strong style={{ color: 'var(--text-1)' }}>Services</strong> in the sidebar and click
-                "Add Service". Give it the name of the API you want to monitor (for example: "Payments API")
+                "Register Service". Give it the name of the API you want to monitor (for example: "Payments API")
                 and your team name. You'll get back a <em>Service ID</em> — copy it, you'll need it in a moment.
+              </p>
+              <p>
+                After saving, Radar shows a blue nudge bar:
+                <em style={{ color: 'var(--cobalt-mid)' }}> "Service registered. Ready to compare specs?"</em>
+                — click it to go straight to the Compare Specs panel with your new service pre-selected.
               </p>
               <Callout variant="question">
                 <p><strong>What is a Service ID?</strong></p>
@@ -557,29 +573,33 @@ function BeginnersGuide() {
 
             <GuideStep n={3} emoji="👥" title="Register your first Consumer">
               <p>
-                Go to <strong style={{ color: 'var(--text-1)' }}>Consumers</strong> and click "Add Consumer".
-                A consumer is another service that <em>calls</em> the API you just registered.
-                For example, if "Payments API" is used by the "Checkout App", add "Checkout App" as a consumer
-                and subscribe it to "Payments API".
+                Go to <strong style={{ color: 'var(--text-1)' }}>Consumers</strong> and click
+                "Register Consumer". Fill in the name, owner team, and contact email. You can optionally
+                enter a repository URL. Then subscribe the consumer to your new service using the pill buttons.
               </p>
               <p>
-                Once added, the blast radius on any future diff will automatically include Checkout App.
+                Once added, the blast radius on any future diff will automatically include this consumer.
+                No CLI required for this step.
               </p>
             </GuideStep>
 
             <GuideStep n={4} emoji="🔍" title="Run your first diff">
               <p>
-                This is where the magic happens. Ask your developer to run:
+                You have two options:
               </p>
+              <p className="font-medium" style={{ color: 'var(--text-1)' }}>Option A — in the browser (no CLI needed):</p>
+              <p>
+                Go to <strong style={{ color: 'var(--text-1)' }}>Diffs</strong> and click the
+                <strong style={{ color: 'var(--text-1)' }}> Compare Specs</strong> button in the toolbar.
+                Paste or upload your "before" spec in the left panel and the "after" spec in the right panel.
+                Click <em>Compare Specs</em> — Radar stores the diff and takes you straight to the detail view.
+              </p>
+              <p className="font-medium mt-2" style={{ color: 'var(--text-1)' }}>Option B — via the CLI (for automation):</p>
               <Block>{`radar check \\
   --base old-openapi.yaml \\
   --head new-openapi.yaml \\
   --service-id <your-service-id> \\
   --api-url http://localhost:8081`}</Block>
-              <p>
-                Then go to the <strong style={{ color: 'var(--text-1)' }}>Diffs</strong> page.
-                You'll see a new row appear. Click it to see exactly what changed.
-              </p>
               <Callout variant="analogy">
                 Running a diff is like asking "what's different between the menu from last week and today's menu?"
                 Radar reads both spec files and produces a structured, colour-coded answer.
@@ -588,13 +608,19 @@ function BeginnersGuide() {
 
             <GuideStep n={5} emoji="📝" title="Generate release notes">
               <p>
-                On the Diff detail page, you'll see a "Generate Release Notes" option (or ask your developer
-                to run <Code>radar explain --diff-id … --release-notes</Code>).
+                On the Diff detail page, click the
+                <strong style={{ color: 'var(--cobalt-mid)' }}> Generate Release Notes</strong> button
+                (sparkle icon, top-right of the header). Radar instantly produces a structured Markdown
+                document: a summary, breaking changes with migration advice, risky changes, and safe changes.
+                The result is saved to the <strong style={{ color: 'var(--text-1)' }}>Release Notes</strong> page
+                as a draft.
               </p>
               <p>
-                An AI reads the changes and writes a plain-English summary: what broke, what was added,
-                and a migration guide for every registered consumer. The result is saved to the
-                <strong style={{ color: 'var(--text-1)' }}> Release Notes</strong> page automatically.
+                For AI-enhanced per-consumer migration guides, use the CLI:
+                <code className="mx-1 text-[11px]" style={{ color: 'var(--teal)', fontFamily: 'var(--font-mono)' }}>
+                  radar explain --diff-id … --migration-guide
+                </code>
+                (requires <Code>ANTHROPIC_API_KEY</Code> or another AI provider).
               </p>
             </GuideStep>
 

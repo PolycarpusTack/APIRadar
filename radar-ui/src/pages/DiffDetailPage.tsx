@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, ExternalLink, CheckCircle, Plus, X } from 'lucide-react'
+import { ArrowLeft, ExternalLink, CheckCircle, Plus, X, Sparkles } from 'lucide-react'
 import Badge from '../components/Badge'
+import TermTooltip from '../components/TermTooltip'
 
 interface DiffChange {
   path: string
@@ -117,6 +118,9 @@ export default function DiffDetailPage() {
   const [ackForm, setAckForm] = useState<AckFormState>(DEFAULT_ACK_FORM)
   const [submittingAck, setSubmittingAck] = useState(false)
   const [ackError, setAckError] = useState<string | null>(null)
+  const [generatingNote, setGeneratingNote] = useState(false)
+  const [generatedNote, setGeneratedNote] = useState<string | null>(null)
+  const [noteError, setNoteError] = useState<string | null>(null)
 
   function loadAcks() {
     if (!id) return
@@ -173,6 +177,22 @@ export default function DiffDetailPage() {
       })
       .catch((e: Error) => setAckError(e.message))
       .finally(() => setSubmittingAck(false))
+  }
+
+  async function generateReleaseNote() {
+    if (!id) return
+    setGeneratingNote(true)
+    setNoteError(null)
+    try {
+      const resp = await fetch(`/v1/diffs/${id}/release-notes/generate`, { method: 'POST' })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const data = await resp.json() as { content: string }
+      setGeneratedNote(data.content)
+    } catch (e) {
+      setNoteError((e as Error).message)
+    } finally {
+      setGeneratingNote(false)
+    }
   }
 
   if (loading) {
@@ -237,18 +257,31 @@ export default function DiffDetailPage() {
               {formatDate(diff.created_at)}
             </p>
           </div>
-          {diff.pr_url && (
-            <a
-              href={diff.pr_url}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
-              style={{ borderColor: 'var(--border-mid)', color: 'var(--text-2)' }}
-            >
-              <ExternalLink className="h-3.5 w-3.5" />
-              Pull Request
-            </a>
-          )}
+          <div className="flex items-center gap-2">
+            {diff.pr_url && (
+              <a
+                href={diff.pr_url}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
+                style={{ borderColor: 'var(--border-mid)', color: 'var(--text-2)' }}
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                Pull Request
+              </a>
+            )}
+            {diff.changes.length > 0 && (
+              <button
+                onClick={generateReleaseNote}
+                disabled={generatingNote}
+                className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
+                style={{ borderColor: 'var(--cobalt-muted)', color: 'var(--cobalt-mid)' }}
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                {generatingNote ? 'Generating…' : 'Generate Release Notes'}
+              </button>
+            )}
+          </div>
         </div>
         <div className="flex gap-3">
           {breakingCount > 0 && <Badge variant="err">{breakingCount} breaking</Badge>}
@@ -304,8 +337,9 @@ export default function DiffDetailPage() {
 
         {/* Blast Radius table */}
         <section>
-          <p className="mb-3 text-[9.5px] font-semibold uppercase tracking-[1.2px]" style={{ color: 'var(--text-dim)' }}>
+          <p className="mb-3 flex items-center gap-1.5 text-[9.5px] font-semibold uppercase tracking-[1.2px]" style={{ color: 'var(--text-dim)' }}>
             Blast Radius — consumers at risk
+            <TermTooltip term="blast_radius" placement="top" />
           </p>
           <div className="overflow-hidden rounded-lg" style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
             {!blast || blast.entries.length === 0 ? (
@@ -325,7 +359,13 @@ export default function DiffDetailPage() {
                         {e.consumer.name}
                       </td>
                       <td className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]">
-                        <Badge variant={confidenceVariant(e.confidence)}>{e.confidence}</Badge>
+                        <span className="inline-flex items-center gap-1">
+                          <Badge variant={confidenceVariant(e.confidence)}>{e.confidence}</Badge>
+                          <TermTooltip
+                            term={`confidence_${e.confidence}` as 'confidence_high' | 'confidence_medium' | 'confidence_low'}
+                            placement="top"
+                          />
+                        </span>
                       </td>
                       <td
                         className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]"
@@ -487,6 +527,43 @@ export default function DiffDetailPage() {
             )}
           </div>
         </section>
+
+        {/* Generated release note */}
+        {(generatedNote || noteError) && (
+          <section>
+            <p className="mb-3 text-[9.5px] font-semibold uppercase tracking-[1.2px]" style={{ color: 'var(--text-dim)' }}>
+              Generated Release Notes
+            </p>
+            {noteError && (
+              <p className="text-[12.5px]" style={{ color: 'var(--red)' }}>{noteError}</p>
+            )}
+            {generatedNote && (
+              <div className="overflow-hidden rounded-lg" style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
+                <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '1px solid var(--border)' }}>
+                  <p className="text-[11px]" style={{ color: 'var(--text-3)', fontFamily: 'var(--font-mono)' }}>Markdown — saved as draft in Release Notes</p>
+                  <button
+                    onClick={() => navigate('/release-notes')}
+                    className="text-[11.5px] font-medium transition-opacity hover:opacity-70"
+                    style={{ color: 'var(--cobalt-mid)' }}
+                  >
+                    View all release notes →
+                  </button>
+                </div>
+                <pre
+                  className="overflow-x-auto p-4 text-[12px] leading-relaxed whitespace-pre-wrap"
+                  style={{
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--text-2)',
+                    maxHeight: '480px',
+                    overflowY: 'auto',
+                  }}
+                >
+                  {generatedNote}
+                </pre>
+              </div>
+            )}
+          </section>
+        )}
       </div>
     </div>
   )

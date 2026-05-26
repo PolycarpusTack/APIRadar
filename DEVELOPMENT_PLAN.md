@@ -1222,6 +1222,373 @@ _Every task must pass before the story is considered complete._
 
 ---
 
+## EPIC J — Non-Technical User Experience
+
+> **Mode:** DELIVERY
+> **Theme:** Close all CLI-only gaps in the dashboard so that a Product Manager, QA Lead, or Architect can perform the complete core workflow (register service → compare specs → view blast radius → acknowledge) without opening a terminal.
+> **Tracer bullet:** YES — J-1 (inline spec comparison) is the thinnest end-to-end slice that proves a non-technical user can produce a Diff entirely from the UI.
+> **Business value:** Enables non-engineering stakeholders to self-serve in the dashboard; expands the evaluator audience from platform engineers to PMs and QA leads; removes the CLI as a prerequisite for first-time evaluation.
+> **Risk:** `POST /v1/services/:id/diffs/compare` requires server-side spec parsing (Rust); if the spec is malformed the API must return a structured error the UI can display — error surface is larger than the CLI equivalent.
+> **SLO:** compare endpoint p95 < 8 s on specs ≤ 500 KB; UI interactions p95 < 300 ms
+> **Exit criteria:**
+> - A non-technical user can go from empty dashboard to viewing a Diff with blast-radius data without running any CLI command
+> - Consumer registration is available via UI form with no CLI fallback required
+> - Every page that uses "Blast Radius", "Evidence", "Confidence", or "Change Kind" shows an inline tooltip defining the term
+> - First-run banner visible when zero services exist; disappears after first service created
+> - All new UI paths covered by Vitest component tests; API endpoint covered by integration test
+
+---
+
+### Backlog Builder Readiness Decision
+
+**Health score: 8/9** — Business Context ✓, Architecture ✓, Data Models ✓, User Journeys ✓, APIs partial (compare endpoint is new). Proceed.
+
+**Critical gaps addressed before pull:**
+- Compare endpoint request/response contract must be pinned before J-1-T1 starts (defined in J-1 contract snapshot below)
+- Consumer form fields confirmed against existing `POST /v1/consumers` schema
+
+**Assumptions Ledger:**
+
+| # | Assumption | Impact | Flag |
+|---|---|---|---|
+| A-1 | `POST /v1/services/:id/diffs/compare` will reuse existing `parse_openapi`, `parse_graphql`, `parse_proto` functions in radar-api — no new parser work | High | Verify before J-1-T1 |
+| A-2 | Consumer subscriptions UI will use the existing `POST /v1/services/:id/subscriptions` endpoint unchanged | Med | — |
+| A-3 | Tooltip content is static (not fetched from server) — all definitions are hardcoded in the component | Low | — |
+| A-4 | First-run banner uses `GET /v1/services` empty response as the signal — no new endpoint needed | Low | — |
+| A-5 | Release notes generation calls existing `POST /v1/generate-tests` pattern — a similar `POST /v1/release-notes/generate` endpoint or equivalent already handles AI generation; if missing, J-6 adds it | Med | Verify at J-6 pull |
+
+**Domain Glossary additions (EPIC J):**
+
+| Term | Definition |
+|---|---|
+| **Compare Panel** | The UI component on the Diffs page that accepts two spec files and submits them for server-side comparison |
+| **Inline Spec Comparison** | The act of submitting two raw spec payloads directly to the API rather than via the CLI diff workflow |
+| **First-Run Banner** | A contextual guidance strip displayed when the service registry is empty, guiding the user toward creating their first service |
+| **Jargon Tooltip** | A `?`-icon popover attached to a technical term that displays a one-sentence plain-language definition without navigating away from the current page |
+
+---
+
+### Story J-1 · Inline Spec Comparison Panel *(Tracer Bullet)*
+
+> **Persona:** Product Manager evaluating the tool for the first time
+> **Value:** So that I can compare two API spec files and see which breaking changes would affect my consumers — without asking a developer to run a terminal command
+> **Priority:** P0 (tracer bullet; blocks J-3, J-5)
+> **Size:** L
+> **Dependencies:** None (new endpoint + new UI component, no upstream story required)
+> **INVEST:** I✓ N✓ V✓ E✓ S✓ T✓
+> **DoR status:** READY
+
+**Acceptance Criteria**
+
+```gherkin
+Given I am on the Diffs page and click "Compare specs"
+When the Compare Panel opens
+Then I see: a service selector dropdown, a spec format selector, a base-spec file picker/paste area, a head-spec file picker/paste area, and a "Run comparison" button
+
+Given I select a service, choose "OpenAPI", paste a valid v1 spec and a valid v2 spec
+When I click "Run comparison"
+Then a spinner appears and the button is disabled
+And the panel calls POST /v1/services/:id/diffs/compare
+And on success I am navigated to the new Diff detail page
+
+Given the head spec removes a field that exists in the base spec
+When the comparison completes
+Then the Diff detail page shows a Breaking Change row for that field
+
+Given I paste a malformed YAML string in either spec field
+When I click "Run comparison"
+Then the button remains disabled and an inline validation message reads "Not valid YAML / JSON"
+
+Given the API returns a 422 parse error
+When the comparison completes
+Then the panel shows the error message returned by the API without crashing
+
+Given no service exists yet
+When the Compare Panel opens
+Then the service selector shows a "No services yet — create one first" message with a link to the Services page
+```
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| J-1-T1 | FEATURE | `POST /v1/services/:id/diffs/compare` endpoint in radar-api — accepts `{base_spec: string, head_spec: string, spec_format: "openapi"\|"graphql"\|"proto"}`, parses both specs using existing parsers, computes diff, persists service + diff + changes rows, returns `{diff_id, changes_count, breaking_count}` | Sonnet | ≤ 3 500 |
+| J-1-T2 | FEATURE | `CompareSpecsPanel.tsx` — collapsible panel component: service dropdown (fetches `/v1/services`), spec format select, two file-picker + paste-area tabs per spec slot, client-side YAML/JSON validation before submit, loading state, error display | Sonnet | ≤ 3 000 |
+| J-1-T3 | FEATURE | Wire `CompareSpecsPanel` into `DiffsPage.tsx` — "Compare specs" button in page header opens panel; on success navigate to `/diffs/:id`; panel collapses on navigation | Sonnet | ≤ 1 500 |
+
+**Contract snapshot (`POST /v1/services/:id/diffs/compare`):**
+```
+Request:
+  POST /v1/services/{service_id}/diffs/compare
+  Content-Type: application/json
+  {
+    "base_spec":    "<raw YAML or JSON string>",
+    "head_spec":    "<raw YAML or JSON string>",
+    "spec_format":  "openapi" | "graphql" | "proto",
+    "base_ref":     "manual-upload",   // stored as git_ref; defaults to "manual-upload"
+    "head_ref":     "manual-upload"
+  }
+
+Response 201:
+  { "diff_id": "<uuid>", "changes_count": 5, "breaking_count": 2 }
+
+Response 422:
+  { "error": "parse_error", "detail": "<human-readable message>", "spec": "base"|"head" }
+```
+
+**TDD order:** write API integration test asserting 201 + diff persisted → implement handler → write panel component test asserting form state + submit call → implement component → green → refactor.
+
+**Feature flag:** `RADAR_INLINE_COMPARE_ENABLED` (default `true`; set `false` to hide panel in deployments where server-side spec parsing is too resource-intensive)
+
+**Unblocks:** J-3 (first-run wizard references Compare Panel), J-5 (post-create nudge links to Compare Panel)
+
+---
+
+### Story J-2 · Consumer Registration Form
+
+> **Persona:** QA Lead who wants to register their test suite as a consumer of the payments API
+> **Value:** So that I can register my team as a Consumer and appear in blast-radius reports without asking a developer to run `radar register` in a terminal
+> **Priority:** P0 (blocks J-3 step 2)
+> **Size:** S
+> **Dependencies:** None (backend endpoints exist; UI-only change)
+> **INVEST:** I✓ N✓ V✓ E✓ S✓ T✓
+> **DoR status:** READY
+
+**Acceptance Criteria**
+
+```gherkin
+Given I am on the Consumers page and there are no consumers
+When the page loads
+Then I see a "Register Consumer" button above the empty state (mirroring the Services page pattern)
+And the empty state description no longer shows a CLI command
+
+Given I click "Register Consumer"
+When the registration form opens
+Then I see fields: Consumer Name (required), Owner Team (required), Contact Email (required), Repo URL (optional), and a "Subscribe to services" multi-select
+
+Given I fill all required fields and select one service subscription
+When I click "Register"
+Then POST /v1/consumers is called with the form data
+And POST /v1/services/:id/subscriptions is called for each selected service
+And the consumer appears in the list
+And the form closes
+
+Given I submit without filling Consumer Name
+Then an inline validation error reads "Consumer name is required"
+
+Given the API returns 409 (consumer name already exists for this org)
+Then the form shows "A consumer with this name already exists"
+```
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| J-2-T1 | FEATURE | `RegisterConsumerForm.tsx` — form component: name/team/email/repo fields, multi-select for service subscriptions (fetches `/v1/services`), client-side required-field validation, loading + error state | Sonnet | ≤ 2 500 |
+| J-2-T2 | FEATURE | Wire `RegisterConsumerForm` into `ConsumersPage.tsx` — "Register Consumer" button in header; replace CLI command in empty state with a prompt to use the button; on success invalidate consumer list | Sonnet | ≤ 1 000 |
+
+**TDD order:** write component test asserting form fields render + validation fires → implement component → write test asserting POST calls made on submit → wire to page → green → refactor.
+
+**Unblocks:** J-3 (first-run wizard step 2 links to consumer registration)
+
+---
+
+### Story J-3 · First-Run Wizard Banner
+
+> **Persona:** Any new user opening the dashboard for the first time
+> **Value:** So that I immediately understand what to do next rather than staring at empty KPI cards showing "—"
+> **Priority:** P1 (depends on J-1, J-2 being done first so the linked actions work)
+> **Size:** S
+> **Dependencies:** J-1 (Compare Panel must exist to link to), J-2 (Consumer form must exist to link to)
+> **INVEST:** I✓ N✓ V✓ E✓ S✓ T✓
+> **DoR status:** READY after J-1 and J-2 complete
+
+**Acceptance Criteria**
+
+```gherkin
+Given I open the dashboard and no services exist
+When the HomePage loads
+Then a "Get started in 3 steps" banner is visible above the KPI cards
+And it shows three steps: (1) Register a service, (2) Compare your specs, (3) Register your consumers
+And each step has a direct action link
+
+Given I have created at least one service
+When the HomePage loads
+Then the banner is not shown
+And the KPI cards display normally
+
+Given the banner is visible and I click "Register a service"
+Then I am navigated to the Services page
+
+Given the banner is visible and I click "Compare your specs"
+Then I am navigated to the Diffs page with the Compare Panel pre-opened
+```
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| J-3-T1 | FEATURE | `FirstRunBanner.tsx` — 3-step horizontal stepper component; shown when `services.length === 0`; step 1 links to `/services`, step 2 links to `/diffs?compare=open`, step 3 links to `/consumers`; no dismiss button (disappears automatically when first service is created) | Sonnet | ≤ 2 000 |
+| J-3-T2 | FEATURE | Handle `?compare=open` query param in `DiffsPage.tsx` — when present, auto-open the `CompareSpecsPanel` on mount | Sonnet | ≤ 500 |
+
+**TDD order:** write test asserting banner visible when services=[] and hidden when services=[…] → implement → write test for auto-open param → implement → green.
+
+**Unblocks:** END OF STORY SEQUENCE (J-4 and J-5 are independent of J-3)
+
+---
+
+### Story J-4 · Inline Jargon Tooltips
+
+> **Persona:** Architect reviewing a blast-radius report who doesn't know what "Evidence confidence" means
+> **Value:** So that I can understand any technical term at the point I encounter it without navigating away to the Help page
+> **Priority:** P1
+> **Size:** S
+> **Dependencies:** None (purely additive UI change)
+> **INVEST:** I✓ N✓ V✓ E✓ S✓ T✓
+> **DoR status:** READY
+
+**Acceptance Criteria**
+
+```gherkin
+Given I am on the Diff detail page and see the "Blast Radius" section heading
+When I hover over the "?" icon next to "Blast Radius"
+Then a popover appears with the definition: "The set of consumers affected by one or more breaking changes — each with a confidence level based on how recently and how definitively they were observed calling the changed field."
+And the popover disappears when I move my cursor away
+
+Given I am on the Diff detail page and see a confidence badge (high / medium / low)
+When I hover over the confidence badge
+Then a popover explains what that confidence level means
+
+Given I am on the Evolution Rules page and see the "Change Kind" selector
+When I hover over the "?" icon next to "Change Kind"
+Then a popover lists the change kinds with a one-line description of each
+
+Terms requiring tooltips: Blast Radius, Evidence (source types), Confidence (high/medium/low),
+Change Kind (per value), Fail Mode, Policy Decision, Lookback Window
+```
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| J-4-T1 | FEATURE | `TermTooltip.tsx` shared component — `<TermTooltip term="blast_radius" />` renders a `?` icon that shows a popover on hover/focus; term definitions stored in a `TERM_DEFINITIONS` const map in the component file; accessible (keyboard-focusable, `role="tooltip"`) | Sonnet | ≤ 2 000 |
+| J-4-T2 | FEATURE | Apply `TermTooltip` across all pages — Blast Radius (DiffDetailPage, ServicesPage), Evidence source type badges (DiffDetailPage, EvidenceCoveragePage), Confidence badges (DiffDetailPage), Change Kind selector (EvolutionRulesPage), Fail Mode (SettingsPage), Lookback Window (SettingsPage), Policy Decision (AuditPage) | Sonnet | ≤ 2 000 |
+
+**TDD order:** write test asserting tooltip renders on hover for a known term → implement component → write snapshot test for TERM_DEFINITIONS completeness → apply across pages → green.
+
+**Unblocks:** END OF STORY SEQUENCE
+
+---
+
+### Story J-5 · Post-Create Service Nudge
+
+> **Persona:** Any user who just registered their first service
+> **Value:** So that I know what to do next without hunting through the UI
+> **Priority:** P2
+> **Size:** XS
+> **Dependencies:** J-1 (Compare Panel must exist to link to)
+> **INVEST:** I✓ N✓ V✓ E✓ S✓ T✓
+> **DoR status:** READY after J-1 complete
+
+**Acceptance Criteria**
+
+```gherkin
+Given I have just successfully created a service via the Services page form
+When the success state is shown
+Then a toast or inline banner reads "Service registered. Ready to compare specs? →" with a link to /diffs?compare=open
+
+Given I click the link
+Then I am navigated to the Diffs page with the Compare Panel open and the new service pre-selected in the dropdown
+```
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| J-5-T1 | FEATURE | After successful service creation in `ServicesPage.tsx`, show a toast notification with a "Compare your first specs →" link pointing to `/diffs?compare=open&service_id=<new_id>`; handle `?service_id=` pre-selection in `CompareSpecsPanel` | Sonnet | ≤ 1 000 |
+
+**Unblocks:** END OF STORY SEQUENCE
+
+---
+
+### Story J-6 · Release Notes Generation Trigger in UI
+
+> **Persona:** Product Manager who wants to generate AI release notes without running the CLI
+> **Value:** So that I can produce consumer-facing release notes for any completed Diff directly from the dashboard
+> **Priority:** P2
+> **Size:** S
+> **Dependencies:** None (existing API endpoint handles generation)
+> **INVEST:** I✓ N✓ V✓ E✓ S✓ T✓
+> **DoR status:** HOLD — verify that `POST /v1/release-notes` (or equivalent) accepts `diff_id` and triggers AI generation before pulling this story
+
+**Acceptance Criteria**
+
+```gherkin
+Given I am on the Release Notes page and no notes exist for a given diff
+When I click "Generate" next to a diff entry
+Then POST /v1/generate-tests or the release-notes generation endpoint is called with the diff_id
+And a spinner indicates generation in progress
+And on success the new release note appears with status "draft"
+
+Given ANTHROPIC_API_KEY is not configured
+When I click "Generate"
+Then the button shows "AI key not configured" and is disabled; a Settings link is shown
+```
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| J-6-T1 | FEATURE | Add "Generate" button to `ReleaseNotesPage.tsx` — visible for diffs that have no release note yet; calls existing generation endpoint with `diff_id`; shows spinner + disables button on inflight; renders AI-unavailable state when settings indicate no key | Sonnet | ≤ 2 000 |
+
+**Unblocks:** END OF STORY SEQUENCE
+
+---
+
+### Story J-7 · Evolution Rules "Platform Engineer" Callout
+
+> **Persona:** Product Manager who stumbles onto the Evolution Rules page
+> **Value:** So that I know this page is not intended for my role and I don't accidentally misconfigure severity rules
+> **Priority:** P3
+> **Size:** XS
+> **Dependencies:** None
+> **INVEST:** I✓ N✓ V✓ E✓ S✓ T✓
+> **DoR status:** READY
+
+**Acceptance Criteria**
+
+```gherkin
+Given I navigate to /evolution-rules
+When the page loads
+Then a callout banner reads: "Evolution rules are for platform engineers. They let you relax the default severity of specific change kinds across your organisation. If you're not sure whether you need this, you probably don't."
+And a "Learn more" link opens the Help page glossary
+```
+
+**Tasks**
+
+| ID | Hat | Goal | Agent tier | Token budget |
+|---|---|---|---|---|
+| J-7-T1 | FEATURE | Add a dismissible info callout to `EvolutionRulesPage.tsx` header using the existing callout/alert component pattern; link to `/help#evolution-rules`; dismissed state stored in `localStorage` so it doesn't reappear after first read | Sonnet | ≤ 500 |
+
+**Unblocks:** END OF STORY SEQUENCE
+
+---
+
+### EPIC J — Phase Gate Checklist
+
+- [x] `CompareSpecsPanel` submits a diff end-to-end from two pasted spec strings — no CLI required (J-1 tracer bullet)
+- [x] `POST /v1/services/:id/diffs/compare` returns 201 with diff_id for valid specs; 422 with structured error for malformed input
+- [x] Consumer registration form creates consumer + subscription(s) from UI; CLI command removed from empty state (J-2)
+- [x] First-run banner visible on empty dashboard; hidden once first service exists (J-3)
+- [x] All seven tooltip terms render inline definitions on hover; all are keyboard-accessible (J-4)
+- [x] Post-create service nudge navigates to Compare Panel with service pre-selected (J-5)
+- [x] All new UI components covered by Vitest component tests
+- [x] New API endpoint covered by radar-api integration test (`test_compare_specs_returns_diff_id`, `test_compare_specs_bad_yaml_returns_422`)
+- [x] No TS errors; pnpm lint clean; clippy clean on radar-api
+- [x] Architecture Memory updated (J hand-off)
+
+---
+
 ## Changelog
 
 | Version | Date | Author | Change |
@@ -1238,3 +1605,5 @@ _Every task must pass before the story is considered complete._
 | 1.0 | 2026-05-25 | Yannick Verrydt | EPIC G complete — OTLP trace receiver, gateway log ingestion, sampling controls (migration 017, field_deny_list glob, probabilistic sample_rate), @radar-monitor/sdk (Node.js), radar-monitor-sdk (Python, ASGI), EvidenceCoveragePage + Governance nav, docs/runtime-usage-ingestion.md, docs/security-and-privacy.md |
 | 1.1 | 2026-05-25 | Yannick Verrydt | EPIC H complete — H-1 diff-based test gen (no Jira), H-2 deterministic templates (5 change kinds), H-3 migration guide endpoint, H-4 release-note status workflow (migrations 018/019), H-5 test suites in PR comment, H-6 ReleaseNotesPage status transitions; new github test |
 | 1.2 | 2026-05-25 | Yannick Verrydt | EPIC I complete — I-1 demo fixtures + seed-demo.sh + payments-api GitHub workflow; I-2 README architecture diagram + 5-minute demo section; I-3/I-4 docs/evidence-confidence.md + docs/demo-scenario.md + docs/enterprise-deployment.md; I-5 radar-core/benches/diff_bench.rs (Criterion); I-6 LICENSE file (cargo-audit + SBOM already in CI); I-7 docs/generated-artifacts.md + docs/demo-video-script.md; 83 API tests + clippy clean |
+| 1.3 | 2026-05-26 | Yannick Verrydt | EPIC J drafted — Non-Technical User Experience; 7 stories: inline spec comparison (tracer bullet), consumer registration form, first-run wizard, jargon tooltips, post-create nudge, release notes UI trigger, evolution rules callout; backlog-builder-v5.1 format; readiness decision 8/9 |
+| 1.4 | 2026-05-26 | Yannick Verrydt | EPIC J complete — J-1 CompareSpecsPanel + POST /v1/services/:id/diffs/compare (201/422); J-2 RegisterConsumerForm (ConsumersPage); J-3 FirstRunBanner (HomePage); J-4 TermTooltip (7 terms across DiffDetailPage, EvolutionRulesPage); J-5 post-create nudge in ServicesPage; J-6 release-notes generate route + UI trigger in DiffDetailPage; J-7 evolution rules callout in EvolutionRulesPage; HelpPage developer guide updated; 94 API tests + 259 workspace tests green; pnpm lint clean; clippy clean |

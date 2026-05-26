@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Users } from 'lucide-react'
+import { Users, Plus } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
+import RegisterConsumerForm from '../components/RegisterConsumerForm'
 
 interface ConsumerRow {
   id: string
@@ -25,25 +26,30 @@ function formatDate(iso: string) {
   }
 }
 
-function ConsumerTable({ rows, onSelect }: { rows: ConsumerRow[]; onSelect: (id: string) => void }) {
+function ConsumerTable({
+  rows,
+  onSelect,
+  onRegister,
+}: {
+  rows: ConsumerRow[]
+  onSelect: (id: string) => void
+  onRegister: () => void
+}) {
   if (rows.length === 0) {
     return (
       <EmptyState
         icon={Users}
-        title="No consumers registered"
-        description="Register a consumer with the CLI so it appears here and receives blast-radius alerts when APIs it uses change."
+        title="No consumers registered yet"
+        description="Register your first consumer to start receiving blast-radius alerts when APIs it uses change."
         action={
-          <code
-            className="rounded-md px-3 py-1.5 text-[11.5px]"
-            style={{
-              background: 'var(--bg-raised)',
-              border: '1px solid var(--border)',
-              color: 'var(--teal)',
-              fontFamily: 'var(--font-mono)',
-            }}
+          <button
+            onClick={onRegister}
+            className="flex items-center gap-1.5 rounded-md px-4 py-2 text-[12.5px] font-medium transition-opacity hover:opacity-90"
+            style={{ background: 'var(--cobalt-mid)', color: '#fff' }}
           >
-            radar register --service-id &lt;id&gt; --consumer-name &lt;name&gt; --repo-url &lt;url&gt; --owner-team &lt;team&gt; --contact &lt;email&gt;
-          </code>
+            <Plus className="h-3.5 w-3.5" />
+            Register Consumer
+          </button>
         }
       />
     )
@@ -67,7 +73,12 @@ function ConsumerTable({ rows, onSelect }: { rows: ConsumerRow[]; onSelect: (id:
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={row.id} className="group cursor-pointer transition-colors" style={{ borderBottom: '1px solid var(--border)' }} onClick={() => onSelect(row.id)}>
+            <tr
+              key={row.id}
+              className="group cursor-pointer transition-colors"
+              style={{ borderBottom: '1px solid var(--border)' }}
+              onClick={() => onSelect(row.id)}
+            >
               <td className="px-3 py-2.5 font-medium group-hover:bg-[var(--bg-hover)]" style={{ fontSize: '12.5px', color: 'var(--text-1)' }}>
                 <div>{row.name}</div>
                 {row.repo_url && (
@@ -77,6 +88,7 @@ function ConsumerTable({ rows, onSelect }: { rows: ConsumerRow[]; onSelect: (id:
                     rel="noreferrer"
                     className="text-[11px] underline decoration-dotted hover:no-underline"
                     style={{ color: 'var(--cobalt-mid)', fontFamily: 'var(--font-mono)' }}
+                    onClick={(e) => e.stopPropagation()}
                   >
                     {row.repo_url.replace(/^https?:\/\//, '').slice(0, 40)}
                   </a>
@@ -107,8 +119,10 @@ export default function ConsumersPage() {
   const [rows, setRows] = useState<ConsumerRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [showForm, setShowForm] = useState(false)
 
-  useEffect(() => {
+  function loadConsumers() {
+    setLoading(true)
     fetch('/v1/consumers')
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
@@ -117,29 +131,60 @@ export default function ConsumersPage() {
       .then(setRows)
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
-  }, [])
+  }
+
+  useEffect(loadConsumers, [])
+
+  function handleCreated() {
+    setShowForm(false)
+    loadConsumers()
+  }
 
   return (
     <div>
       <PageHeader
         tag="Registry"
         title="Consumers"
-        description="Services that consume one or more of your APIs. Use drift register to add a consumer and start receiving blast-radius alerts."
+        description="Services and teams that consume one or more of your APIs. Register a consumer to start receiving blast-radius alerts when APIs change."
       />
 
-      <div className="px-14 py-8">
-        <div className="overflow-hidden rounded-lg" style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
-          <div className="flex items-center px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
+      <div className="px-14 py-8 flex flex-col gap-6">
+        {showForm && (
+          <RegisterConsumerForm
+            onCreated={handleCreated}
+            onClose={() => setShowForm(false)}
+          />
+        )}
+
+        <div
+          className="overflow-hidden rounded-lg"
+          style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}
+        >
+          <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
             <p className="text-[11px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
               {loading ? 'Loading…' : `${rows.length} consumer${rows.length !== 1 ? 's' : ''}`}
             </p>
+            {!showForm && (
+              <button
+                onClick={() => setShowForm(true)}
+                className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
+                style={{ borderColor: 'var(--border-mid)', color: 'var(--text-2)' }}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Register Consumer
+              </button>
+            )}
           </div>
           {error ? (
             <div className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>
               Failed to load consumers: {error}
             </div>
           ) : (
-            <ConsumerTable rows={rows} onSelect={(id) => navigate(`/consumers/${id}`)} />
+            <ConsumerTable
+              rows={rows}
+              onSelect={(id) => navigate(`/consumers/${id}`)}
+              onRegister={() => setShowForm(true)}
+            />
           )}
         </div>
       </div>

@@ -10,6 +10,7 @@ pub(crate) enum ApiError {
     Forbidden(String),
     Unauthorized,
     TooManyRequests(String),
+    UnprocessableEntity { error: String, detail: String, spec: String },
 }
 
 impl From<sqlx::Error> for ApiError {
@@ -52,6 +53,11 @@ impl IntoResponse for ApiError {
             ApiError::TooManyRequests(msg) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({"error": msg})),
+            )
+                .into_response(),
+            ApiError::UnprocessableEntity { error, detail, spec } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": error, "detail": detail, "spec": spec})),
             )
                 .into_response(),
         }

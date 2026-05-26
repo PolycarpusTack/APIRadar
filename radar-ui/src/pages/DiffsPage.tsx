@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { GitCompare } from 'lucide-react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { GitCompare, Plus } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
+import CompareSpecsPanel from '../components/CompareSpecsPanel'
 
 interface DiffSummary {
   id: string
@@ -120,9 +121,12 @@ function DiffTable({ rows, onSelect }: { rows: DiffSummary[]; onSelect: (id: str
 
 export default function DiffsPage() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const [rows, setRows] = useState<DiffSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Auto-open when navigated here with ?compare=open (e.g. from FirstRunBanner)
+  const [showCompare, setShowCompare] = useState(searchParams.get('compare') === 'open')
 
   useEffect(() => {
     fetch('/v1/diffs')
@@ -143,7 +147,12 @@ export default function DiffsPage() {
         description="Every drift check run posted to this server. Click a row to see the full blast-radius report."
       />
 
-      <div className="px-14 py-8">
+      <div className="px-14 py-8 flex flex-col gap-6">
+        {/* Compare panel — toggled by the button in the toolbar */}
+        {showCompare && (
+          <CompareSpecsPanel onClose={() => setShowCompare(false)} />
+        )}
+
         <div
           className="overflow-hidden rounded-lg"
           style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}
@@ -152,6 +161,16 @@ export default function DiffsPage() {
             <p className="text-[11px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
               {loading ? 'Loading…' : `${rows.length} diff${rows.length !== 1 ? 's' : ''}`}
             </p>
+            {!showCompare && (
+              <button
+                onClick={() => setShowCompare(true)}
+                className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
+                style={{ borderColor: 'var(--border-mid)', color: 'var(--text-2)' }}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Compare Specs
+              </button>
+            )}
           </div>
           {error ? (
             <div className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>

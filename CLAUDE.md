@@ -8,8 +8,8 @@ This project uses the AI-Native Software Delivery framework. All task execution 
 - `Agents/backlog-builder-v5.1.md` — story/task templates, DoR/DoD
 - `Agents/core-specification-v1.md` — shared principles, modes, global DoD
 
-Current execution mode: DELIVERY (EPIC F+)
-Active stories: see `DEVELOPMENT_PLAN.md` — EPIC E complete, EPIC F is next.
+Current execution mode: DELIVERY (EPIC J)
+Active stories: see `DEVELOPMENT_PLAN.md` — EPICs A–I complete, EPIC J (Non-Technical UX) is next.
 
 ---
 

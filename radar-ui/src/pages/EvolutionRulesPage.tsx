@@ -1,8 +1,50 @@
 import { useEffect, useState } from 'react'
-import { Plus, Trash2, X } from 'lucide-react'
+import { Plus, Trash2, X, Info } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
+import TermTooltip from '../components/TermTooltip'
+
+const CALLOUT_DISMISSED_KEY = 'radar_evolution_rules_callout_dismissed'
+
+function PlatformEngineerCallout() {
+  const navigate = useNavigate()
+  const [dismissed, setDismissed] = useState(
+    () => localStorage.getItem(CALLOUT_DISMISSED_KEY) === '1'
+  )
+
+  if (dismissed) return null
+
+  function dismiss() {
+    localStorage.setItem(CALLOUT_DISMISSED_KEY, '1')
+    setDismissed(true)
+  }
+
+  return (
+    <div
+      className="flex items-start gap-3 rounded-lg p-4 text-[12.5px]"
+      style={{ background: 'var(--blue-bg, rgba(56,120,227,0.08))', border: '1px solid var(--blue-dim, rgba(56,120,227,0.25))', color: 'var(--text-2)' }}
+    >
+      <Info className="h-4 w-4 mt-0.5 flex-shrink-0" style={{ color: 'var(--blue, #3878e3)' }} />
+      <p className="flex-1 leading-relaxed">
+        <span className="font-semibold" style={{ color: 'var(--text-1)' }}>Evolution rules are for platform engineers.</span>
+        {' '}They let you relax the default severity of specific change kinds across your organisation.
+        If you're not sure whether you need this, you probably don't.{' '}
+        <button
+          onClick={() => navigate('/help')}
+          className="underline decoration-dotted hover:no-underline"
+          style={{ color: 'var(--blue, #3878e3)' }}
+        >
+          Learn more
+        </button>
+      </p>
+      <button onClick={dismiss} className="flex-shrink-0" style={{ color: 'var(--text-3)' }}>
+        <X className="h-4 w-4" />
+      </button>
+    </div>
+  )
+}
 
 interface EvolutionRule {
   id: string
@@ -123,6 +165,9 @@ export default function EvolutionRulesPage() {
       />
 
       <div className="px-14 py-8 space-y-6">
+        {/* J-7: audience callout — dismissible, stored in localStorage */}
+        <PlatformEngineerCallout />
+
         {/* How it works callout */}
         <div
           className="rounded-lg p-4 text-[12.5px]"
@@ -174,8 +219,9 @@ export default function EvolutionRulesPage() {
                 />
               </div>
               <div>
-                <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                <label className="flex items-center gap-1 mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
                   Change kind
+                  <TermTooltip term={`change_kind_${form.change_kind}` as `change_kind_${string}`} placement="bottom" />
                 </label>
                 <select
                   value={form.change_kind}

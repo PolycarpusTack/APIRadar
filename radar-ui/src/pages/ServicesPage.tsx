@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Server, Plus, X } from 'lucide-react'
+import { Server, Plus, X, ArrowRight } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
 
@@ -216,6 +216,7 @@ export default function ServicesPage() {
   const [rows, setRows] = useState<ServiceRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [nudgeServiceId, setNudgeServiceId] = useState<string | null>(null)
 
   useEffect(() => {
     fetch('/v1/services')
@@ -233,6 +234,7 @@ export default function ServicesPage() {
       const exists = prev.find(r => r.id === svc.id)
       return exists ? prev.map(r => r.id === svc.id ? svc : r) : [svc, ...prev]
     })
+    setNudgeServiceId(svc.id)
   }
 
   return (
@@ -244,6 +246,28 @@ export default function ServicesPage() {
       />
 
       <div className="px-14 py-8">
+        {nudgeServiceId && (
+          <div
+            className="mb-5 flex items-center justify-between rounded-lg px-4 py-3"
+            style={{ background: 'var(--bg-active)', border: '1px solid var(--cobalt-muted)', color: 'var(--text-1)' }}
+          >
+            <span className="text-[12.5px]">Service registered. Ready to compare specs?</span>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => navigate(`/diffs?compare=open&service_id=${nudgeServiceId}`)}
+                className="flex items-center gap-1 text-[12.5px] font-semibold transition-opacity hover:opacity-80"
+                style={{ color: 'var(--cobalt-mid)' }}
+              >
+                Compare Specs
+                <ArrowRight className="h-3.5 w-3.5" />
+              </button>
+              <button onClick={() => setNudgeServiceId(null)} style={{ color: 'var(--text-dim)' }}>
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
         <RegisterForm onCreated={handleCreated} />
 
         <div className="overflow-hidden rounded-lg" style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}>

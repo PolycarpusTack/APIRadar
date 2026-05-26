@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { CheckCircle, XCircle } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
+import TermTooltip, { TERM_DEFINITIONS } from '../components/TermTooltip'
 
 interface AppSettings {
   policy_block_on: string
@@ -41,11 +42,14 @@ function SectionCard({ title, description, children }: { title: string; descript
   )
 }
 
-function FieldRow({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+function FieldRow({ label, hint, tooltip, children }: { label: string; hint?: string; tooltip?: keyof typeof TERM_DEFINITIONS; children: React.ReactNode }) {
   return (
     <div className="grid grid-cols-[200px_1fr] items-start gap-6">
       <div>
-        <p className="text-[11.5px] font-medium" style={{ color: 'var(--text-2)' }}>{label}</p>
+        <p className="flex items-center gap-1 text-[11.5px] font-medium" style={{ color: 'var(--text-2)' }}>
+          {label}
+          {tooltip && <TermTooltip term={tooltip} placement="bottom" />}
+        </p>
         {hint && <p className="text-[11px] mt-0.5 leading-snug" style={{ color: 'var(--text-dim)' }}>{hint}</p>}
       </div>
       <div>{children}</div>
@@ -157,6 +161,7 @@ export default function SettingsPage() {
               <FieldRow
                 label="Lookback window"
                 hint="Days of usage history used to determine if a consumer is active."
+                tooltip="lookback_window"
               >
                 <div className="flex items-center gap-2">
                   <input

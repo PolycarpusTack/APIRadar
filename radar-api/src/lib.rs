@@ -254,6 +254,7 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
         .route("/services", get(services::list_services).post(services::create_service))
         .route("/services/:id", get(services::get_service))
         .route("/services/:id/diffs", get(diffs::list_diffs).post(diffs::create_diff))
+        .route("/services/:id/diffs/compare", post(diffs::compare_specs))
         .route("/services/:id/consumers", get(consumers::list_consumers))
         .route("/services/:id/subscriptions", post(consumers::create_subscription))
         .route("/consumers", get(consumers::list_all_consumers).post(consumers::create_consumer))
@@ -282,6 +283,7 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
         .route("/release-notes/:id", get(release_notes::get_release_note))
         .route("/release-notes/:id/status", axum::routing::patch(release_notes::patch_release_note_status))
         .route("/diffs/:id/release-notes", post(release_notes::create_release_note))
+        .route("/diffs/:id/release-notes/generate", post(release_notes::generate_release_note))
         .route("/diffs/:id/migration-guide", get(release_notes::get_migration_guide))
         .route("/diffs/:id/test-suites", get(ai_tests::list_diff_test_suites))
         .route("/policy-decisions", get(decisions::list_policy_decisions).post(decisions::create_policy_decision))
@@ -3377,6 +3379,177 @@ mod tests {
             .unwrap();
         let key = client_key(&req);
         assert_eq!(key, "192.168.1.1");
+    }
+
+    // J-6: POST /v1/diffs/:id/release-notes/generate creates a release note from diff data
+    #[tokio::test]
+    async fn test_generate_release_note_returns_201() {
+        let pool = test_pool().await;
+
+        // Insert prerequisite data
+        sqlx::query("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind("svc-rn").bind("RN Svc").bind("").bind("team").bind("openapi")
+            .execute(&pool).await.unwrap();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind("sv-rn-a").bind("svc-rn").bind("v1").bind(&now).bind("openapi")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind("sv-rn-b").bind("svc-rn").bind("v2").bind(&now).bind("openapi")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, NULL, ?)")
+            .bind("diff-rn").bind("sv-rn-a").bind("sv-rn-b").bind(&now)
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind("chg-rn").bind("diff-rn").bind("GET /users → phone").bind("field_removed").bind("breaking").bind(Option::<String>::None)
+            .execute(&pool).await.unwrap();
+
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/v1/diffs/diff-rn/release-notes/generate")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json["id"].is_string());
+        assert!(json["content"].as_str().unwrap_or("").contains("field_removed"));
+    }
+
+    // J-2: creating a consumer without repo_url must succeed (repo_url is optional)
+    #[tokio::test]
+    async fn test_create_consumer_without_repo_url() {
+        let pool = test_pool().await;
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
+
+        let body = serde_json::json!({
+            "name": "QA Team",
+            "repo_url": "",
+            "owner_team": "Quality",
+            "contact": "qa@acme.com"
+        });
+
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/v1/consumers")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json["id"].is_string());
+        assert_eq!(json["name"], "QA Team");
+    }
+
+    // J-1: compare two raw spec strings and receive a persisted diff
+    #[tokio::test]
+    async fn test_compare_specs_returns_diff_id() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("svc-cmp")
+        .bind("Compare Svc")
+        .bind("https://github.com/acme/cmp")
+        .bind("team-cmp")
+        .bind("openapi")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
+
+        // v1 exposes GET /users with a `phone` response field.
+        let base_spec = concat!(
+            "openapi: \"3.0.0\"\ninfo:\n  title: T\n  version: \"1\"\npaths:\n",
+            "  /users:\n    get:\n      responses:\n        \"200\":\n",
+            "          description: OK\n",
+            "          content:\n            application/json:\n              schema:\n",
+            "                type: object\n                properties:\n",
+            "                  phone:\n                    type: string\n"
+        );
+        // v2 removes `phone` — breaking change.
+        let head_spec = concat!(
+            "openapi: \"3.0.0\"\ninfo:\n  title: T\n  version: \"2\"\npaths:\n",
+            "  /users:\n    get:\n      responses:\n        \"200\":\n",
+            "          description: OK\n",
+            "          content:\n            application/json:\n              schema:\n",
+            "                type: object\n                properties:\n",
+            "                  email:\n                    type: string\n"
+        );
+
+        let body = serde_json::json!({
+            "base_spec": base_spec,
+            "head_spec": head_spec,
+            "spec_format": "openapi",
+            "base_ref": "v1",
+            "head_ref": "v2"
+        });
+
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/v1/services/svc-cmp/diffs/compare")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json["diff_id"].is_string(), "diff_id must be a string");
+        assert!(json["changes_count"].as_i64().unwrap_or(0) > 0, "must detect changes");
+        assert!(json["breaking_count"].as_i64().unwrap_or(0) > 0, "must detect breaking changes");
+    }
+
+    #[tokio::test]
+    async fn test_compare_specs_bad_yaml_returns_422() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("svc-cmp2")
+        .bind("Compare Svc2")
+        .bind("https://github.com/acme/cmp2")
+        .bind("team-cmp2")
+        .bind("openapi")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
+
+        let body = serde_json::json!({
+            "base_spec": "not: valid: openapi: [[[",
+            "head_spec": "also: bad",
+            "spec_format": "openapi",
+            "base_ref": "v1",
+            "head_ref": "v2"
+        });
+
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/v1/services/svc-cmp2/diffs/compare")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"], "parse_error");
+        assert!(json["spec"].is_string());
     }
 }
 

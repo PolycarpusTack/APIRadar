@@ -105,9 +105,6 @@ pub(crate) async fn create_consumer(
     if body.name.trim().is_empty() {
         return Err(ApiError::BadRequest("name must not be empty".into()));
     }
-    if body.repo_url.trim().is_empty() {
-        return Err(ApiError::BadRequest("repo_url must not be empty".into()));
-    }
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let id = Uuid::new_v4().to_string();

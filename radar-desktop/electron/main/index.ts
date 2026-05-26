@@ -25,19 +25,27 @@ function resolveApiBinary(): string | null {
     return resourcesBinExe
   }
 
+  // 3. Development: workspace release build (cargo build -p radar-api --release)
+  if (!app.isPackaged) {
+    const devBin = join(__dirname, '..', '..', '..', 'target', 'release', 'radar-api')
+    if (existsSync(devBin)) return devBin
+    const devBinExe = join(__dirname, '..', '..', '..', 'target', 'release', 'radar-api.exe')
+    if (existsSync(devBinExe)) return devBinExe
+  }
+
   return null
 }
 
 function startApiSidecar(): ChildProcess | null {
   const dbPath = `sqlite:${join(app.getPath('userData'), 'drift.db')}`
   // Bind to loopback only — sidecar must never be reachable from the network in desktop mode.
-  const args = ['--db', dbPath, '--bind', '127.0.0.1:8080']
+  const args = ['--db', dbPath, '--bind', '127.0.0.1:17380']
 
   const bin = resolveApiBinary()
 
   if (!bin) {
     // Development fallback: attempt `cargo run` from the workspace root
-    const workspaceRoot = join(__dirname, '..', '..', '..', '..')
+    const workspaceRoot = join(__dirname, '..', '..', '..')
     console.warn(
       '[main] radar-api binary not found — falling back to `cargo run`. ' +
         'Run `cargo build -p radar-api` to avoid this slow start.'
@@ -152,7 +160,7 @@ function createWindow(): BrowserWindow {
 
 // ── IPC handlers ───────────────────────────────────────────────────────────────
 
-ipcMain.handle('get-api-url', () => 'http://127.0.0.1:8080')
+ipcMain.handle('get-api-url', () => 'http://127.0.0.1:17380')
 
 // ── App lifecycle ──────────────────────────────────────────────────────────────
 
@@ -160,7 +168,7 @@ app.whenReady().then(async () => {
   apiProcess = startApiSidecar()
 
   try {
-    await waitForApi('http://127.0.0.1:8080/health', 20)
+    await waitForApi('http://127.0.0.1:17380/health', 20)
   } catch (err) {
     console.warn('[main] radar-api health check failed — continuing anyway:', err)
   }

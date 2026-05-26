@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Activity } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import KpiCard from '../components/KpiCard'
+import FirstRunBanner from '../components/FirstRunBanner'
 
 type ApiStatus = 'checking' | 'online' | 'offline'
 
@@ -259,6 +260,9 @@ export default function HomePage() {
 
       <div className="px-14 py-10 space-y-10">
         <ApiStatusBadge />
+
+        {/* First-run wizard — visible only when no services have been registered yet */}
+        {summary !== null && summary.services_count === 0 && <FirstRunBanner />}
 
         {/* KPI row */}
         <section>

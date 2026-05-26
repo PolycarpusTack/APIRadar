@@ -12,7 +12,7 @@ Diffs OpenAPI / GraphQL / protobuf across versions, names the consumers each bre
        |                                 |            |
        | git push / PR                   | OTel SDK   | radar scan
        v                                 v            v
-  radar-action (CI)            radar-api (:8080)
+  radar-action (CI)            radar-api (:8080 web · :17380 desktop)
        |                        /    |    \
        | spec diff              |    |     |
        v                        |    |     |
@@ -46,12 +46,12 @@ docker compose up
 # API available at: http://localhost:8080/v1/
 ```
 
-### Local development
+### Local development (web mode)
 
 **Prerequisites:** Rust 1.80+, Node 22+, pnpm
 
 ```sh
-# Start the API (SQLite)
+# Start the API (SQLite, binds to 0.0.0.0:8080 by default)
 cargo run -p radar-api -- --db sqlite:drift.db
 
 # In another terminal — start the UI dev server (proxies /v1 to :8081)
@@ -60,6 +60,37 @@ pnpm dev:ui
 # CLI
 cargo run -p radar-cli -- --help
 ```
+
+### Desktop app (Electron)
+
+**Prerequisites:** same as above, plus the release binary built once.
+
+```sh
+# 1. Build the radar-api release binary (only needed after Rust changes)
+cargo build -p radar-api --release
+
+# 2. Start Electron dev mode (hot-reload renderer, spawns the release sidecar on :17380)
+cd radar-desktop
+pnpm run dev
+```
+
+The release binary is resolved from `target/release/radar-api[.exe]` in the workspace root.
+Override with `RADAR_API_BIN=/path/to/binary pnpm run dev` if you need a different build.
+
+#### Building the installer
+
+```sh
+cd radar-desktop
+
+# Step 1 — build the Electron bundles (main + preload + renderer)
+pnpm run build
+
+# Step 2 — package into platform installer (NSIS on Windows, DMG on macOS, AppImage on Linux)
+pnpm run dist
+```
+
+The installer is written to `radar-desktop/dist/`.  
+The `radar-api` release binary **must exist** at `target/release/radar-api[.exe]` before running `pnpm run dist` — run `cargo build -p radar-api --release` first if it doesn't.
 
 ### Run the full test suite
 
@@ -159,7 +190,8 @@ Confidence affects the policy engine: `closed` mode blocks when at least one **h
 | Variable | Purpose | Default |
 |---|---|---|
 | `DATABASE_URL` | DB connection (`sqlite:file.db` or `postgres://…`) | `sqlite:drift.db` |
-| `BIND_ADDR` | Listen address | `0.0.0.0:8080` |
+| `BIND_ADDR` | Listen address for web/Docker mode | `0.0.0.0:8080` |
+| `RADAR_API_BIN` | Override sidecar binary path in Electron desktop dev mode | _(auto-resolved)_ |
 | `RADAR_REQUIRE_AUTH` | Reject unauthenticated requests (`true`/`1`) | `false` |
 | `RADAR_SERVICE_TOKEN` | Static bearer token for API auth | — |
 | `RADAR_JWT_SECRET` | HS256 secret for JWT auth (`org_id` claim for tenancy) | — |

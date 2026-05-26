@@ -1,7 +1,7 @@
 # Radar Monitor — Runbook
 
 > **Audience:** On-call engineers and DevOps.  
-> **Last updated:** 2026-05-21
+> **Last updated:** 2026-05-26
 
 ---
 
@@ -22,19 +22,28 @@
 ## 1. Architecture overview
 
 ```
-Browser / Electron
-       │
-       ▼
-radar-ui (Vite/React, static)
-       │  served by radar-api at /app
-       ▼
-radar-api (axum, port 8080)
-       │
-       ├── SQLite (Electron / local dev)  ← sqlite:drift.db
-       └── PostgreSQL 16 (production)    ← postgres://…
+Browser (web mode)              Electron (desktop mode)
+       │                                │
+       ▼                                ▼
+radar-ui (Vite/React, static)   radar-ui (renderer, same bundle)
+       │  served by radar-api at /app   │  loaded from Vite dev server or asar
+       ▼                                ▼
+radar-api (axum, port 8080)     radar-api sidecar (port 17380, 127.0.0.1 only)
+       │                                │
+       ├── PostgreSQL 16 (production)   └── SQLite ← AppData/radar-desktop/drift.db
+       └── SQLite (local dev)
               │
               └── radar-scanner (background worker, reads source dirs)
 ```
+
+**Port summary:**
+
+| Mode | Port | Bind |
+|---|---|---|
+| Web / Docker | `8080` | `0.0.0.0` (nginx in front) |
+| Desktop sidecar | `17380` | `127.0.0.1` only |
+| UI dev server (standalone) | `6173` | localhost only |
+| UI dev server (Electron) | `5173` | localhost only |
 
 Key env vars:
 
@@ -82,6 +91,37 @@ DATABASE_URL=postgres://drift:radar_dev@localhost/drift \
   --bind 0.0.0.0:8080 \
   --rate-limit 500
 ```
+
+### Desktop app (Electron installer)
+
+The desktop app bundles `radar-api.exe` as a sidecar. The installer is built from `radar-desktop/`.
+
+**Prerequisites:** Rust release binary must exist before packaging.
+
+```bash
+# 1. Build radar-api release binary
+cargo build -p radar-api --release
+# Binary lands at: target/release/radar-api[.exe]
+
+# 2. Build Electron bundles
+cd radar-desktop
+pnpm run build
+
+# 3. Package installer
+pnpm run dist
+# Output: radar-desktop/dist/radar-desktop Setup <version>.exe  (Windows)
+#         radar-desktop/dist/radar-desktop-<version>.dmg        (macOS)
+#         radar-desktop/dist/radar-desktop-<version>.AppImage   (Linux)
+```
+
+**Sidecar resolution order (dev mode):**
+
+1. `RADAR_API_BIN` env var (explicit override)
+2. `<resources>/radar-api[.exe]` (packaged installer)
+3. `target/release/radar-api[.exe]` (workspace release build — dev shortcut)
+4. `cargo run --bin radar-api` (last resort — slow, requires Rust on PATH)
+
+**Known port conflict:** the sidecar binds to `127.0.0.1:17380`. If that port is taken, set `RADAR_API_BIN` to a pre-started binary or kill the conflicting process. Do not use port `8080` — it is commonly reserved by Hyper-V/WSL2/Docker on Windows.
 
 ---
 
@@ -217,6 +257,20 @@ Bearer tokens stored in Sandbox Environments (Settings → Playground) are maske
 1. Verify consumers are subscribed: `GET /v1/services/{id}/consumers`
 2. Verify usage events are being ingested: `GET /v1/summary`
 3. If using static scanner: re-run `drift scan` after indexing new call sites.
+
+### "Compare Specs returns 422 with parse error"
+
+The `POST /v1/services/:id/diffs/compare` endpoint validates both spec strings before persisting.
+The response body includes `{ "spec": "base"|"head", "detail": "..." }` — check which side failed
+and verify the pasted content is valid YAML/JSON (OpenAPI), valid SDL (GraphQL), or valid proto3 syntax.
+Common causes: missing `openapi:` version field, mismatched indentation, or a BOM character at the
+start of a copy-pasted file.
+
+### "Generate release notes returns 404"
+
+`POST /v1/diffs/:id/release-notes/generate` returns 404 if the diff ID does not exist in the database.
+This can happen if the diff was stored against a different database instance (e.g. a dev SQLite that
+was deleted). Verify the diff ID with `GET /v1/diffs` first.
 
 ### "Scanner finds no call sites"
 

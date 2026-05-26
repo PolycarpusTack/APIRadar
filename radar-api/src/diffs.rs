@@ -13,6 +13,15 @@ use crate::utils::apply_evolution_rules;
 use crate::PaginationParams;
 
 #[derive(serde::Deserialize)]
+pub(crate) struct CompareSpecsBody {
+    pub(crate) base_spec: String,
+    pub(crate) head_spec: String,
+    pub(crate) spec_format: String,
+    pub(crate) base_ref: String,
+    pub(crate) head_ref: String,
+}
+
+#[derive(serde::Deserialize)]
 pub(crate) struct CreateDiffBody {
     pub(crate) service_name: String,
     pub(crate) repo_url: String,
@@ -731,4 +740,192 @@ pub(crate) async fn list_all_diffs(
         .collect();
 
     Ok((StatusCode::OK, Json(json!(items))))
+}
+
+// POST /v1/services/:id/diffs/compare
+// Accepts raw spec strings, parses and diffs them server-side, persists the result.
+pub(crate) async fn compare_specs(
+    Path(service_id): Path<String>,
+    State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
+    Json(body): Json<CompareSpecsBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    if body.base_ref.is_empty() {
+        return Err(ApiError::BadRequest("base_ref is required".into()));
+    }
+    if body.head_ref.is_empty() {
+        return Err(ApiError::BadRequest("head_ref is required".into()));
+    }
+
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let format = body.spec_format.to_lowercase();
+
+    // Parse both specs and compute the diff.
+    let changes: Vec<radar_core::diff::DiffChange> = match format.as_str() {
+        "graphql" | "gql" => {
+            let base_map = radar_core::graphql::parse_graphql(&body.base_spec)
+                .map_err(|e| ApiError::UnprocessableEntity {
+                    error: "parse_error".into(),
+                    detail: e.to_string(),
+                    spec: "base".into(),
+                })?;
+            let head_map = radar_core::graphql::parse_graphql(&body.head_spec)
+                .map_err(|e| ApiError::UnprocessableEntity {
+                    error: "parse_error".into(),
+                    detail: e.to_string(),
+                    spec: "head".into(),
+                })?;
+            radar_core::graphql::diff_graphql(&base_map, &head_map)
+        }
+        "protobuf" | "proto" => {
+            let base_schema = radar_core::proto::parse_proto(&body.base_spec)
+                .map_err(|e| ApiError::UnprocessableEntity {
+                    error: "parse_error".into(),
+                    detail: e.to_string(),
+                    spec: "base".into(),
+                })?;
+            let head_schema = radar_core::proto::parse_proto(&body.head_spec)
+                .map_err(|e| ApiError::UnprocessableEntity {
+                    error: "parse_error".into(),
+                    detail: e.to_string(),
+                    spec: "head".into(),
+                })?;
+            radar_core::proto::diff_proto(&base_schema, &head_schema)
+        }
+        _ => {
+            let base_parsed = radar_core::diff::parse_openapi(&body.base_spec)
+                .map_err(|e| ApiError::UnprocessableEntity {
+                    error: "parse_error".into(),
+                    detail: e.to_string(),
+                    spec: "base".into(),
+                })?;
+            let head_parsed = radar_core::diff::parse_openapi(&body.head_spec)
+                .map_err(|e| ApiError::UnprocessableEntity {
+                    error: "parse_error".into(),
+                    detail: e.to_string(),
+                    spec: "head".into(),
+                })?;
+            radar_core::diff::diff_openapi(&base_parsed, &head_parsed)
+        }
+    };
+
+    let now = Utc::now().to_rfc3339();
+
+    // Upsert the service record so the endpoint is self-contained.
+    sqlx::query(
+        "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET spec_format = excluded.spec_format",
+    )
+    .bind(&service_id)
+    .bind(&service_id)
+    .bind("")
+    .bind("")
+    .bind(&body.spec_format)
+    .bind(&org_id)
+    .execute(&pool)
+    .await?;
+
+    let from_version_id = spec_version_id(&service_id, &body.base_ref);
+    sqlx::query(
+        "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO NOTHING",
+    )
+    .bind(&from_version_id)
+    .bind(&service_id)
+    .bind(&body.base_ref)
+    .bind(&now)
+    .bind(&body.spec_format)
+    .bind(&body.base_spec)
+    .execute(&pool)
+    .await?;
+
+    let to_version_id = spec_version_id(&service_id, &body.head_ref);
+    sqlx::query(
+        "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET spec_yaml = COALESCE(excluded.spec_yaml, spec_version.spec_yaml)",
+    )
+    .bind(&to_version_id)
+    .bind(&service_id)
+    .bind(&body.head_ref)
+    .bind(&now)
+    .bind(&body.spec_format)
+    .bind(&body.head_spec)
+    .execute(&pool)
+    .await?;
+
+    // Re-use an existing diff for the same (from, to) pair.
+    {
+        use sqlx::Row;
+        let existing = sqlx::query(
+            "SELECT id FROM diff WHERE from_version = ? AND to_version = ?",
+        )
+        .bind(&from_version_id)
+        .bind(&to_version_id)
+        .fetch_optional(&pool)
+        .await?;
+
+        if let Some(row) = existing {
+            let existing_id: String = row.try_get("id").map_err(ApiError::Db)?;
+            let breaking_count = changes.iter()
+                .filter(|c| c.severity == radar_core::models::Severity::Breaking)
+                .count() as i64;
+            return Ok((
+                StatusCode::OK,
+                Json(json!({
+                    "diff_id":        existing_id,
+                    "changes_count":  changes.len() as i64,
+                    "breaking_count": breaking_count,
+                    "cached":         true,
+                })),
+            ));
+        }
+    }
+
+    let diff_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) \
+         VALUES (?, ?, ?, NULL, ?)",
+    )
+    .bind(&diff_id)
+    .bind(&from_version_id)
+    .bind(&to_version_id)
+    .bind(&now)
+    .execute(&pool)
+    .await?;
+
+    let mut breaking_count: i64 = 0;
+    for change in &changes {
+        let change_id = Uuid::new_v4().to_string();
+        let sev_str = match change.severity {
+            radar_core::models::Severity::Breaking => { breaking_count += 1; "breaking" }
+            radar_core::models::Severity::NonBreakingRisky => "non_breaking_risky",
+            radar_core::models::Severity::Safe => "safe",
+        };
+        sqlx::query(
+            "INSERT INTO change (id, diff_id, path, kind, severity, description) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&change_id)
+        .bind(&diff_id)
+        .bind(&change.path)
+        .bind(change.kind.as_str())
+        .bind(sev_str)
+        .bind(&change.description)
+        .execute(&pool)
+        .await?;
+    }
+
+    metrics::counter!("radar_diffs_created_total").increment(1);
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "diff_id":        diff_id,
+            "changes_count":  changes.len() as i64,
+            "breaking_count": breaking_count,
+        })),
+    ))
 }
