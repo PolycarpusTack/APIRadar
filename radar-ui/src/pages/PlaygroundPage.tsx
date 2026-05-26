@@ -164,7 +164,9 @@ export default function PlaygroundPage() {
 
   function openEditForm(env: SandboxEnv) {
     setEditing(env)
-    setForm({ name: env.name, base_url: env.base_url, bearer_token: env.bearer_token, description: env.description })
+    // Leave bearer_token blank: the server returns only a masked hint.
+    // An empty field means "keep existing token"; typing a new value replaces it.
+    setForm({ name: env.name, base_url: env.base_url, bearer_token: '', description: env.description })
     setSaveState('idle')
     setFormOpen(true)
   }
@@ -597,7 +599,7 @@ function EnvForm({ form, setForm, editing, saveState, deleteConfirm, setDeleteCo
           <label className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Bearer token</label>
           <input
             type="password"
-            placeholder="Demo API key"
+            placeholder={editing ? 'Leave blank to keep existing token' : 'Demo API key'}
             value={form.bearer_token}
             onChange={(e) => setForm((f) => ({ ...f, bearer_token: e.target.value }))}
             className="w-full rounded-md border px-3 py-[6px] text-[12px] outline-none transition-colors"

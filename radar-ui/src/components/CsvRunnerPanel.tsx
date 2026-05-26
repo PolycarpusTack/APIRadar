@@ -367,8 +367,9 @@ export default function CsvRunnerPanel() {
           {!running ? (
             <button
               onClick={runBatch}
-              disabled={running}
-              className="flex items-center gap-2 rounded-md px-4 py-2 text-[12.5px] font-semibold"
+              disabled={running || unresolvedVars.length > 0}
+              title={unresolvedVars.length > 0 ? `Resolve all variables before running: ${unresolvedVars.map(m => `{{${m.variable}}}`).join(', ')}` : undefined}
+              className="flex items-center gap-2 rounded-md px-4 py-2 text-[12.5px] font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
               style={{ background: 'var(--cobalt)', color: 'var(--text-inverse)' }}
             >
               <Play className="h-3.5 w-3.5" />

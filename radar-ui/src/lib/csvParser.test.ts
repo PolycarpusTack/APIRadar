@@ -76,4 +76,16 @@ describe('parseCsv', () => {
     const r = parseCsv('a,b\n1,2\n\n3,4')
     expect(r.rows).toHaveLength(2)
   })
+
+  it('rejects rows with too many columns', () => {
+    const r = parseCsv('a,b\n1,2,3')
+    expect(r.error).toMatch(/shifted column/)
+  })
+
+  it('returns rows parsed so far when too-many-columns row is encountered', () => {
+    const r = parseCsv('a,b\ngood,row\nbad,row,extra')
+    expect(r.rows).toHaveLength(1)
+    expect(r.rows[0]).toEqual({ a: 'good', b: 'row' })
+    expect(r.error).toBeTruthy()
+  })
 })

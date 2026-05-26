@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Rows, Upload, X, CheckCircle, XCircle, Loader, Play, AlertCircle } from 'lucide-react'
 import Badge from './Badge'
+import { parseCsv } from '../lib/csvParser'
 
 interface BatchItem {
   label: string
@@ -24,50 +25,21 @@ const EXAMPLE_CSV = `label,format,base_url,head_url
 "Payment API v1→v2",openapi,https://example.com/api/v1/openapi.yaml,https://example.com/api/v2/openapi.yaml
 "User Service",,https://example.com/users/v1.json,https://example.com/users/v2.json`
 
-function parseCsvLine(line: string): string[] {
-  const result: string[] = []
-  let current = ''
-  let inQuotes = false
-  for (const ch of line) {
-    if (ch === '"') {
-      inQuotes = !inQuotes
-    } else if (ch === ',' && !inQuotes) {
-      result.push(current.trim())
-      current = ''
-    } else {
-      current += ch
-    }
-  }
-  result.push(current.trim())
-  return result
-}
+function toBatchItems(csvText: string): { items: BatchItem[]; error: string | null } {
+  const parsed = parseCsv(csvText)
+  if (parsed.error) return { items: [], error: parsed.error }
 
-function parseCsv(text: string): BatchItem[] {
-  const lines = text.trim().split('\n').filter(l => {
-    const t = l.trim()
-    return t && !t.startsWith('#')
-  })
-  if (lines.length < 2) return []
+  const items: BatchItem[] = parsed.rows
+    .map(row => ({
+      label: row['label'] ?? '',
+      service_id: row['service_id'] ?? '',
+      format: row['format'] || 'openapi',
+      base_url: row['base_url'] || row['base'] || '',
+      head_url: row['head_url'] || row['head'] || '',
+    }))
+    .filter(r => r.base_url && r.head_url)
 
-  const headers = parseCsvLine(lines[0]).map(h =>
-    h.toLowerCase().replace(/[^a-z_]/g, '')
-  )
-
-  const get = (cols: string[], name: string) => {
-    const idx = headers.indexOf(name)
-    return idx >= 0 ? (cols[idx] ?? '') : ''
-  }
-
-  return lines.slice(1).map(line => {
-    const cols = parseCsvLine(line)
-    return {
-      label: get(cols, 'label'),
-      service_id: get(cols, 'service_id'),
-      format: get(cols, 'format') || 'openapi',
-      base_url: get(cols, 'base_url') || get(cols, 'base'),
-      head_url: get(cols, 'head_url') || get(cols, 'head'),
-    }
-  }).filter(r => r.base_url && r.head_url)
+  return { items, error: null }
 }
 
 export default function BatchComparePanel({ onClose }: { onClose?: () => void }) {
@@ -91,7 +63,11 @@ export default function BatchComparePanel({ onClose }: { onClose?: () => void })
     setError(null)
     setResults(null)
 
-    const items = parseCsv(csvText)
+    const { items, error: parseError } = toBatchItems(csvText)
+    if (parseError) {
+      setError(parseError)
+      return
+    }
     if (items.length === 0) {
       setError('No valid rows found. Ensure your CSV has base_url and head_url columns.')
       return
@@ -121,8 +97,8 @@ export default function BatchComparePanel({ onClose }: { onClose?: () => void })
     }
   }
 
-  const parsed = parseCsv(csvText)
   const hasContent = csvText.trim().length > 0
+  const { items: previewItems } = hasContent ? toBatchItems(csvText) : { items: [] }
 
   return (
     <div
@@ -224,9 +200,9 @@ export default function BatchComparePanel({ onClose }: { onClose?: () => void })
             }}
           />
           {hasContent && (
-            <p className="text-[11px]" style={{ color: parsed.length > 0 ? 'var(--text-3)' : 'var(--red)' }}>
-              {parsed.length > 0
-                ? `${parsed.length} row${parsed.length !== 1 ? 's' : ''} parsed`
+            <p className="text-[11px]" style={{ color: previewItems.length > 0 ? 'var(--text-3)' : 'var(--red)' }}>
+              {previewItems.length > 0
+                ? `${previewItems.length} row${previewItems.length !== 1 ? 's' : ''} parsed`
                 : 'No valid rows — check that base_url and head_url columns are present'}
             </p>
           )}
@@ -247,13 +223,13 @@ export default function BatchComparePanel({ onClose }: { onClose?: () => void })
         <div className="flex justify-end">
           <button
             onClick={handleRun}
-            disabled={running || !hasContent || parsed.length === 0}
+            disabled={running || !hasContent || previewItems.length === 0}
             className="btn-primary flex items-center gap-2 rounded-md px-5 py-2 text-[12.5px] font-medium"
           >
             {running
               ? <Loader className="h-3.5 w-3.5 animate-spin" />
               : <Play className="h-3.5 w-3.5" />}
-            {running ? `Running ${parsed.length} comparison${parsed.length !== 1 ? 's' : ''}…` : 'Run Batch'}
+            {running ? `Running ${previewItems.length} comparison${previewItems.length !== 1 ? 's' : ''}…` : 'Run Batch'}
           </button>
         </div>
 

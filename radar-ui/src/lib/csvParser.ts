@@ -104,6 +104,14 @@ export function parseCsv(text: string, maxRows = MAX_ROWS): ParseResult {
     // Skip blank lines
     if (fields.length === 1 && fields[0] === '') continue
 
+    if (fields.length > headers.length) {
+      return {
+        headers,
+        rows,
+        error: `Row ${rows.length + 1} has ${fields.length} columns but the header has ${headers.length} — possible shifted column`,
+      }
+    }
+
     const row: Record<string, string> = {}
     headers.forEach((h, i) => {
       row[h] = fields[i] ?? ''
