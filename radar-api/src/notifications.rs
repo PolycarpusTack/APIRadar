@@ -264,6 +264,62 @@ async fn send_digest(pool: &sqlx::AnyPool) {
 // K-6: GitHub status check on acknowledgement
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_data(services: Vec<(&str, i64)>) -> DigestData {
+        DigestData {
+            total_diffs: 42,
+            breaking_diffs: 7,
+            top_services: services.into_iter().map(|(n, c)| (n.to_string(), c)).collect(),
+        }
+    }
+
+    #[test]
+    fn render_digest_html_is_valid_html_document() {
+        let html = render_digest_html(&sample_data(vec![]));
+        assert!(html.starts_with("<!DOCTYPE html>"));
+        assert!(html.contains("</html>"));
+    }
+
+    #[test]
+    fn render_digest_html_contains_total_diffs() {
+        let html = render_digest_html(&sample_data(vec![]));
+        assert!(html.contains("42"), "total_diffs 42 must appear in output");
+    }
+
+    #[test]
+    fn render_digest_html_contains_breaking_diffs() {
+        let html = render_digest_html(&sample_data(vec![]));
+        assert!(html.contains("7"), "breaking_diffs 7 must appear in output");
+    }
+
+    #[test]
+    fn render_digest_html_contains_service_names_when_present() {
+        let data = sample_data(vec![("payments-api", 5), ("billing-svc", 3)]);
+        let html = render_digest_html(&data);
+        assert!(html.contains("payments-api"));
+        assert!(html.contains("billing-svc"));
+        assert!(html.contains("5"));
+        assert!(html.contains("3"));
+    }
+
+    #[test]
+    fn render_digest_html_omits_table_when_no_services() {
+        let data = sample_data(vec![]);
+        let html = render_digest_html(&data);
+        assert!(!html.contains("Top services"));
+    }
+
+    #[test]
+    fn render_digest_html_contains_branding() {
+        let html = render_digest_html(&sample_data(vec![]));
+        assert!(html.contains("API Radar"));
+        assert!(html.contains("Weekly Digest"));
+    }
+}
+
 /// Parse a GitHub PR URL and post a 'success' status check.
 pub(crate) async fn post_github_status_acknowledged(pr_url: &str) {
     let token = match std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()) {

@@ -178,6 +178,81 @@ pub(crate) fn apply_evolution_rules(
         .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // is_rfc1918_or_loopback — covers every blocked range and a public address
+    #[test]
+    fn rfc1918_blocks_10_slash_8() {
+        assert!(is_rfc1918_or_loopback("10.0.0.1".parse().unwrap()));
+        assert!(is_rfc1918_or_loopback("10.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn rfc1918_blocks_172_16_slash_12() {
+        assert!(is_rfc1918_or_loopback("172.16.0.1".parse().unwrap()));
+        assert!(is_rfc1918_or_loopback("172.31.255.255".parse().unwrap()));
+        assert!(!is_rfc1918_or_loopback("172.15.0.1".parse().unwrap()));
+        assert!(!is_rfc1918_or_loopback("172.32.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn rfc1918_blocks_192_168_slash_16() {
+        assert!(is_rfc1918_or_loopback("192.168.0.1".parse().unwrap()));
+        assert!(is_rfc1918_or_loopback("192.168.255.255".parse().unwrap()));
+        assert!(!is_rfc1918_or_loopback("192.169.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn rfc1918_blocks_loopback() {
+        assert!(is_rfc1918_or_loopback("127.0.0.1".parse().unwrap()));
+        assert!(is_rfc1918_or_loopback("127.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn rfc1918_blocks_link_local() {
+        assert!(is_rfc1918_or_loopback("169.254.0.1".parse().unwrap()));
+        assert!(is_rfc1918_or_loopback("169.254.169.254".parse().unwrap())); // AWS IMDSv1
+    }
+
+    #[test]
+    fn rfc1918_allows_public_ip() {
+        assert!(!is_rfc1918_or_loopback("8.8.8.8".parse().unwrap()));
+        assert!(!is_rfc1918_or_loopback("1.1.1.1".parse().unwrap()));
+        assert!(!is_rfc1918_or_loopback("93.184.216.34".parse().unwrap()));
+    }
+
+    // is_ssrf_blocked — checks that scheme and IP-literal addresses are caught
+    // without relying on external DNS resolution.
+    #[test]
+    fn ssrf_blocked_non_https_scheme() {
+        assert!(is_ssrf_blocked("http://example.com/hook"));
+        assert!(is_ssrf_blocked("ftp://example.com/hook"));
+        assert!(is_ssrf_blocked("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn ssrf_blocked_invalid_url() {
+        assert!(is_ssrf_blocked("not-a-url"));
+        assert!(is_ssrf_blocked(""));
+    }
+
+    #[test]
+    fn ssrf_blocked_rfc1918_ip_literals() {
+        // IP literals resolve without external DNS — safe to test hermetically.
+        assert!(is_ssrf_blocked("https://192.168.1.100/hook"));
+        assert!(is_ssrf_blocked("https://10.0.0.1/hook"));
+        assert!(is_ssrf_blocked("https://172.16.0.1/hook"));
+        assert!(is_ssrf_blocked("https://169.254.169.254/latest/meta-data/")); // AWS IMDSv1
+    }
+
+    #[test]
+    fn ssrf_blocked_loopback_ip_literal() {
+        assert!(is_ssrf_blocked("https://127.0.0.1/hook"));
+    }
+}
+
 pub(crate) fn parse_codeowners(content: &str) -> Vec<String> {
     let mut owners: Vec<String> = content
         .lines()

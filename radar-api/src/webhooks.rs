@@ -473,6 +473,64 @@ async fn deliver_webhook_event(
 // GET /v1/webhooks/:id/deliveries — delivery audit log
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sign_payload_starts_with_sha256_prefix() {
+        let sig = sign_payload("secret", b"hello world");
+        assert!(sig.starts_with("sha256="), "expected sha256= prefix, got: {sig}");
+        assert_eq!(sig.len(), 7 + 64, "expected sha256= + 64 hex chars");
+    }
+
+    #[test]
+    fn sign_payload_is_deterministic() {
+        assert_eq!(sign_payload("key", b"body"), sign_payload("key", b"body"));
+    }
+
+    #[test]
+    fn sign_payload_changes_with_different_secret() {
+        assert_ne!(sign_payload("secret1", b"body"), sign_payload("secret2", b"body"));
+    }
+
+    #[test]
+    fn sign_payload_changes_with_different_body() {
+        assert_ne!(sign_payload("key", b"body-a"), sign_payload("key", b"body-b"));
+    }
+
+    #[test]
+    fn mask_secret_shows_first_4_ascii_chars() {
+        let (_, hint) = mask_secret("abcdefgh", false);
+        assert_eq!(hint, "abcd****");
+    }
+
+    #[test]
+    fn mask_secret_handles_short_secret() {
+        let (_, hint) = mask_secret("ab", false);
+        assert_eq!(hint, "ab****");
+    }
+
+    #[test]
+    fn mask_secret_handles_multibyte_utf8_without_panic() {
+        // "€" is 3 bytes; slicing at byte 4 would panic without char_indices
+        let (_, hint) = mask_secret("€€€€€", false);
+        assert!(hint.ends_with("****"));
+    }
+
+    #[test]
+    fn mask_secret_reveals_full_when_requested() {
+        let (full, _) = mask_secret("my-secret", true);
+        assert_eq!(full, Some("my-secret".to_string()));
+    }
+
+    #[test]
+    fn mask_secret_hides_full_when_not_requested() {
+        let (full, _) = mask_secret("my-secret", false);
+        assert_eq!(full, None);
+    }
+}
+
 pub(crate) async fn list_deliveries(
     State(pool): State<sqlx::AnyPool>,
     org: Option<axum::extract::Extension<JwtClaims>>,

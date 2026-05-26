@@ -3570,5 +3570,180 @@ mod tests {
         assert_eq!(json["error"], "parse_error");
         assert!(json["spec"].is_string());
     }
+
+    // -----------------------------------------------------------------------
+    // EPIC K — Webhooks (TD-NEW-1)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_webhook_create_rejects_http_scheme() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client
+            .post_json("/v1/webhooks", &serde_json::json!({"url": "http://example.com/hook"}))
+            .await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_create_rejects_rfc1918_ip_literal() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client
+            .post_json("/v1/webhooks", &serde_json::json!({"url": "https://192.168.1.100/hook"}))
+            .await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_create_rejects_loopback_ip() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client
+            .post_json("/v1/webhooks", &serde_json::json!({"url": "https://127.0.0.1/hook"}))
+            .await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_list_returns_empty_array_initially() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client.get("/v1/webhooks").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.json(), serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_webhook_delete_unknown_id_returns_404() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client.delete("/v1/webhooks/no-such-webhook").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_deliveries_for_unknown_webhook_returns_404() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client.get("/v1/webhooks/no-such-webhook/deliveries").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------------
+    // EPIC K — Scheduled Scans (TD-NEW-1)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_scan_create_rejects_interval_below_15_minutes() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client
+            .post_json(
+                "/v1/scheduled-scans",
+                &serde_json::json!({
+                    "service_id": "svc-test",
+                    "spec_url": "https://api.example.com/openapi.yaml",
+                    "interval_minutes": 10
+                }),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_scan_create_rejects_empty_service_id() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client
+            .post_json(
+                "/v1/scheduled-scans",
+                &serde_json::json!({
+                    "service_id": "",
+                    "spec_url": "https://api.example.com/openapi.yaml",
+                    "interval_minutes": 30
+                }),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_scan_create_rejects_http_spec_url() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client
+            .post_json(
+                "/v1/scheduled-scans",
+                &serde_json::json!({
+                    "service_id": "svc-scan",
+                    "spec_url": "http://internal.example.com/openapi.yaml",
+                    "interval_minutes": 30
+                }),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_scan_create_rejects_rfc1918_spec_url() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client
+            .post_json(
+                "/v1/scheduled-scans",
+                &serde_json::json!({
+                    "service_id": "svc-scan",
+                    "spec_url": "https://10.0.0.1/openapi.yaml",
+                    "interval_minutes": 30
+                }),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_scan_list_returns_empty_array_initially() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client.get("/v1/scheduled-scans").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.json(), serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_scan_delete_unknown_id_returns_404() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client.delete("/v1/scheduled-scans/no-such-scan").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_scan_run_history_returns_empty_array_initially() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client.get("/v1/scheduled-scans/history").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.json(), serde_json::json!([]));
+    }
+
+    // -----------------------------------------------------------------------
+    // EPIC K — Digest Preview (TD-NEW-1)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_digest_preview_returns_html_document() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client
+            .post_json("/v1/notifications/digest/preview", &serde_json::json!({}))
+            .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.text();
+        assert!(body.contains("<!DOCTYPE html>"), "response must be an HTML document");
+        assert!(body.contains("API Radar"), "response must contain product branding");
+        assert!(body.contains("Weekly Digest"), "response must contain digest heading");
+    }
 }
 
