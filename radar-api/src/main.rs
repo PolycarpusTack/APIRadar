@@ -93,6 +93,10 @@ async fn main() -> Result<()> {
                 Ok(n) => tracing::info!("evidence expiry: removed {n} expired impact_evidence rows"),
                 Err(e) => tracing::warn!("evidence expiry job failed: {e}"),
             }
+            match radar_api::purge_old_csv_runs(&pool_for_retention, days).await {
+                Ok(n) => tracing::info!("retention: purged {n} old csv run jobs (window={days}d)"),
+                Err(e) => tracing::warn!("csv run retention job failed: {e}"),
+            }
         }
     });
 

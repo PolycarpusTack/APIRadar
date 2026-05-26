@@ -140,6 +140,11 @@ export default function CsvRunnerPanel() {
   const [runError, setRunError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  // O-5: response body capture
+  const [captureBody, setCaptureBody] = useState(false)
+  const [responseBodies, setResponseBodies] = useState<Record<number, string>>({})
+  const [expandedBodies, setExpandedBodies] = useState<Set<number>>(new Set())
+
   const running = job !== null && (job.status === 'pending' || job.status === 'running')
 
   // Recompute mapping whenever request or CSV headers change
@@ -201,6 +206,7 @@ export default function CsvRunnerPanel() {
         duration_ms: number
         error: string | null
         url: string
+        response_body: string | null
       }>
       // Map server result shape to RowResult shape used by csvExporter.
       const mapped: RowResult[] = data.map((r, idx) => ({
@@ -212,6 +218,10 @@ export default function CsvRunnerPanel() {
         originalRow: rows[idx] ?? {},
       }))
       setResults(mapped)
+      // O-5: collect captured response bodies indexed by row number
+      const bodies: Record<number, string> = {}
+      data.forEach(r => { if (r.response_body) bodies[r.row_number] = r.response_body })
+      setResponseBodies(bodies)
     } catch {
       // Non-fatal: results already partially shown via job status
     }
@@ -231,7 +241,6 @@ export default function CsvRunnerPanel() {
     } catch {
       // Keep polling; transient errors are expected
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows])
 
   const runBatch = useCallback(async () => {
@@ -242,12 +251,14 @@ export default function CsvRunnerPanel() {
     setJobId(null)
 
     try {
+      setResponseBodies({})
+      setExpandedBodies(new Set())
       const resp = await fetch('/v1/csv-runs', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           name: `CSV run — ${new Date().toLocaleTimeString()}`,
-          request,
+          request: { ...request, capture_body: captureBody },
           rows,
         }),
       })
@@ -438,6 +449,17 @@ export default function CsvRunnerPanel() {
 
       {/* Run controls */}
       {rows.length > 0 && request.url && (
+        <div className="space-y-3">
+          {/* Capture body option (O-5) */}
+          <label className="flex items-center gap-2 text-[12px] cursor-pointer select-none" style={{ color: 'var(--text-2)' }}>
+            <input
+              type="checkbox"
+              checked={captureBody}
+              onChange={e => setCaptureBody(e.target.checked)}
+              className="rounded"
+            />
+            Capture response body (first 10 KB per row)
+          </label>
         <div className="flex items-center gap-3">
           {!running ? (
             <button
@@ -467,6 +489,7 @@ export default function CsvRunnerPanel() {
               {job?.status === 'pending' && <span style={{ color: 'var(--text-dim)' }}>(queued…)</span>}
             </div>
           )}
+        </div>
         </div>
       )}
 
@@ -553,29 +576,67 @@ export default function CsvRunnerPanel() {
                   <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>HTTP</th>
                   <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>Duration</th>
                   <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>URL</th>
-                  <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>Error</th>
+                  <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-dim)' }}>Error / Body</th>
                 </tr>
               </thead>
               <tbody>
-                {results.map(r => (
-                  <tr key={r.rowNumber} style={{ borderBottom: '1px solid var(--border)' }}>
-                    <td className="px-4 py-2" style={{ color: 'var(--text-dim)' }}>{r.rowNumber}</td>
-                    <td className="px-4 py-2">
-                      {r.error
-                        ? <XCircle className="h-3.5 w-3.5" style={{ color: 'var(--red)' }} />
-                        : r.httpStatus != null && r.httpStatus < 400
-                          ? <CheckCircle className="h-3.5 w-3.5" style={{ color: 'var(--green)' }} />
-                          : <XCircle className="h-3.5 w-3.5" style={{ color: 'var(--red)' }} />
-                      }
-                    </td>
-                    <td className="px-4 py-2 font-mono" style={{ color: statusColor(r) }}>
-                      {r.httpStatus ?? '—'}
-                    </td>
-                    <td className="px-4 py-2" style={{ color: 'var(--text-3)' }}>{r.durationMs}ms</td>
-                    <td className="px-4 py-2 font-mono truncate max-w-[260px]" style={{ color: 'var(--text-2)' }}>{r.url}</td>
-                    <td className="px-4 py-2 max-w-[200px] truncate" style={{ color: 'var(--red)' }}>{r.error ?? ''}</td>
-                  </tr>
-                ))}
+                {results.map(r => {
+                  const body = responseBodies[r.rowNumber]
+                  const isExpanded = expandedBodies.has(r.rowNumber)
+                  return (
+                    <>
+                      <tr key={r.rowNumber} style={{ borderBottom: body && isExpanded ? 'none' : '1px solid var(--border)' }}>
+                        <td className="px-4 py-2" style={{ color: 'var(--text-dim)' }}>{r.rowNumber}</td>
+                        <td className="px-4 py-2">
+                          {r.error
+                            ? <XCircle className="h-3.5 w-3.5" style={{ color: 'var(--red)' }} />
+                            : r.httpStatus != null && r.httpStatus < 400
+                              ? <CheckCircle className="h-3.5 w-3.5" style={{ color: 'var(--green)' }} />
+                              : <XCircle className="h-3.5 w-3.5" style={{ color: 'var(--red)' }} />
+                          }
+                        </td>
+                        <td className="px-4 py-2 font-mono" style={{ color: statusColor(r) }}>
+                          {r.httpStatus ?? '—'}
+                        </td>
+                        <td className="px-4 py-2" style={{ color: 'var(--text-3)' }}>{r.durationMs}ms</td>
+                        <td className="px-4 py-2 font-mono truncate max-w-[260px]" style={{ color: 'var(--text-2)' }}>{r.url}</td>
+                        <td className="px-4 py-2 max-w-[200px]">
+                          {r.error
+                            ? <span className="truncate" style={{ color: 'var(--red)' }}>{r.error}</span>
+                            : body
+                              ? (
+                                <button
+                                  onClick={() => setExpandedBodies(prev => {
+                                    const next = new Set(prev)
+                                    if (next.has(r.rowNumber)) next.delete(r.rowNumber)
+                                    else next.add(r.rowNumber)
+                                    return next
+                                  })}
+                                  className="text-[11px] underline"
+                                  style={{ color: 'var(--cobalt-mid)' }}
+                                >
+                                  {isExpanded ? 'hide body' : 'show body'}
+                                </button>
+                              )
+                              : <span style={{ color: 'var(--text-dim)' }}>—</span>
+                          }
+                        </td>
+                      </tr>
+                      {body && isExpanded && (
+                        <tr key={`body-${r.rowNumber}`} style={{ borderBottom: '1px solid var(--border)' }}>
+                          <td colSpan={6} className="px-4 pb-3 pt-0">
+                            <pre
+                              className="rounded p-3 text-[11px] font-mono overflow-x-auto max-h-40"
+                              style={{ background: 'var(--bg-raised)', color: 'var(--text-2)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+                            >
+                              {body}
+                            </pre>
+                          </td>
+                        </tr>
+                      )}
+                    </>
+                  )
+                })}
               </tbody>
             </table>
           )}

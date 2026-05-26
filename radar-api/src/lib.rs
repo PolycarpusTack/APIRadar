@@ -28,6 +28,7 @@ pub(crate) use auth::{
     oidc_login, oidc_callback, oidc_me, oidc_logout,
 };
 pub use settings::{purge_old_usage_events, expire_old_evidence};
+pub use csv_runner::purge_old_csv_runs;
 #[cfg(test)]
 pub(crate) use chrono::{Duration, Utc};
 #[cfg(test)]
@@ -3650,7 +3651,7 @@ mod tests {
                 "/v1/scheduled-scans",
                 &serde_json::json!({
                     "service_id": "svc-test",
-                    "spec_url": "https://api.example.com/openapi.yaml",
+                    "spec_url": "https://93.184.216.34/openapi.yaml",
                     "interval_minutes": 10
                 }),
             )
@@ -3667,7 +3668,7 @@ mod tests {
                 "/v1/scheduled-scans",
                 &serde_json::json!({
                     "service_id": "",
-                    "spec_url": "https://api.example.com/openapi.yaml",
+                    "spec_url": "https://93.184.216.34/openapi.yaml",
                     "interval_minutes": 30
                 }),
             )
@@ -3733,6 +3734,189 @@ mod tests {
         let resp = client.get("/v1/scheduled-scans/history").await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.json(), serde_json::json!([]));
+    }
+
+    // --- webhook happy-path ---
+
+    #[tokio::test]
+    async fn test_webhook_create_valid_returns_201() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client
+            .post_json(
+                "/v1/webhooks",
+                &serde_json::json!({"url": "https://93.184.216.34/incoming"}),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = resp.json();
+        assert!(body["id"].as_str().is_some());
+        assert_eq!(body["url"], "https://93.184.216.34/incoming");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_create_duplicate_returns_200() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let payload = serde_json::json!({"url": "https://93.184.216.34/dupe"});
+        let r1 = client.post_json("/v1/webhooks", &payload).await;
+        assert_eq!(r1.status(), StatusCode::CREATED);
+        let r2 = client.post_json("/v1/webhooks", &payload).await;
+        assert_eq!(r2.status(), StatusCode::OK);
+        assert_eq!(r1.json()["id"], r2.json()["id"]);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_list_shows_created_webhook() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        client
+            .post_json(
+                "/v1/webhooks",
+                &serde_json::json!({"url": "https://93.184.216.34/list-test"}),
+            )
+            .await;
+        let resp = client.get("/v1/webhooks").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let arr = resp.json();
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["url"], "https://93.184.216.34/list-test");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_delete_existing_returns_204() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let created = client
+            .post_json(
+                "/v1/webhooks",
+                &serde_json::json!({"url": "https://93.184.216.34/to-delete"}),
+            )
+            .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let id = created.json()["id"].as_str().unwrap().to_string();
+        let del = client.delete(&format!("/v1/webhooks/{id}")).await;
+        assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        let list = client.get("/v1/webhooks").await;
+        assert_eq!(list.json().as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_test_fire_returns_202() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let created = client
+            .post_json(
+                "/v1/webhooks",
+                &serde_json::json!({"url": "https://93.184.216.34/ping-target"}),
+            )
+            .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let id = created.json()["id"].as_str().unwrap().to_string();
+        let resp = client
+            .post_json(&format!("/v1/webhooks/{id}/test"), &serde_json::json!({}))
+            .await;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_deliveries_for_existing_webhook_returns_array() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let created = client
+            .post_json(
+                "/v1/webhooks",
+                &serde_json::json!({"url": "https://93.184.216.34/delivery-check"}),
+            )
+            .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let id = created.json()["id"].as_str().unwrap().to_string();
+        let resp = client.get(&format!("/v1/webhooks/{id}/deliveries")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.json().as_array().is_some());
+    }
+
+    // --- scheduled-scan happy-path ---
+
+    #[tokio::test]
+    async fn test_scan_create_valid_returns_201() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client
+            .post_json(
+                "/v1/scheduled-scans",
+                &serde_json::json!({
+                    "service_id": "svc-happy",
+                    "spec_url": "https://93.184.216.34/openapi.yaml",
+                    "interval_minutes": 30
+                }),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = resp.json();
+        assert!(body["id"].as_str().is_some());
+        assert_eq!(body["service_id"], "svc-happy");
+    }
+
+    #[tokio::test]
+    async fn test_scan_create_duplicate_returns_200() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let payload = serde_json::json!({
+            "service_id": "svc-dupe",
+            "spec_url": "https://93.184.216.34/openapi.yaml",
+            "interval_minutes": 30
+        });
+        let r1 = client.post_json("/v1/scheduled-scans", &payload).await;
+        assert_eq!(r1.status(), StatusCode::CREATED);
+        let r2 = client.post_json("/v1/scheduled-scans", &payload).await;
+        assert_eq!(r2.status(), StatusCode::OK);
+        assert_eq!(r1.json()["id"], r2.json()["id"]);
+    }
+
+    #[tokio::test]
+    async fn test_scan_list_shows_created_scan() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        client
+            .post_json(
+                "/v1/scheduled-scans",
+                &serde_json::json!({
+                    "service_id": "svc-list",
+                    "spec_url": "https://93.184.216.34/openapi.yaml",
+                    "interval_minutes": 60
+                }),
+            )
+            .await;
+        let resp = client.get("/v1/scheduled-scans").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let arr = resp.json();
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["service_id"], "svc-list");
+    }
+
+    #[tokio::test]
+    async fn test_scan_delete_existing_returns_204() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let created = client
+            .post_json(
+                "/v1/scheduled-scans",
+                &serde_json::json!({
+                    "service_id": "svc-del",
+                    "spec_url": "https://93.184.216.34/openapi.yaml",
+                    "interval_minutes": 15
+                }),
+            )
+            .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let id = created.json()["id"].as_str().unwrap().to_string();
+        let del = client.delete(&format!("/v1/scheduled-scans/{id}")).await;
+        assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        let list = client.get("/v1/scheduled-scans").await;
+        assert_eq!(list.json().as_array().unwrap().len(), 0);
     }
 
     // -----------------------------------------------------------------------
