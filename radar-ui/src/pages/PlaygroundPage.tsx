@@ -213,9 +213,14 @@ export default function PlaygroundPage() {
       }
     } else {
       // localStorage fallback
+      // When editing, preserve the existing bearer_token if the field was left blank
+      // (the edit form intentionally clears it so the masked hint isn't overwritten).
+      const mergedPayload = editing && !payload.bearer_token
+        ? { ...payload, bearer_token: editing.bearer_token }
+        : payload
       const saved: SandboxEnv = editing
-        ? { ...editing, ...payload, updated_at: new Date().toISOString() }
-        : { id: crypto.randomUUID(), ...payload, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+        ? { ...editing, ...mergedPayload, updated_at: new Date().toISOString() }
+        : { id: crypto.randomUUID(), ...mergedPayload, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
       const next = editing ? envs.map((e) => (e.id === editing.id ? saved : e)) : [...envs, saved]
       setEnvs(next)
       saveLocalEnvs(next)

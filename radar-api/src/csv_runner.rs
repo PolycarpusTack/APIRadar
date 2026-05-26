@@ -297,8 +297,11 @@ async fn set_job_running(pool: &sqlx::AnyPool, job_id: &str) {
 }
 
 fn build_http_client() -> reqwest::Client {
+    // Disable redirect following: a public URL could redirect to a private IP after
+    // the SSRF pre-check passes, bypassing the guard entirely.
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap_or_default()
 }

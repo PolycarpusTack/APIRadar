@@ -35,7 +35,7 @@ interface CsvRunJob {
 // Request template builder
 // ---------------------------------------------------------------------------
 
-const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
+const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']
 
 function RequestBuilder({ request, onChange }: {
   request: PlaygroundRequest
@@ -170,7 +170,7 @@ export default function CsvRunnerPanel() {
     if (!running) return
     const handler = (e: BeforeUnloadEvent) => {
       e.preventDefault()
-      e.returnValue = 'A run is in progress — leaving will cancel it'
+      e.returnValue = 'A run is in progress on the server — you can leave, but live progress will stop updating. The run will complete in the background.'
     }
     window.addEventListener('beforeunload', handler)
     return () => window.removeEventListener('beforeunload', handler)
