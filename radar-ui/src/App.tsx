@@ -1,4 +1,5 @@
 import { NavLink, Routes, Route, Navigate } from 'react-router-dom'
+import RadarIcon from './components/RadarIcon'
 import { useEffect, useState } from 'react'
 import { LayoutDashboard, GitCompare, Users, FileText, Telescope, FlaskConical, HelpCircle, Settings, Server, LogOut, Database, Shield, Sliders, Activity } from 'lucide-react'
 import HomePage from './pages/HomePage'
@@ -157,27 +158,49 @@ function Sidebar({ showSignOut }: { showSignOut: boolean }) {
       style={{ background: 'var(--bg-surface)', borderRight: '1px solid var(--border)' }}
     >
       {/* Logo */}
-      <div className="px-5 py-6" style={{ borderBottom: '1px solid var(--border)' }}>
-        <div className="flex items-center gap-2.5 mb-1">
-          <div
-            className="relative flex-shrink-0 h-8 w-8 overflow-hidden rounded-[7px]"
-            style={{ background: 'linear-gradient(135deg, var(--cobalt) 0%, var(--cobalt-mid) 100%)' }}
-          >
-            <div className="absolute inset-[6px] rounded-[3px]" style={{ background: 'var(--text-inverse)' }} />
+      <div className="px-5 py-5" style={{ borderBottom: '1px solid var(--border)' }}>
+        <div className="flex items-center gap-3">
+          <RadarIcon size={34} className="flex-shrink-0 rounded-[7px]" />
+          <div className="flex flex-col" style={{ gap: '1px' }}>
+            <span
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: '9px',
+                fontWeight: 600,
+                letterSpacing: '3px',
+                textTransform: 'uppercase',
+                color: 'var(--cobalt-mid)',
+                lineHeight: 1.3,
+              }}
+            >
+              API
+            </span>
+            <span
+              style={{
+                fontFamily: 'var(--font-head)',
+                fontSize: '16px',
+                fontWeight: 700,
+                letterSpacing: '-0.5px',
+                color: 'var(--text-1)',
+                lineHeight: 1,
+              }}
+            >
+              Radar
+            </span>
+            <span
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: '8.5px',
+                letterSpacing: '0.8px',
+                textTransform: 'uppercase',
+                color: 'var(--text-dim)',
+                lineHeight: 1.5,
+              }}
+            >
+              Contract Monitor
+            </span>
           </div>
-          <span
-            className="text-[17px] font-bold tracking-[-0.4px]"
-            style={{ fontFamily: 'var(--font-head)', color: 'var(--text-1)' }}
-          >
-            Radar Monitor
-          </span>
         </div>
-        <p
-          className="text-[10px] uppercase tracking-[0.8px] pl-[42px]"
-          style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-3)' }}
-        >
-          API Contract
-        </p>
       </div>
 
       {/* Navigation */}

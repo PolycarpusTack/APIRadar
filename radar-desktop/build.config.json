@@ -1,6 +1,7 @@
 {
   "appId": "com.radarmonitor.desktop",
-  "productName": "Radar Monitor",
+  "productName": "API Radar",
+  "icon": "resources/icon.ico",
   "directories": {
     "output": "dist",
     "buildResources": "resources"
