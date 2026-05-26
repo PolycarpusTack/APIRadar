@@ -141,6 +141,11 @@ See [`docs/demo-scenario.md`](./docs/demo-scenario.md) for the full step-by-step
 | API Playground (Scalar) | `GET /app/` → Playground tab |
 | Jira integration | `JIRA_BASE_URL` + `JIRA_TOKEN` |
 | Postman push | `POSTMAN_API_KEY` + `--postman-workspace` |
+| Webhooks (outbound diff notifications) | `POST /v1/webhooks` |
+| Scheduled spec scanning | `POST /v1/scheduled-scans` |
+| CSV Runner — bulk API execution from spreadsheet | `POST /v1/csv-runs` |
+| CSV Runner retry (3 attempts, 0 s→1 s→4 s backoff) | automatic on 5xx / network errors |
+| CSV Runner response body capture (opt-in, 10 KB/row) | `capture_body: true` in run config |
 
 ## Configuration — `.radar.yml`
 
@@ -244,6 +249,12 @@ POST /v1/policy-decisions                 → persist policy verdict from a drif
 GET  /v1/settings                         → app settings (policy, retention)
 POST /v1/generate-tests                   → AI test generation
 GET  /v1/sandbox-envs                     → Playground environments
+POST /v1/webhooks                         → register outbound webhook
+GET  /v1/webhooks/{id}/deliveries         → delivery history
+POST /v1/scheduled-scans                  → schedule recurring spec scan
+POST /v1/csv-runs                         → start a CSV bulk-execution run
+GET  /v1/csv-runs/{id}                    → job status + progress
+GET  /v1/csv-runs/{id}/results            → per-row results (with optional response body)
 ```
 
 ## Docs

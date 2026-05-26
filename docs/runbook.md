@@ -161,11 +161,21 @@ pg_restore -d drift drift-20260518.dump
 
 ### Manual retention purge
 
+The 1-hour background job (`purge_old_usage_events`, `expire_old_evidence`, `purge_old_csv_runs`) runs automatically. To trigger manually:
+
 ```bash
 # Delete usage_event rows older than 90 days
 psql $DATABASE_URL -c \
   "DELETE FROM usage_event WHERE recorded_at < NOW() - INTERVAL '90 days';"
+
+# Delete terminal csv_run_job rows older than 90 days (csv_run_result cascades automatically)
+psql $DATABASE_URL -c \
+  "DELETE FROM csv_run_job \
+   WHERE status IN ('completed','failed','cancelled') \
+   AND created_at < NOW() - INTERVAL '90 days';"
 ```
+
+The retention window (default 90 days) is read from `SELECT value FROM settings WHERE key = 'retention.days'` each hour, so UI changes to **Settings → Retention** take effect at the next hourly tick without a restart.
 
 ---
 
@@ -276,6 +286,29 @@ was deleted). Verify the diff ID with `GET /v1/diffs` first.
 
 1. Check that `SOURCE_DIR` contains `.ts`, `.py`, or `.go` files.
 2. Excluded directories: `node_modules`, `vendor`, `target`, `.git`, `dist`, `build`.
+
+### "CSV Runner jobs never cleaned up / disk usage growing"
+
+Old `csv_run_job` (and child `csv_run_result`) rows are purged hourly by the background retention job. Only terminal-status rows (`completed`, `failed`, `cancelled`) are deleted — `running`/`pending` rows are never purged automatically.
+
+Verify the job is running: look for `retention: purged N old csv run jobs` in server logs (level INFO).
+
+If jobs are stuck in `running` status (executor crashed mid-run), they must be manually resolved:
+```bash
+psql $DATABASE_URL -c \
+  "UPDATE csv_run_job SET status = 'failed', completed_at = NOW() \
+   WHERE status = 'running' AND started_at < NOW() - INTERVAL '2 hours';"
+```
+
+Check the current retention window:
+```bash
+psql $DATABASE_URL -c \
+  "SELECT value FROM settings WHERE key = 'retention.days';"
+```
+
+### "CSV Runner row fails immediately without retry"
+
+4xx responses are definitive (client error) and are not retried. Only HTTP 5xx and network errors trigger the 3-attempt retry sequence (delays: 0 s → 1 s → 4 s). Check the `error` column in the result export — if it shows `HTTP 4xx`, the target API rejected the request, not a transient failure.
 
 ---
 

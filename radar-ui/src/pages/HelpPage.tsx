@@ -519,6 +519,33 @@ function BeginnersGuide() {
               the ticket description directly into the box.
             </Callout>
           </TourStop>
+
+          <TourStop icon={Zap} page="CSV Runner" badge="Testing" tagline="Bulk API calls from a spreadsheet — no code needed">
+            <p>
+              Upload a CSV file where each row is one API call. Define a request template once —
+              URL, method, headers, body — using <Code>{'{{column_name}}'}</Code> placeholders, and
+              Radar substitutes each row's values and fires the requests in sequence.
+            </p>
+            <p>
+              The progress bar and live counter update as rows complete. When the run finishes,
+              you can download the full results as CSV (row number, HTTP status, duration, any error).
+            </p>
+            <p>
+              Before clicking <strong style={{ color: 'var(--text-1)' }}>Run</strong>, check
+              <strong style={{ color: 'var(--text-1)' }}> Capture response body</strong> to store the
+              first 10 KB of each response alongside the result — expand any row to read the raw
+              response inline, without re-running the call.
+            </p>
+            <Callout variant="tip">
+              Transient server errors (HTTP 5xx) are automatically retried up to 3 times with a short
+              backoff — so a momentary blip won't fail an entire batch. Client errors (4xx) are not
+              retried, as the server already gave a definitive answer.
+            </Callout>
+            <Callout variant="analogy">
+              Think of it like a mail-merge, but for API calls. You prepare the template once; your
+              spreadsheet supplies the variables. Radar sends the letters.
+            </Callout>
+          </TourStop>
         </div>
       </section>
 
@@ -762,6 +789,47 @@ function BeginnersGuide() {
               element is skipped.
             </p>
           </FAQ>
+          <FAQ q="What is the CSV Runner and when should I use it?">
+            <p>
+              The CSV Runner (sidebar → <strong>CSV Runner</strong>) lets you send a batch of API
+              calls from a spreadsheet — no code, no Postman, no scripting. Each row in your CSV
+              becomes one HTTP request; the URL, body, and headers are built from a template you
+              define once using <Code>{'{{column_name}}'}</Code> placeholders.
+            </p>
+            <p className="mt-2">
+              Typical uses: smoke-testing a list of customer IDs, bulk-seeding a staging database,
+              verifying that all endpoints in a changeset still return 200 after a deployment.
+            </p>
+          </FAQ>
+          <FAQ q="What happens if the server returns a 503 mid-run?">
+            <p>
+              For HTTP 5xx responses and network errors, Radar automatically retries the row up to
+              <strong> 3 times</strong>, waiting 1 second after the first retry and 4 seconds after
+              the second. If all three attempts fail, the row is recorded as an error with the last
+              HTTP status or error message.
+            </p>
+            <p className="mt-2">
+              4xx responses (e.g. 400, 404, 422) are <strong>not</strong> retried — the server
+              gave a definitive answer, and retrying would just repeat the same rejection.
+            </p>
+          </FAQ>
+          <FAQ q="What does 'Capture response body' do in the CSV Runner?">
+            <p>
+              When you tick <strong>Capture response body</strong> before starting a run, Radar
+              stores the first 10 KB of each row's response in the database alongside the HTTP
+              status and timing.
+            </p>
+            <p className="mt-2">
+              After the run completes, expand any result row to read the raw response inline —
+              useful for debugging unexpected 4xx bodies or checking what was returned for a specific
+              input row without re-running the entire batch. The body is stored per-row and survives
+              page reloads.
+            </p>
+            <Callout variant="warning">
+              Leave it unchecked for large batches if you don't need to inspect bodies — storing
+              10 KB × hundreds of rows uses more database space than storing just the status.
+            </Callout>
+          </FAQ>
           <FAQ q="The breaking-change count seems high. Should I be worried?">
             <p>
               Not necessarily. A high count means your teams are moving fast. What matters is the
@@ -805,6 +873,7 @@ function BeginnersGuide() {
               ['Lookback Window', 'The rolling time window (default 30 days) used to decide if a consumer is "active".'],
               ['Playground', 'The embedded interactive API explorer (powered by Scalar). Replaces Postman for demos and connectivity checks.'],
               ['Sandbox Environment', 'A named base URL + bearer token pair saved in the shared database, used to pre-configure the Playground for demos. Visible to all teammates.'],
+              ['CSV Runner', 'A bulk execution tool that reads a CSV file and fires one API request per row, substituting column values into a URL/method/body template. Supports opt-in response body capture and automatic 5xx retry.'],
             ].map(([term, def]) => (
               <div key={term} className="space-y-0.5">
                 <span className="text-[12px] font-bold" style={{ color: 'var(--text-1)' }}>{term}</span>
