@@ -50,6 +50,11 @@ pub(crate) struct RequestTemplate {
     /// body are stored in csv_run_result.response_body (O-5).
     #[serde(default)]
     pub capture_body: bool,
+    /// When true, rows are retried on 5xx / network errors (up to CSV_ROW_MAX_ATTEMPTS).
+    /// Defaults to false — callers should opt in for idempotent targets only.
+    /// Safe methods (GET, HEAD) always get the full retry budget regardless of this flag.
+    #[serde(default)]
+    pub enable_retry: bool,
 }
 
 #[derive(Deserialize, serde::Serialize, Clone)]
@@ -81,6 +86,8 @@ struct RowOutcome {
     error: Option<String>,
     url: String,
     response_body: Option<String>,
+    /// Serialised JSON of the original input row, for server-side failed-row export.
+    row_data: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +248,7 @@ pub(crate) async fn get_csv_run_results(
     }
 
     let rows = sqlx::query(
-        "SELECT row_number, http_status, duration_ms, error, url, response_body \
+        "SELECT row_number, http_status, duration_ms, error, url, response_body, row_data \
          FROM csv_run_result WHERE job_id = ? ORDER BY row_number ASC \
          LIMIT ? OFFSET ?",
     )
@@ -261,6 +268,7 @@ pub(crate) async fn get_csv_run_results(
                 "error":          r.try_get::<Option<String>, _>("error").unwrap_or(None),
                 "url":            r.try_get::<String, _>("url").unwrap_or_default(),
                 "response_body":  r.try_get::<Option<String>, _>("response_body").unwrap_or(None),
+                "row_data":       r.try_get::<Option<String>, _>("row_data").unwrap_or(None),
             })
         })
         .collect();
@@ -317,12 +325,14 @@ async fn run_rows(
     let mut error_count = 0i64;
 
     for (i, row) in rows.iter().enumerate() {
-        if i % 10 == 0 && job_is_cancelled(pool, job_id).await {
+        if job_is_cancelled(pool, job_id).await {
             break;
         }
         let row_number = (i + 1) as i64;
-        let outcome = dispatch_row(client, template, row, row_number).await;
-        if outcome.error.is_some() || outcome.http_status.is_none() {
+        let outcome = dispatch_row(pool, job_id, client, template, row, row_number).await;
+        // Count any HTTP error (4xx/5xx) or network failure as an error, not just
+        // network-only failures. A 404 is a failed row even though error field is None.
+        if outcome.error.is_some() || outcome.http_status.is_none_or(|s| s >= 400) {
             error_count += 1;
         }
         insert_result(pool, job_id, &outcome).await;
@@ -342,7 +352,13 @@ async fn finalize_job(
     error_count: i64,
     executor_failed: bool,
 ) {
-    let status = if executor_failed { "failed" } else { "completed" };
+    let status = if executor_failed {
+        "failed"
+    } else if error_count > 0 {
+        "completed_with_failures"
+    } else {
+        "completed"
+    };
     let completed_at = Utc::now().to_rfc3339();
     let _ = sqlx::query(
         "UPDATE csv_run_job \
@@ -363,18 +379,22 @@ async fn finalize_job(
 // ---------------------------------------------------------------------------
 
 async fn dispatch_row(
+    pool: &sqlx::AnyPool,
+    job_id: &str,
     client: &reqwest::Client,
     template: &RequestTemplate,
     row: &serde_json::Value,
     row_number: i64,
 ) -> RowOutcome {
+    let row_data = serde_json::to_string(row).unwrap_or_default();
+
     let row_obj = match row.as_object() {
         Some(o) => o,
         None => {
             return RowOutcome {
                 row_number, http_status: None, duration_ms: 0,
                 error: Some("row is not an object".into()), url: String::new(),
-                response_body: None,
+                response_body: None, row_data,
             }
         }
     };
@@ -384,7 +404,7 @@ async fn dispatch_row(
         return RowOutcome {
             row_number, http_status: None, duration_ms: 0,
             error: Some("URL blocked by SSRF policy".into()), url: resolved_url,
-            response_body: None,
+            response_body: None, row_data,
         };
     }
 
@@ -394,17 +414,25 @@ async fn dispatch_row(
         return RowOutcome {
             row_number, http_status: None, duration_ms: 0,
             error: Some(format!("unsupported HTTP method: {}", template.method)),
-            url: resolved_url, response_body: None,
+            url: resolved_url, response_body: None, row_data,
         };
     }
+
+    // Safe methods (GET, HEAD) always retry; other methods only if opted in.
+    let is_safe_method = matches!(method_upper.as_str(), "GET" | "HEAD");
+    let max_attempts = if is_safe_method || template.enable_retry { CSV_ROW_MAX_ATTEMPTS } else { 1 };
 
     let resolved_body = resolve_vars(&template.body, row_obj);
     let start = std::time::Instant::now();
     let mut last_http_status: Option<i64> = None;
     let mut last_error: Option<String> = None;
 
-    for attempt in 0u8..CSV_ROW_MAX_ATTEMPTS {
+    for attempt in 0u8..max_attempts {
         if attempt > 0 {
+            if job_is_cancelled(pool, job_id).await {
+                last_error = last_error.or(Some("cancelled".into()));
+                break;
+            }
             tokio::time::sleep(tokio::time::Duration::from_secs(
                 CSV_ROW_RETRY_DELAYS_SECS[attempt as usize],
             ))
@@ -428,6 +456,7 @@ async fn dispatch_row(
                     error: None,
                     url: resolved_url,
                     response_body: body,
+                    row_data,
                 };
             }
             Err(e) => {
@@ -443,6 +472,7 @@ async fn dispatch_row(
         error: last_error,
         url: resolved_url,
         response_body: None,
+        row_data,
     }
 }
 
@@ -569,8 +599,8 @@ async fn insert_result(pool: &sqlx::AnyPool, job_id: &str, r: &RowOutcome) {
     let now = Utc::now().to_rfc3339();
     if let Err(e) = sqlx::query(
         "INSERT INTO csv_run_result \
-         (id, job_id, row_number, http_status, duration_ms, error, url, response_body, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (id, job_id, row_number, http_status, duration_ms, error, url, response_body, row_data, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(job_id)
@@ -580,6 +610,7 @@ async fn insert_result(pool: &sqlx::AnyPool, job_id: &str, r: &RowOutcome) {
     .bind(r.error.as_deref())
     .bind(&r.url)
     .bind(r.response_body.as_deref())
+    .bind(&r.row_data)
     .bind(&now)
     .execute(pool)
     .await
@@ -631,7 +662,7 @@ pub async fn purge_old_csv_runs(pool: &sqlx::AnyPool, days: u32) -> Result<u64, 
     let cutoff = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
     let result = sqlx::query(
         "DELETE FROM csv_run_job \
-         WHERE status IN ('completed', 'failed', 'cancelled') AND created_at < ?",
+         WHERE status IN ('completed', 'completed_with_failures', 'failed', 'cancelled') AND created_at < ?",
     )
     .bind(&cutoff)
     .execute(pool)

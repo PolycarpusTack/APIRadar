@@ -1,7 +1,7 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
 import {
   Upload, Play, Square, Download, FileDown,
-  CheckCircle, XCircle, AlertCircle, Loader2, Eye, EyeOff,
+  CheckCircle, XCircle, AlertCircle, Loader2, Eye, EyeOff, History,
 } from 'lucide-react'
 import { parseCsv } from '../lib/csvParser'
 import { extractVariables, type PlaygroundRequest } from '../lib/variableExtractor'
@@ -21,7 +21,7 @@ interface MappingEntry {
 interface CsvRunJob {
   id: string
   name: string
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  status: 'pending' | 'running' | 'completed' | 'completed_with_failures' | 'failed' | 'cancelled'
   total_rows: number
   completed_rows: number
   error_count: number
@@ -63,7 +63,7 @@ function RequestBuilder({ request, onChange }: {
       <div className="flex gap-2">
         <select
           value={request.method}
-          onChange={e => onChange({ ...request, method: e.target.value })}
+          onChange={e => { onChange({ ...request, method: e.target.value }) }}
           className="rounded border px-2 py-1.5 text-[12px] font-semibold outline-none"
           style={{ ...style, width: '90px', fontFamily: 'var(--font-mono)' }}
         >
@@ -145,6 +145,13 @@ export default function CsvRunnerPanel() {
   const [responseBodies, setResponseBodies] = useState<Record<number, string>>({})
   const [expandedBodies, setExpandedBodies] = useState<Set<number>>(new Set())
 
+  // Retry option — only relevant for POST/PUT/PATCH/DELETE (GET/HEAD always retry on backend)
+  const [enableRetry, setEnableRetry] = useState(false)
+
+  // Run history
+  const [recentRuns, setRecentRuns] = useState<CsvRunJob[]>([])
+  const [historyOpen, setHistoryOpen] = useState(false)
+
   const running = job !== null && (job.status === 'pending' || job.status === 'running')
 
   // Recompute mapping whenever request or CSV headers change
@@ -157,6 +164,9 @@ export default function CsvRunnerPanel() {
     }))
     setMapping(newMapping)
   }, [request, headers])
+
+  // Load history on mount
+  useEffect(() => { fetchRecentRuns() }, [])
 
   // Cleanup polling on unmount
   useEffect(() => {
@@ -207,18 +217,18 @@ export default function CsvRunnerPanel() {
         error: string | null
         url: string
         response_body: string | null
+        row_data: string | null
       }>
-      // Map server result shape to RowResult shape used by csvExporter.
-      const mapped: RowResult[] = data.map((r, idx) => ({
-        rowNumber: r.row_number,
-        httpStatus: r.http_status,
-        durationMs: r.duration_ms,
-        error: r.error,
-        url: r.url,
-        originalRow: rows[idx] ?? {},
-      }))
+      const mapped: RowResult[] = data.map((r, idx) => {
+        // Prefer the in-memory CSV row (current session); fall back to server-persisted
+        // row_data so historical runs and re-opened tabs still have correct originalRow.
+        let originalRow: Record<string, string> = rows[idx] ?? {}
+        if (Object.keys(originalRow).length === 0 && r.row_data) {
+          try { originalRow = JSON.parse(r.row_data) } catch { /* keep empty */ }
+        }
+        return { rowNumber: r.row_number, httpStatus: r.http_status, durationMs: r.duration_ms, error: r.error, url: r.url, originalRow }
+      })
       setResults(mapped)
-      // O-5: collect captured response bodies indexed by row number
       const bodies: Record<number, string> = {}
       data.forEach(r => { if (r.response_body) bodies[r.row_number] = r.response_body })
       setResponseBodies(bodies)
@@ -227,16 +237,36 @@ export default function CsvRunnerPanel() {
     }
   }
 
+  async function fetchRecentRuns() {
+    try {
+      const resp = await fetch('/v1/csv-runs')
+      if (!resp.ok) return
+      const data = await resp.json() as CsvRunJob[]
+      setRecentRuns(data)
+    } catch { /* non-fatal */ }
+  }
+
+  async function loadHistoricalRun(run: CsvRunJob) {
+    setJob(run)
+    setJobId(run.id)
+    setResults([])
+    setResponseBodies({})
+    setExpandedBodies(new Set())
+    await loadResults(run.id)
+    setHistoryOpen(false)
+  }
+
   const pollJob = useCallback(async (id: string) => {
     try {
       const resp = await fetch(`/v1/csv-runs/${id}`)
       if (!resp.ok) return
       const data = await resp.json() as CsvRunJob
       setJob(data)
-      if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
+      if (data.status === 'completed' || data.status === 'completed_with_failures' || data.status === 'failed' || data.status === 'cancelled') {
         if (pollRef.current) clearInterval(pollRef.current)
         pollRef.current = null
         await loadResults(id)
+        fetchRecentRuns()
       }
     } catch {
       // Keep polling; transient errors are expected
@@ -258,7 +288,7 @@ export default function CsvRunnerPanel() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           name: `CSV run — ${new Date().toLocaleTimeString()}`,
-          request: { ...request, capture_body: captureBody },
+          request: { ...request, capture_body: captureBody, enable_retry: enableRetry },
           rows,
         }),
       })
@@ -450,16 +480,21 @@ export default function CsvRunnerPanel() {
       {/* Run controls */}
       {rows.length > 0 && request.url && (
         <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
           {/* Capture body option (O-5) */}
           <label className="flex items-center gap-2 text-[12px] cursor-pointer select-none" style={{ color: 'var(--text-2)' }}>
-            <input
-              type="checkbox"
-              checked={captureBody}
-              onChange={e => setCaptureBody(e.target.checked)}
-              className="rounded"
-            />
+            <input type="checkbox" checked={captureBody} onChange={e => setCaptureBody(e.target.checked)} className="rounded" />
             Capture response body (first 10 KB per row)
           </label>
+          {/* Retry option — only shown for non-safe methods; GET/HEAD always retry */}
+          {!['GET', 'HEAD'].includes(request.method) && (
+            <label className="flex items-center gap-2 text-[12px] cursor-pointer select-none" style={{ color: enableRetry ? 'var(--amber)' : 'var(--text-2)' }}>
+              <input type="checkbox" checked={enableRetry} onChange={e => setEnableRetry(e.target.checked)} className="rounded" />
+              Retry on 5xx failure
+              {enableRetry && <span className="text-[11px]" style={{ color: 'var(--amber)' }}>(may duplicate {request.method} operations)</span>}
+            </label>
+          )}
+        </div>
         <div className="flex items-center gap-3">
           {!running ? (
             <button
@@ -521,15 +556,17 @@ export default function CsvRunnerPanel() {
                 <span
                   className="text-[11px] rounded px-1.5 py-0.5 font-medium"
                   style={{
-                    background: job.status === 'completed' ? 'var(--green-bg, rgba(0,200,100,0.1))' :
-                               job.status === 'failed' ? 'var(--red-bg)' :
-                               job.status === 'cancelled' ? 'var(--bg-raised)' : 'var(--bg-raised)',
-                    color: job.status === 'completed' ? 'var(--green)' :
-                           job.status === 'failed' ? 'var(--red)' :
-                           'var(--text-dim)',
+                    background:
+                      job.status === 'completed' ? 'rgba(0,200,100,0.1)' :
+                      job.status === 'completed_with_failures' ? 'rgba(251,191,36,0.12)' :
+                      job.status === 'failed' ? 'var(--red-bg)' : 'var(--bg-raised)',
+                    color:
+                      job.status === 'completed' ? 'var(--green)' :
+                      job.status === 'completed_with_failures' ? 'var(--amber)' :
+                      job.status === 'failed' ? 'var(--red)' : 'var(--text-dim)',
                   }}
                 >
-                  {job.status}
+                  {job.status === 'completed_with_failures' ? 'completed with failures' : job.status}
                 </span>
               )}
             </div>
@@ -644,6 +681,62 @@ export default function CsvRunnerPanel() {
           {results.length === 0 && job && (job.status === 'failed' || job.status === 'cancelled') && (
             <div className="px-5 py-4 text-[12px]" style={{ color: 'var(--text-dim)' }}>
               {job.error_message ?? 'No results recorded.'}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Run History */}
+      {recentRuns.length > 0 && (
+        <div className="rounded-lg border overflow-hidden" style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
+          <button
+            className="w-full flex items-center justify-between px-5 py-3"
+            onClick={() => setHistoryOpen(o => !o)}
+          >
+            <div className="flex items-center gap-2">
+              <History className="h-3.5 w-3.5" style={{ color: 'var(--text-dim)' }} />
+              <span className="text-[12.5px] font-semibold" style={{ color: 'var(--text-1)' }}>Recent Runs</span>
+              <span className="text-[11px] rounded-full px-1.5 py-0.5" style={{ background: 'var(--bg-raised)', color: 'var(--text-dim)' }}>{recentRuns.length}</span>
+            </div>
+            <span className="text-[11px]" style={{ color: 'var(--text-dim)' }}>{historyOpen ? 'hide' : 'show'}</span>
+          </button>
+          {historyOpen && (
+            <div style={{ borderTop: '1px solid var(--border)' }}>
+              {recentRuns.map(run => {
+                const statusColor =
+                  run.status === 'completed' ? 'var(--green)' :
+                  run.status === 'completed_with_failures' ? 'var(--amber)' :
+                  run.status === 'failed' ? 'var(--red)' :
+                  run.status === 'running' ? 'var(--cobalt-mid)' : 'var(--text-dim)'
+                const statusLabel =
+                  run.status === 'completed_with_failures' ? 'partial' : run.status
+                return (
+                  <button
+                    key={run.id}
+                    onClick={() => loadHistoricalRun(run)}
+                    className="w-full flex items-center justify-between px-5 py-2.5 hover:bg-[var(--bg-hover)] text-left transition-colors"
+                    style={{ borderBottom: '1px solid var(--border)' }}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className="text-[12px] truncate max-w-[280px]" style={{ color: 'var(--text-1)' }}>
+                        {run.name || 'Unnamed run'}
+                      </span>
+                      <span className="text-[11px] shrink-0" style={{ color: statusColor }}>{statusLabel}</span>
+                      {run.error_count > 0 && (
+                        <span className="text-[11px] shrink-0" style={{ color: 'var(--red)' }}>{run.error_count} err</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <span className="text-[11px]" style={{ color: 'var(--text-dim)' }}>
+                        {run.completed_rows}/{run.total_rows} rows
+                      </span>
+                      <span className="text-[11px]" style={{ color: 'var(--text-dim)' }}>
+                        {new Date(run.created_at).toLocaleTimeString()}
+                      </span>
+                    </div>
+                  </button>
+                )
+              })}
             </div>
           )}
         </div>
