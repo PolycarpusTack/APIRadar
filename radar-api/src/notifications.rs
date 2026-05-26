@@ -190,7 +190,32 @@ pub(crate) fn start_digest_scheduler(pool: sqlx::AnyPool) {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             let now = Utc::now();
             if now.weekday() == chrono::Weekday::Mon && now.hour() == 8 {
+                // ISO year-week key prevents duplicate sends across restarts.
+                let week_key = format!("digest_sent_{}", now.format("%G-W%V"));
+                let already_sent = sqlx::query(
+                    "SELECT 1 FROM settings WHERE key = ?",
+                )
+                .bind(&week_key)
+                .fetch_optional(&pool)
+                .await
+                .map(|r| r.is_some())
+                .unwrap_or(false);
+
+                if already_sent {
+                    tracing::info!("digest: already sent for {week_key}, skipping");
+                    continue;
+                }
+
                 send_digest(&pool).await;
+
+                let _ = sqlx::query(
+                    "INSERT INTO settings (key, value) VALUES (?, ?)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                )
+                .bind(&week_key)
+                .bind(Utc::now().to_rfc3339())
+                .execute(&pool)
+                .await;
             }
         }
     });

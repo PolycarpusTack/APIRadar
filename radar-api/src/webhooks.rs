@@ -572,3 +572,139 @@ pub(crate) async fn list_deliveries(
 
     Ok(Json(list))
 }
+
+// ---------------------------------------------------------------------------
+// TD-K5: Startup outbox sweep — re-dispatch deliveries abandoned mid-flight
+// ---------------------------------------------------------------------------
+
+pub(crate) fn start_webhook_outbox(pool: sqlx::AnyPool) {
+    tokio::spawn(async move {
+        // Wait for the server to finish binding/routing before issuing DB queries.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        let rows = match sqlx::query(
+            "SELECT wd.id, wd.event, wd.payload, \
+                    w.id as webhook_id, w.url, w.secret, w.type as webhook_type \
+             FROM webhook_delivery wd \
+             JOIN webhook w ON w.id = wd.webhook_id \
+             WHERE wd.status = 'pending'",
+        )
+        .fetch_all(&pool)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("outbox: failed to load pending deliveries: {e}");
+                return;
+            }
+        };
+
+        if rows.is_empty() {
+            return;
+        }
+
+        tracing::info!("outbox: re-dispatching {} pending delivery/deliveries", rows.len());
+
+        for row in rows {
+            let delivery_id: String = row.get("id");
+            let event: String = row.get("event");
+            let payload_str: String = row.get("payload");
+            let url: String = row.get("url");
+            let secret: String = row.get("secret");
+            let webhook_type: String = row.get("webhook_type");
+
+            let payload: serde_json::Value =
+                serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null);
+
+            let pool2 = pool.clone();
+            tokio::spawn(async move {
+                retry_pending_delivery(pool2, delivery_id, url, secret, webhook_type, event, payload).await;
+            });
+        }
+    });
+}
+
+/// Re-attempt a delivery left `pending` after a crash, updating the existing record.
+async fn retry_pending_delivery(
+    pool: sqlx::AnyPool,
+    delivery_id: String,
+    url: String,
+    secret: String,
+    webhook_type: String,
+    event: String,
+    payload: serde_json::Value,
+) {
+    let body = serde_json::to_string(&payload).unwrap_or_default();
+    let now = Utc::now().to_rfc3339();
+
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("radar-api/webhook-outbox")
+        .build()
+        .unwrap_or_default();
+
+    let delays = [0u64, 1, 4, 16];
+    let mut last_error: Option<String> = None;
+
+    for (attempt, delay) in delays.iter().enumerate() {
+        if *delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
+        }
+
+        let mut req_builder = http
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("X-Radar-Event", &event)
+            .body(body.clone());
+
+        if webhook_type != "slack" {
+            let signature = sign_payload(&secret, body.as_bytes());
+            req_builder = req_builder.header("X-Radar-Signature-256", signature);
+        }
+
+        match req_builder.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let _ = sqlx::query(
+                    "UPDATE webhook_delivery SET status = 'delivered', attempt = ?, delivered_at = ? WHERE id = ?",
+                )
+                .bind(attempt as i32 + 1)
+                .bind(&now)
+                .bind(&delivery_id)
+                .execute(&pool)
+                .await;
+                tracing::info!(
+                    "outbox: delivery {delivery_id} succeeded on attempt {}",
+                    attempt + 1
+                );
+                return;
+            }
+            Ok(resp) => {
+                last_error = Some(format!("HTTP {}", resp.status()));
+            }
+            Err(e) => {
+                last_error = Some(e.to_string());
+            }
+        }
+
+        let _ = sqlx::query(
+            "UPDATE webhook_delivery SET attempt = ?, error = ? WHERE id = ?",
+        )
+        .bind(attempt as i32 + 1)
+        .bind(last_error.as_deref())
+        .bind(&delivery_id)
+        .execute(&pool)
+        .await;
+    }
+
+    let _ = sqlx::query(
+        "UPDATE webhook_delivery SET status = 'failed', error = ? WHERE id = ?",
+    )
+    .bind(last_error.as_deref())
+    .bind(&delivery_id)
+    .execute(&pool)
+    .await;
+    tracing::warn!(
+        "outbox: delivery {delivery_id} permanently failed: {:?}",
+        last_error
+    );
+}

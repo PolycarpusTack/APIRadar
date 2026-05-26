@@ -43,6 +43,9 @@ tags:
   - name: playground
   - name: settings
   - name: spec-versions
+  - name: webhooks
+  - name: scheduled-scans
+  - name: notifications
 
 paths:
   /health:
@@ -651,6 +654,184 @@ paths:
               schema:
                 $ref: "#/components/schemas/Summary"
 
+  # ---------------------------------------------------------------------------
+  # EPIC K: Webhooks
+  # ---------------------------------------------------------------------------
+
+  /v1/webhooks:
+    get:
+      tags: [webhooks]
+      summary: List webhooks for the authenticated organisation
+      operationId: listWebhooks
+      responses:
+        "200":
+          description: Array of webhook configurations (secrets masked)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Webhook"
+    post:
+      tags: [webhooks]
+      summary: Register a new webhook endpoint
+      operationId: createWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWebhookRequest"
+      responses:
+        "201":
+          description: Webhook created — full secret returned once
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Webhook"
+        "422":
+          $ref: "#/components/responses/BadRequest"
+
+  /v1/webhooks/{webhookId}:
+    delete:
+      tags: [webhooks]
+      summary: Delete a webhook
+      operationId: deleteWebhook
+      parameters:
+        - $ref: "#/components/parameters/webhookId"
+      responses:
+        "204":
+          description: Webhook deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/webhooks/{webhookId}/test:
+    post:
+      tags: [webhooks]
+      summary: Send a test ping delivery to the webhook
+      operationId: testWebhook
+      parameters:
+        - $ref: "#/components/parameters/webhookId"
+      responses:
+        "202":
+          description: Test delivery queued
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/webhooks/{webhookId}/deliveries:
+    get:
+      tags: [webhooks]
+      summary: List the last 50 delivery attempts for a webhook
+      operationId: listWebhookDeliveries
+      parameters:
+        - $ref: "#/components/parameters/webhookId"
+      responses:
+        "200":
+          description: Array of delivery records (newest first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WebhookDelivery"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # EPIC K: Scheduled Scans
+  # ---------------------------------------------------------------------------
+
+  /v1/scheduled-scans:
+    get:
+      tags: [scheduled-scans]
+      summary: List scheduled spec-polling scans
+      operationId: listScheduledScans
+      responses:
+        "200":
+          description: Array of scheduled scans
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ScheduledScan"
+    post:
+      tags: [scheduled-scans]
+      summary: Register or update a scheduled spec-polling scan
+      operationId: createScheduledScan
+      description: |
+        Idempotent on `(org_id, service_id, spec_url)`. Re-posting the same
+        combination updates `interval_minutes` and re-activates the scan.
+        `spec_url` must be a publicly reachable HTTPS URL — private IP ranges
+        are rejected (SSRF protection). Minimum `interval_minutes` is 15.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateScanRequest"
+      responses:
+        "200":
+          description: Scan updated (existing record)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScheduledScan"
+        "201":
+          description: Scan created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScheduledScan"
+        "422":
+          $ref: "#/components/responses/BadRequest"
+
+  /v1/scheduled-scans/{scanId}:
+    delete:
+      tags: [scheduled-scans]
+      summary: Delete a scheduled scan
+      operationId: deleteScheduledScan
+      parameters:
+        - $ref: "#/components/parameters/scanId"
+      responses:
+        "204":
+          description: Scan deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/scheduled-scans/history:
+    get:
+      tags: [scheduled-scans]
+      summary: List the most recent scan execution runs (newest first)
+      operationId: listScanRunHistory
+      responses:
+        "200":
+          description: Array of scan run records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ScanRun"
+
+  # ---------------------------------------------------------------------------
+  # EPIC K: Notifications
+  # ---------------------------------------------------------------------------
+
+  /v1/notifications/digest/preview:
+    post:
+      tags: [notifications]
+      summary: Preview the weekly email digest as HTML
+      operationId: previewDigest
+      description: Returns the rendered HTML that would be emailed for the current 7-day window.
+      responses:
+        "200":
+          description: HTML digest document
+          content:
+            text/html:
+              schema:
+                type: string
+
 components:
   parameters:
     serviceId:
@@ -662,6 +843,20 @@ components:
         format: uuid
     diffId:
       name: diffId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    webhookId:
+      name: webhookId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    scanId:
+      name: scanId
       in: path
       required: true
       schema:
@@ -1199,6 +1394,161 @@ components:
           type: integer
         consumers_at_risk:
           type: integer
+
+    Webhook:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        org_id:
+          type: string
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+          example: ["diff.created"]
+        type:
+          type: string
+          enum: [generic, slack]
+          default: generic
+        secret:
+          type: string
+          nullable: true
+          description: Full secret returned only on creation; null in subsequent reads.
+        secret_hint:
+          type: string
+          description: First 4 characters followed by ****, e.g. "abcd****".
+        active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    CreateWebhookRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Must be an HTTPS URL resolving to a public IP (SSRF-protected).
+        events:
+          type: array
+          items:
+            type: string
+          default: ["diff.created"]
+        type:
+          type: string
+          enum: [generic, slack]
+          default: generic
+
+    WebhookDelivery:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        webhook_id:
+          type: string
+          format: uuid
+        event:
+          type: string
+        status:
+          type: string
+          enum: [pending, delivered, failed]
+        attempt:
+          type: integer
+          description: Number of HTTP attempts made.
+        error:
+          type: string
+          nullable: true
+        delivered_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ScheduledScan:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        org_id:
+          type: string
+        service_id:
+          type: string
+          format: uuid
+        spec_url:
+          type: string
+          format: uri
+        format:
+          type: string
+          enum: [openapi, graphql, protobuf]
+        interval_minutes:
+          type: integer
+          minimum: 15
+        last_run_at:
+          type: string
+          format: date-time
+          nullable: true
+        active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    CreateScanRequest:
+      type: object
+      required: [service_id, spec_url]
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        spec_url:
+          type: string
+          format: uri
+          description: Public HTTPS URL. Private IP ranges are rejected.
+        format:
+          type: string
+          enum: [openapi, graphql, protobuf]
+          default: openapi
+        interval_minutes:
+          type: integer
+          minimum: 15
+          default: 60
+
+    ScanRun:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        scan_id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        spec_url:
+          type: string
+          format: uri
+        status:
+          type: string
+          enum: [ok, error, no_change]
+        error:
+          type: string
+          nullable: true
+        diff_id:
+          type: string
+          format: uuid
+          nullable: true
+        last_run_at:
+          type: string
+          format: date-time
 
   securitySchemes:
     bearerAuth:

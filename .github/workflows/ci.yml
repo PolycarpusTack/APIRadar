@@ -159,6 +159,9 @@ jobs:
       - name: Type-check UI
         run: pnpm --filter radar-ui typecheck
 
+      - name: Unit tests (Vitest)
+        run: pnpm --filter radar-ui test
+
       - name: Build UI
         run: pnpm build:ui
         # Note: Electron/desktop build is skipped in CI — requires signing certs.
@@ -216,7 +219,7 @@ jobs:
             --lcov --output-path lcov.info \
             --html --output-dir coverage-html \
             --ignore-filename-regex '(benches|/\.cargo/)' \
-            --fail-under-lines 50
+            --fail-under-lines 65
 
       - name: Upload coverage report
         if: always()

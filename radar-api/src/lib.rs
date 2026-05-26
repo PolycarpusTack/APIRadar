@@ -214,6 +214,9 @@ pub async fn run(
     // Start weekly email digest scheduler (K-5)
     notifications::start_digest_scheduler(pool.clone());
 
+    // Re-dispatch webhook deliveries abandoned mid-flight on previous run (TD-K5)
+    webhooks::start_webhook_outbox(pool.clone());
+
     let require_auth = std::env::var("RADAR_REQUIRE_AUTH")
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(false);
