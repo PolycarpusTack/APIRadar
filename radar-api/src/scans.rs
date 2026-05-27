@@ -42,6 +42,8 @@ struct ScanResponse {
     format: String,
     interval_minutes: i32,
     last_run_at: Option<String>,
+    last_run_status: Option<String>,
+    last_run_error: Option<String>,
     active: bool,
     created_at: String,
 }
@@ -54,11 +56,14 @@ fn row_to_response(row: &sqlx::any::AnyRow) -> ScanResponse {
         spec_url: row.get("spec_url"),
         format: row.get("format"),
         interval_minutes: row.get("interval_minutes"),
-        last_run_at: row.try_get("last_run_at").ok(),
+        last_run_at: row.try_get("last_run_at").ok().flatten(),
+        last_run_status: row.try_get("last_run_status").ok().flatten(),
+        last_run_error: row.try_get("last_run_error").ok().flatten(),
         active: { let v: i32 = row.get("active"); v != 0 },
         created_at: row.get("created_at"),
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // POST /v1/scheduled-scans
@@ -106,7 +111,7 @@ pub(crate) async fn create_scan(
         .execute(&pool)
         .await?;
         let updated = sqlx::query(
-            "SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_run_at, active, created_at FROM scheduled_scan WHERE id = ?",
+            "SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_run_at, last_run_status, last_run_error, active, created_at FROM scheduled_scan WHERE id = ?",
         )
         .bind(&id)
         .fetch_one(&pool)
@@ -130,7 +135,7 @@ pub(crate) async fn create_scan(
     .await?;
 
     let row = sqlx::query(
-        "SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_run_at, active, created_at FROM scheduled_scan WHERE id = ?",
+        "SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_run_at, last_run_status, last_run_error, active, created_at FROM scheduled_scan WHERE id = ?",
     )
     .bind(&id)
     .fetch_one(&pool)
@@ -150,7 +155,7 @@ pub(crate) async fn list_scans(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
     let rows = sqlx::query(
-        "SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_run_at, active, created_at FROM scheduled_scan WHERE org_id = ? ORDER BY created_at DESC",
+        "SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_run_at, last_run_status, last_run_error, active, created_at FROM scheduled_scan WHERE org_id = ? ORDER BY created_at DESC",
     )
     .bind(&org_id)
     .fetch_all(&pool)
@@ -264,19 +269,21 @@ async fn execute_scan(
 ) {
     let now = Utc::now().to_rfc3339();
 
-    // Defense-in-depth SSRF check — spec_url is also validated at scan creation time,
-    // but we re-check here in case records were inserted before the guard was added.
+    // Defense-in-depth SSRF check.
     if is_ssrf_blocked(&spec_url) {
         tracing::warn!("scan {scan_id}: SSRF-blocked spec_url — skipping execution");
+        set_scan_status(&pool, &scan_id, &now, "skipped", Some("SSRF-blocked spec_url")).await;
         return;
     }
 
-    // Mark run started
-    let _ = sqlx::query("UPDATE scheduled_scan SET last_run_at = ? WHERE id = ?")
-        .bind(&now)
-        .bind(&scan_id)
-        .execute(&pool)
-        .await;
+    // Mark run started (status clears previous error to 'running').
+    let _ = sqlx::query(
+        "UPDATE scheduled_scan SET last_run_at = ?, last_run_status = 'running', last_run_error = NULL WHERE id = ?",
+    )
+    .bind(&now)
+    .bind(&scan_id)
+    .execute(&pool)
+    .await;
 
     let http = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -284,35 +291,49 @@ async fn execute_scan(
         .build()
     {
         Ok(c) => c,
-        Err(_) => return,
+        Err(e) => {
+            set_scan_status(&pool, &scan_id, &now, "failed", Some(&e.to_string())).await;
+            return;
+        }
     };
 
     let spec_text = match http.get(&spec_url).send().await {
         Ok(resp) if resp.status().is_success() => match resp.text().await {
             Ok(t) => t,
             Err(e) => {
-                tracing::warn!("scan {scan_id}: failed to read response body: {e}");
+                let msg = format!("failed to read response body: {e}");
+                tracing::warn!("scan {scan_id}: {msg}");
+                set_scan_status(&pool, &scan_id, &now, "failed", Some(&msg)).await;
+                crate::audit::record_event(&pool, &org_id, "system", "scan.run.failed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "error": msg }))).await;
                 return;
             }
         },
         Ok(resp) => {
-            tracing::warn!("scan {scan_id}: fetch returned HTTP {}", resp.status());
+            let msg = format!("HTTP {}", resp.status().as_u16());
+            tracing::warn!("scan {scan_id}: fetch returned {msg}");
+            set_scan_status(&pool, &scan_id, &now, "failed", Some(&msg)).await;
+            crate::audit::record_event(&pool, &org_id, "system", "scan.run.failed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "error": msg }))).await;
             return;
         }
         Err(e) => {
-            tracing::warn!("scan {scan_id}: fetch error: {e}");
+            let msg = format!("fetch error: {e}");
+            tracing::warn!("scan {scan_id}: {msg}");
+            set_scan_status(&pool, &scan_id, &now, "failed", Some(&msg)).await;
+            crate::audit::record_event(&pool, &org_id, "system", "scan.run.failed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "error": msg }))).await;
             return;
         }
     };
 
     let hash = format!("{:x}", Sha256::digest(spec_text.as_bytes()));
 
-    // No change — nothing to diff
+    // No change — mark ok and done.
     if last_spec_hash.as_deref() == Some(hash.as_str()) {
+        set_scan_status(&pool, &scan_id, &now, "ok", None).await;
+        crate::audit::record_event(&pool, &org_id, "system", "scan.run.completed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "changed": false }))).await;
         return;
     }
 
-    // Fetch previous spec text if we have a hash (means there's a stored version)
+    // Fetch previous spec text if we have a hash (means there's a stored version).
     let base_spec = if last_spec_hash.is_some() {
         let row = sqlx::query(
             "SELECT spec_yaml FROM spec_version WHERE service_id = ? ORDER BY captured_at DESC LIMIT 1 OFFSET 1",
@@ -324,21 +345,22 @@ async fn execute_scan(
         .flatten();
         row.and_then(|r| r.try_get::<String, _>("spec_yaml").ok()).unwrap_or_default()
     } else {
-        // First run — just store the spec, no diff to create
+        // First run — store the spec, no diff to create yet.
         let _ = sqlx::query("UPDATE scheduled_scan SET last_spec_hash = ? WHERE id = ?")
             .bind(&hash)
             .bind(&scan_id)
             .execute(&pool)
             .await;
-        // Still need to store the spec version
         store_scan_spec(&pool, &service_id, &org_id, &spec_url, &format, &spec_text, &now).await;
+        set_scan_status(&pool, &scan_id, &now, "ok", None).await;
+        crate::audit::record_event(&pool, &org_id, "system", "scan.run.completed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "changed": false, "first_run": true }))).await;
         return;
     };
 
-    // Store new spec version
+    // Store new spec version.
     store_scan_spec(&pool, &service_id, &org_id, &spec_url, &format, &spec_text, &now).await;
 
-    // Run diff via compare_specs logic
+    // Run diff.
     if let Some(diff_id) = create_scan_diff(
         &pool,
         &service_id,
@@ -350,12 +372,13 @@ async fn execute_scan(
     )
     .await
     {
-        // Update hash and fire webhooks
         let _ = sqlx::query("UPDATE scheduled_scan SET last_spec_hash = ? WHERE id = ?")
             .bind(&hash)
             .bind(&scan_id)
             .execute(&pool)
             .await;
+        set_scan_status(&pool, &scan_id, &now, "ok", None).await;
+        crate::audit::record_event(&pool, &org_id, "system", "scan.run.completed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "changed": true, "diff_id": diff_id }))).await;
         dispatch_diff_event(pool, diff_id, org_id).await;
     } else {
         let _ = sqlx::query("UPDATE scheduled_scan SET last_spec_hash = ? WHERE id = ?")
@@ -363,7 +386,21 @@ async fn execute_scan(
             .bind(&scan_id)
             .execute(&pool)
             .await;
+        set_scan_status(&pool, &scan_id, &now, "ok", None).await;
+        crate::audit::record_event(&pool, &org_id, "system", "scan.run.completed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "changed": false }))).await;
     }
+}
+
+async fn set_scan_status(pool: &sqlx::AnyPool, scan_id: &str, run_at: &str, status: &str, error: Option<&str>) {
+    let _ = sqlx::query(
+        "UPDATE scheduled_scan SET last_run_at = ?, last_run_status = ?, last_run_error = ? WHERE id = ?",
+    )
+    .bind(run_at)
+    .bind(status)
+    .bind(error)
+    .bind(scan_id)
+    .execute(pool)
+    .await;
 }
 
 async fn store_scan_spec(
@@ -512,7 +549,9 @@ pub(crate) async fn run_history(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     // NULLS LAST is PostgreSQL-only syntax; use CASE to sort nulls last on both SQLite and PostgreSQL.
     let rows = sqlx::query(
-        "SELECT id, service_id, spec_url, last_run_at, last_spec_hash FROM scheduled_scan WHERE org_id = ? ORDER BY CASE WHEN last_run_at IS NULL THEN 1 ELSE 0 END ASC, last_run_at DESC",
+        "SELECT id, service_id, spec_url, last_run_at, last_run_status, last_run_error, last_spec_hash \
+         FROM scheduled_scan WHERE org_id = ? \
+         ORDER BY CASE WHEN last_run_at IS NULL THEN 1 ELSE 0 END ASC, last_run_at DESC",
     )
     .bind(&org_id)
     .fetch_all(&pool)
@@ -522,8 +561,10 @@ pub(crate) async fn run_history(
         "id": r.get::<String,_>("id"),
         "service_id": r.get::<String,_>("service_id"),
         "spec_url": r.get::<String,_>("spec_url"),
-        "last_run_at": r.try_get::<String,_>("last_run_at").ok(),
-        "last_spec_hash": r.try_get::<String,_>("last_spec_hash").ok(),
+        "last_run_at": r.try_get::<Option<String>,_>("last_run_at").ok().flatten(),
+        "last_run_status": r.try_get::<Option<String>,_>("last_run_status").ok().flatten(),
+        "last_run_error": r.try_get::<Option<String>,_>("last_run_error").ok().flatten(),
+        "last_spec_hash": r.try_get::<Option<String>,_>("last_spec_hash").ok().flatten(),
     })).collect();
 
     Ok(Json(history))

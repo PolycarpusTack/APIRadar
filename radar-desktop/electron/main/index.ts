@@ -298,8 +298,10 @@ function createWindow(): BrowserWindow {
     void win.loadURL('http://localhost:5173')
     win.webContents.openDevTools({ mode: 'detach' })
   } else {
-    // Production: load built renderer
-    void win.loadFile(join(__dirname, '../../renderer/index.html'))
+    // Production: load built renderer.
+    // __dirname here is <asar>/out/main — one level up is <asar>/out,
+    // so renderer/index.html is at ../renderer/index.html (not ../../).
+    void win.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
   return win

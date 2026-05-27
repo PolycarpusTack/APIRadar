@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { CheckCircle, XCircle, Webhook, Trash2, Send, ChevronDown, ChevronUp } from 'lucide-react'
+import { CheckCircle, XCircle, Webhook, Trash2, Send, ChevronDown, ChevronUp, ScanLine, Plus, AlertTriangle, Clock } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import TermTooltip, { TERM_DEFINITIONS } from '../components/TermTooltip'
 import { api, ApiError } from '../lib/apiClient'
@@ -274,6 +274,174 @@ function WebhooksSection() {
 }
 
 // ---------------------------------------------------------------------------
+// Scheduled scans
+// ---------------------------------------------------------------------------
+
+interface ScanEntry {
+  id: string
+  service_id: string
+  spec_url: string
+  format: string
+  interval_minutes: number
+  last_run_at: string | null
+  last_run_status: string | null
+  last_run_error: string | null
+  active: boolean
+  created_at: string
+}
+
+function ScanStatusBadge({ status, error }: { status: string | null; error: string | null }) {
+  if (!status || status === 'running') {
+    return (
+      <span className="inline-flex items-center gap-1 rounded px-1.5 py-px text-[10.5px]" style={{ background: 'var(--bg-raised)', color: 'var(--text-dim)' }}>
+        <Clock className="h-3 w-3" /> {status === 'running' ? 'running' : 'pending'}
+      </span>
+    )
+  }
+  if (status === 'ok') {
+    return (
+      <span className="inline-flex items-center gap-1 rounded px-1.5 py-px text-[10.5px]" style={{ background: 'color-mix(in srgb, var(--teal) 12%, transparent)', color: 'var(--teal)' }}>
+        <CheckCircle className="h-3 w-3" /> ok
+      </span>
+    )
+  }
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded px-1.5 py-px text-[10.5px]"
+      style={{ background: 'color-mix(in srgb, var(--red) 10%, transparent)', color: 'var(--red)' }}
+      title={error ?? undefined}
+    >
+      <AlertTriangle className="h-3 w-3" /> {status}
+    </span>
+  )
+}
+
+function ScheduledScansSection() {
+  const [scans, setScans] = useState<ScanEntry[]>([])
+  const [loading, setLoading] = useState(true)
+  const [showForm, setShowForm] = useState(false)
+  const [serviceId, setServiceId] = useState('')
+  const [specUrl, setSpecUrl] = useState('')
+  const [format, setFormat] = useState('openapi')
+  const [intervalMinutes, setIntervalMinutes] = useState(60)
+  const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
+
+  const reload = () => {
+    setLoading(true)
+    api.get<ScanEntry[]>('/v1/scheduled-scans')
+      .then(setScans)
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(reload, [])
+
+  async function createScan(e: React.FormEvent) {
+    e.preventDefault()
+    setCreating(true); setCreateError(null)
+    try {
+      await api.post('/v1/scheduled-scans', { service_id: serviceId, spec_url: specUrl, format, interval_minutes: intervalMinutes })
+      setShowForm(false); setServiceId(''); setSpecUrl('')
+      reload()
+    } catch (err) {
+      setCreateError(err instanceof ApiError ? err.message : String(err))
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  async function deleteScan(id: string) {
+    await api.del(`/v1/scheduled-scans/${id}`)
+    setScans(prev => prev.filter(s => s.id !== id))
+  }
+
+  const inputCls = 'w-full rounded border px-2.5 py-1.5 text-[12.5px] outline-none focus:ring-1'
+  const inputStyle = { background: 'var(--bg-raised)', border: '1px solid var(--border)', color: 'var(--text-1)' }
+
+  return (
+    <SectionCard title="Scheduled Scans" description="Automatically fetch and diff a spec URL on a recurring schedule. Requires an HTTPS endpoint that returns the raw spec.">
+      {loading ? (
+        <p className="text-[12px]" style={{ color: 'var(--text-dim)' }}>Loading…</p>
+      ) : (
+        <div className="space-y-3">
+          {scans.length === 0 && !showForm && (
+            <p className="text-[12px]" style={{ color: 'var(--text-dim)' }}>No scheduled scans configured.</p>
+          )}
+          {scans.map(s => (
+            <div key={s.id} className="rounded border px-3 py-2 flex items-start gap-3" style={{ border: '1px solid var(--border)', background: 'var(--bg-raised)' }}>
+              <ScanLine className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" style={{ color: 'var(--text-dim)' }} />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[12px] font-mono truncate" style={{ color: 'var(--text-1)' }}>{s.spec_url}</span>
+                  <span className="text-[10.5px] rounded px-1 py-px" style={{ background: 'var(--bg-active)', color: 'var(--text-dim)' }}>{s.format}</span>
+                  <span className="text-[10.5px]" style={{ color: 'var(--text-dim)' }}>every {s.interval_minutes}m</span>
+                  <ScanStatusBadge status={s.last_run_status} error={s.last_run_error} />
+                </div>
+                <p className="text-[10.5px] mt-0.5" style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+                  service: {s.service_id}{s.last_run_at && ` · last run: ${new Date(s.last_run_at).toLocaleString()}`}
+                </p>
+                {s.last_run_error && (
+                  <p className="text-[10.5px] mt-0.5 truncate" style={{ color: 'var(--red)' }}>{s.last_run_error}</p>
+                )}
+              </div>
+              <button onClick={() => deleteScan(s.id)} title="Delete scan" className="rounded p-1 transition-colors hover:opacity-70 flex-shrink-0" style={{ color: 'var(--red)' }}>
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+
+          {showForm ? (
+            <form onSubmit={createScan} className="rounded border p-3 space-y-2" style={{ border: '1px solid var(--border)', background: 'var(--bg-raised)' }}>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Service ID</label>
+                  <input value={serviceId} onChange={e => setServiceId(e.target.value)} placeholder="uuid" className={inputCls} style={inputStyle} required />
+                </div>
+                <div>
+                  <label className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Spec URL (HTTPS)</label>
+                  <input type="url" value={specUrl} onChange={e => setSpecUrl(e.target.value)} placeholder="https://api.example.com/openapi.json" className={inputCls} style={inputStyle} required />
+                </div>
+                <div>
+                  <label className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Format</label>
+                  <select value={format} onChange={e => setFormat(e.target.value)} className={inputCls} style={inputStyle}>
+                    <option value="openapi">OpenAPI</option>
+                    <option value="graphql">GraphQL</option>
+                    <option value="protobuf">Protobuf</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Interval (minutes, ≥15)</label>
+                  <input type="number" min={15} value={intervalMinutes} onChange={e => setIntervalMinutes(Number(e.target.value))} className={inputCls} style={inputStyle} />
+                </div>
+              </div>
+              {createError && <p className="text-[11.5px]" style={{ color: 'var(--red)' }}>{createError}</p>}
+              <div className="flex items-center gap-2">
+                <button type="submit" disabled={creating} className="rounded-md px-3 py-1.5 text-[12px] font-semibold" style={{ background: 'var(--cobalt)', color: 'var(--text-inverse)', opacity: creating ? 0.7 : 1 }}>
+                  {creating ? 'Saving…' : 'Create'}
+                </button>
+                <button type="button" onClick={() => { setShowForm(false); setCreateError(null) }} className="rounded-md px-3 py-1.5 text-[12px]" style={{ color: 'var(--text-3)' }}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : (
+            <button
+              onClick={() => setShowForm(true)}
+              className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
+              style={{ borderColor: 'var(--border-mid)', color: 'var(--text-2)' }}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Add scheduled scan
+            </button>
+          )}
+        </div>
+      )}
+    </SectionCard>
+  )
+}
+
+// ---------------------------------------------------------------------------
 
 export default function SettingsPage() {
   const [form, setForm] = useState<AppSettings>(DEFAULTS)
@@ -430,6 +598,7 @@ export default function SettingsPage() {
               )}
             </SectionCard>
 
+            <ScheduledScansSection />
             <WebhooksSection />
 
             {error && (

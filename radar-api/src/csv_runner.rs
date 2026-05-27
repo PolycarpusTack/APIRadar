@@ -144,6 +144,16 @@ pub(crate) async fn create_csv_run(
     .execute(&pool)
     .await?;
 
+    {
+        let pool2 = pool.clone();
+        let oid = org_id.clone();
+        let jid = id.clone();
+        let n = total_rows;
+        tokio::spawn(async move {
+            crate::audit::record_event(&pool2, &oid, "system", "csv_run.started", Some("csv_run_job"), Some(&jid), Some(&serde_json::json!({ "total_rows": n }))).await;
+        });
+    }
+
     let pool2 = pool.clone();
     let job_id = id.clone();
     let template = body.request.clone();

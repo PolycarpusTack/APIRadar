@@ -259,7 +259,17 @@ export default function CatalogSourcesPage() {
             <EmptyState
               icon={Database}
               title="No catalog sources configured"
-              description="Add a Backstage or CODEOWNERS source to automatically import consumer records and enrich blast-radius results with ownership data."
+              description="Optional: add a Backstage or CODEOWNERS source to auto-import consumers and enrich blast-radius results with ownership data."
+              action={
+                <button
+                  onClick={() => setShowCreate(true)}
+                  className="inline-flex items-center gap-1.5 rounded-md px-4 py-2 text-[12.5px] font-medium transition-opacity hover:opacity-90"
+                  style={{ background: 'var(--cobalt-mid)', color: '#fff' }}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Add catalog source
+                </button>
+              }
             />
           ) : (
             <table className="w-full border-collapse">

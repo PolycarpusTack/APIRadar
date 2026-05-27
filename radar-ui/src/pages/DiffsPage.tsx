@@ -37,13 +37,23 @@ function shortRef(ref: string) {
 
 const TABLE_COLS = ['Date', 'Service', 'Refs', 'Breaking', 'Risky', 'Safe']
 
-function DiffTable({ rows, onSelect }: { rows: DiffSummary[]; onSelect: (id: string) => void }) {
+function DiffTable({ rows, onSelect, onCompare }: { rows: DiffSummary[]; onSelect: (id: string) => void; onCompare: () => void }) {
   if (rows.length === 0) {
     return (
       <EmptyState
         icon={GitCompare}
         title="No diffs recorded yet"
-        description="Run radar check --base old.yaml --head new.yaml --api-url … to post your first schema diff and see it here."
+        description="Use the Compare panel above to paste two specs directly, or run: radar check --base old.yaml --head new.yaml --api-url http://localhost:8080"
+        action={
+          <button
+            onClick={onCompare}
+            className="inline-flex items-center gap-1.5 rounded-md px-4 py-2 text-[12.5px] font-medium transition-opacity hover:opacity-90"
+            style={{ background: 'var(--cobalt-mid)', color: '#fff' }}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Compare specs
+          </button>
+        }
       />
     )
   }
@@ -193,7 +203,7 @@ export default function DiffsPage() {
               Failed to load diffs: {error}
             </div>
           ) : (
-            <DiffTable rows={rows} onSelect={(id) => navigate(`/diffs/${id}`)} />
+            <DiffTable rows={rows} onSelect={(id) => navigate(`/diffs/${id}`)} onCompare={() => { setShowCompare(true); setShowBatch(false) }} />
           )}
         </div>
       </div>

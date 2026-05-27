@@ -255,7 +255,10 @@ pub(crate) async fn create_diff(
         let pool2 = pool.clone();
         let did = diff_id.clone();
         let oid = org_id.clone();
-        tokio::spawn(async move { crate::webhooks::dispatch_diff_event(pool2, did, oid).await });
+        tokio::spawn(async move {
+            crate::audit::record_event(&pool2, &oid, "system", "diff.created", Some("diff"), Some(&did), None).await;
+            crate::webhooks::dispatch_diff_event(pool2, did, oid).await;
+        });
     }
 
     Ok((
@@ -998,7 +1001,10 @@ pub(crate) async fn compare_specs(
         let pool2 = pool.clone();
         let did = diff_id.clone();
         let oid = org_id.clone();
-        tokio::spawn(async move { crate::webhooks::dispatch_diff_event(pool2, did, oid).await });
+        tokio::spawn(async move {
+            crate::audit::record_event(&pool2, &oid, "system", "diff.created", Some("diff"), Some(&did), None).await;
+            crate::webhooks::dispatch_diff_event(pool2, did, oid).await;
+        });
     }
 
     Ok((

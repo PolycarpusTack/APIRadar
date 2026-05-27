@@ -1,6 +1,29 @@
 import { resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
+import type { Plugin } from 'vite'
+
+/**
+ * Strip `crossorigin` attributes from every asset tag in the built HTML.
+ *
+ * Vite emits `crossorigin` on <script type="module"> and <link rel="stylesheet">
+ * tags so browsers can enforce CORS for code-split chunks.  Over file:// (packaged
+ * Electron) Chromium treats each directory as a distinct origin and therefore blocks
+ * those requests — producing a blank screen.  Removing the attribute reverts to the
+ * simple, same-context fetch that works correctly under file://.
+ */
+function removeCrossoriginPlugin(): Plugin {
+  return {
+    name: 'electron-remove-crossorigin',
+    enforce: 'post',
+    // Runs only during a production build, not in the dev server.
+    apply: 'build',
+    transformIndexHtml(html: string): string {
+      // Remove bare `crossorigin` and `crossorigin="..."` in any form.
+      return html.replace(/\s+crossorigin(?:="[^"]*")?/g, '')
+    },
+  }
+}
 
 export default defineConfig({
   main: {
@@ -32,7 +55,7 @@ export default defineConfig({
         '@radar-ui': resolve(__dirname, '../radar-ui/src'),
       },
     },
-    plugins: [react()],
+    plugins: [react(), removeCrossoriginPlugin()],
     server: {
       proxy: {
         '/v1': 'http://127.0.0.1:17380',

@@ -21,6 +21,7 @@ pub(crate) mod scans;
 pub(crate) mod notifications;
 pub(crate) mod csv_runner;
 pub(crate) mod audit;
+pub(crate) mod readiness;
 
 pub(crate) use errors::get_prometheus_handle;
 pub(crate) use auth::{
@@ -321,6 +322,7 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
         .route("/csv-runs/:id", get(csv_runner::get_csv_run).delete(csv_runner::cancel_csv_run))
         .route("/csv-runs/:id/results", get(csv_runner::get_csv_run_results))
         .route("/audit-events", get(audit::list_audit_events).post(audit::create_audit_event))
+        .route("/readiness", get(readiness::get_readiness))
         .layer(middleware::from_fn_with_state(pool.clone(), auth_middleware))
         // Outermost layer: inject RequireAuth + JwtSecretExt before auth_middleware runs.
         .layer(middleware::from_fn({
@@ -3937,6 +3939,60 @@ mod tests {
         assert!(body.contains("<!DOCTYPE html>"), "response must be an HTML document");
         assert!(body.contains("API Radar"), "response must contain product branding");
         assert!(body.contains("Weekly Digest"), "response must contain digest heading");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2 — GET /v1/readiness
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_readiness_returns_setup_required_on_empty_db() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client.get("/v1/readiness").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&resp.text()).unwrap();
+        assert_eq!(body["overall"], "setup_required");
+        let items = body["items"].as_array().unwrap();
+        // db_connected is always ok
+        let db_item = items.iter().find(|i| i["name"] == "db_connected").unwrap();
+        assert_eq!(db_item["status"], "ok");
+        // service_registered is missing on empty DB
+        let svc_item = items.iter().find(|i| i["name"] == "service_registered").unwrap();
+        assert_eq!(svc_item["status"], "missing");
+    }
+
+    #[tokio::test]
+    async fn test_readiness_returns_ready_after_service_diff_consumer() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+
+        // Register a service + diff
+        let svc = client.post_json(
+            "/v1/services",
+            &serde_json::json!({ "name": "svc-a", "repo_url": "https://github.com/x/y", "owner_team": "eng", "spec_format": "openapi" }),
+        ).await;
+        assert_eq!(svc.status(), StatusCode::CREATED);
+        let svc_body: Value = serde_json::from_str(&svc.text()).unwrap();
+        let svc_id = svc_body["id"].as_str().unwrap();
+
+        let diff = client.post_json(
+            &format!("/v1/services/{svc_id}/diffs"),
+            &serde_json::json!({ "service_name": "svc-a", "repo_url": "https://github.com/x/y", "owner_team": "eng", "from_git_ref": "abc", "to_git_ref": "def", "spec_format": "openapi", "changes": [] }),
+        ).await;
+        assert_eq!(diff.status(), StatusCode::CREATED);
+
+        // Register a consumer
+        let con = client.post_json(
+            "/v1/consumers",
+            &serde_json::json!({ "name": "con-a", "repo_url": "https://github.com/x/z", "owner_team": "eng", "contact": "a@b.com" }),
+        ).await;
+        assert_eq!(con.status(), StatusCode::CREATED);
+
+        let resp = client.get("/v1/readiness").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&resp.text()).unwrap();
+        assert_eq!(body["overall"], "ready");
     }
 }
 

@@ -254,15 +254,16 @@ pub(crate) async fn test_webhook(
         })
     };
 
-    tokio::spawn(deliver_webhook_event(
+    tokio::spawn(deliver_webhook_event(DeliveryTask {
         pool,
-        id,
+        org_id,
+        webhook_id: id,
         url,
         secret,
         webhook_type,
-        "ping".to_string(),
+        event: "ping".to_string(),
         payload,
-    ));
+    }));
 
     Ok((StatusCode::ACCEPTED, Json(json!({"status": "ping dispatched"}))))
 }
@@ -306,15 +307,16 @@ pub(crate) async fn dispatch_diff_event(pool: sqlx::AnyPool, diff_id: String, or
             payload.clone()
         };
 
-        tokio::spawn(deliver_webhook_event(
-            pool.clone(),
-            wh_id,
+        tokio::spawn(deliver_webhook_event(DeliveryTask {
+            pool: pool.clone(),
+            org_id: org_id.clone(),
+            webhook_id: wh_id,
             url,
             secret,
-            wh_type,
-            "diff.created".to_string(),
-            send_payload,
-        ));
+            webhook_type: wh_type,
+            event: "diff.created".to_string(),
+            payload: send_payload,
+        }));
     }
 }
 
@@ -378,15 +380,19 @@ fn build_slack_block_kit(diff_payload: &serde_json::Value) -> serde_json::Value 
     })
 }
 
-async fn deliver_webhook_event(
+struct DeliveryTask {
     pool: sqlx::AnyPool,
+    org_id: String,
     webhook_id: String,
     url: String,
     secret: String,
     webhook_type: String,
     event: String,
     payload: serde_json::Value,
-) {
+}
+
+async fn deliver_webhook_event(t: DeliveryTask) {
+    let DeliveryTask { pool, org_id, webhook_id, url, secret, webhook_type, event, payload } = t;
     let delivery_id = Uuid::new_v4().to_string();
     let body = serde_json::to_string(&payload).unwrap_or_default();
     let now = Utc::now().to_rfc3339();
@@ -439,6 +445,7 @@ async fn deliver_webhook_event(
                 .bind(&delivery_id)
                 .execute(&pool)
                 .await;
+                crate::audit::record_event(&pool, &org_id, "system", "webhook.delivered", Some("webhook"), Some(&webhook_id), Some(&serde_json::json!({ "event": event, "delivery_id": delivery_id }))).await;
                 return;
             }
             Ok(resp) => {
@@ -467,6 +474,7 @@ async fn deliver_webhook_event(
     .bind(&delivery_id)
     .execute(&pool)
     .await;
+    crate::audit::record_event(&pool, &org_id, "system", "webhook.failed", Some("webhook"), Some(&webhook_id), Some(&serde_json::json!({ "event": event, "error": last_error }))).await;
 }
 
 // ---------------------------------------------------------------------------

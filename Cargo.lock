@@ -1920,7 +1920,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "radar-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1955,7 +1955,7 @@ dependencies = [
 
 [[package]]
 name = "radar-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1977,7 +1977,7 @@ dependencies = [
 
 [[package]]
 name = "radar-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -1992,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "radar-scanner"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "radar-core",

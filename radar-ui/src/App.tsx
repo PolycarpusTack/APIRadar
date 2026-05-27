@@ -1,5 +1,5 @@
 import { NavLink, Routes, Route, Navigate } from 'react-router-dom'
-import RadarIcon from './components/RadarIcon'
+import logoUrl from './assets/logo.png'
 import { useEffect, useState } from 'react'
 import { api, ApiError } from './lib/apiClient'
 import { LayoutDashboard, GitCompare, Users, FileText, Telescope, FlaskConical, HelpCircle, Settings, Server, LogOut, Database, Shield, Sliders, Activity } from 'lucide-react'
@@ -153,49 +153,12 @@ function Sidebar({ showSignOut }: { showSignOut: boolean }) {
       style={{ background: 'var(--bg-surface)', borderRight: '1px solid var(--border)' }}
     >
       {/* Logo */}
-      <div className="px-5 py-5" style={{ borderBottom: '1px solid var(--border)' }}>
-        <div className="flex items-center gap-3">
-          <RadarIcon size={34} className="flex-shrink-0 rounded-[7px]" />
-          <div className="flex flex-col" style={{ gap: '1px' }}>
-            <span
-              style={{
-                fontFamily: 'var(--font-mono)',
-                fontSize: '9px',
-                fontWeight: 600,
-                letterSpacing: '3px',
-                textTransform: 'uppercase',
-                color: 'var(--cobalt-mid)',
-                lineHeight: 1.3,
-              }}
-            >
-              API
-            </span>
-            <span
-              style={{
-                fontFamily: 'var(--font-head)',
-                fontSize: '16px',
-                fontWeight: 700,
-                letterSpacing: '-0.5px',
-                color: 'var(--text-1)',
-                lineHeight: 1,
-              }}
-            >
-              Radar
-            </span>
-            <span
-              style={{
-                fontFamily: 'var(--font-mono)',
-                fontSize: '8.5px',
-                letterSpacing: '0.8px',
-                textTransform: 'uppercase',
-                color: 'var(--text-dim)',
-                lineHeight: 1.5,
-              }}
-            >
-              Contract Monitor
-            </span>
-          </div>
-        </div>
+      <div className="px-5 py-4" style={{ borderBottom: '1px solid var(--border)' }}>
+        <img
+          src={logoUrl}
+          alt="API Radar — Contract Monitor"
+          style={{ height: '36px', width: 'auto', display: 'block' }}
+        />
       </div>
 
       {/* Navigation */}

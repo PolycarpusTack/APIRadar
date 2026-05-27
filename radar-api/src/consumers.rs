@@ -127,6 +127,15 @@ pub(crate) async fn create_consumer(
 
     metrics::counter!("radar_consumers_created_total").increment(1);
 
+    {
+        let pool2 = pool.clone();
+        let oid = org_id.clone();
+        let cid = id.clone();
+        tokio::spawn(async move {
+            crate::audit::record_event(&pool2, &oid, "system", "consumer.registered", Some("consumer"), Some(&cid), None).await;
+        });
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(json!({

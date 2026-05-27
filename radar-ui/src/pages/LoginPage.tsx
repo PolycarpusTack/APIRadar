@@ -1,4 +1,5 @@
 import { LogIn } from 'lucide-react'
+import logoUrl from '../assets/logo.png'
 
 export default function LoginPage() {
   return (
@@ -14,33 +15,13 @@ export default function LoginPage() {
           boxShadow: '0 4px 24px 0 rgba(0,0,0,0.10)',
         }}
       >
-        {/* Logo mark */}
-        <div className="flex items-center gap-3 mb-8">
-          <div
-            className="relative flex-shrink-0 h-9 w-9 overflow-hidden rounded-[8px]"
-            style={{
-              background: 'linear-gradient(135deg, var(--cobalt) 0%, var(--cobalt-mid) 100%)',
-            }}
-          >
-            <div
-              className="absolute inset-[7px] rounded-[3px]"
-              style={{ background: 'var(--text-inverse)' }}
-            />
-          </div>
-          <div>
-            <p
-              className="text-[17px] font-bold tracking-[-0.4px] leading-tight"
-              style={{ fontFamily: 'var(--font-head)', color: 'var(--text-1)' }}
-            >
-              Radar Monitor
-            </p>
-            <p
-              className="text-[10px] uppercase tracking-[0.8px]"
-              style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-3)' }}
-            >
-              API Contract
-            </p>
-          </div>
+        {/* Logo */}
+        <div className="mb-8">
+          <img
+            src={logoUrl}
+            alt="API Radar — Contract Monitor"
+            style={{ height: '44px', width: 'auto', display: 'block' }}
+          />
         </div>
 
         <h1

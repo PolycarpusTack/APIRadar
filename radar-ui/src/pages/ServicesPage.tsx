@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { Server, Plus, X, ArrowRight } from 'lucide-react'
+import { useNavigate, Link } from 'react-router-dom'
+import { Server, Plus, X, ArrowRight, HelpCircle } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
 import { api, ApiError } from '../lib/apiClient'
@@ -142,7 +142,17 @@ function ServiceTable({ rows, onSelect }: { rows: ServiceRow[]; onSelect: (id: s
       <EmptyState
         icon={Server}
         title="No services registered"
-        description="Register a service via the form above or use the CLI: radar check --base old.yaml --head new.yaml --service-id <id>"
+        description="Use the Register button above or run: radar check --base old.yaml --head new.yaml --service-id <uuid>"
+        action={
+          <Link
+            to="/help"
+            className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
+            style={{ border: '1px solid var(--border)', color: 'var(--text-2)' }}
+          >
+            <HelpCircle className="h-3.5 w-3.5" />
+            View setup guide
+          </Link>
+        }
       />
     )
   }
