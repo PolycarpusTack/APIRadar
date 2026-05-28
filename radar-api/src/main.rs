@@ -2,6 +2,9 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::info;
 
+const RETENTION_JOB_INTERVAL_SECS: u64 = 3600;
+const RETENTION_DEFAULT_DAYS: u32 = 90;
+
 #[derive(Parser)]
 #[command(
     name = "radar-api",
@@ -58,6 +61,15 @@ async fn main() -> Result<()> {
         );
     }
 
+    let cors_origins = std::env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default();
+    if cors_origins.is_empty() && args.bind.starts_with("0.0.0.0") {
+        tracing::warn!(
+            "CORS: CORS_ALLOWED_ORIGINS is not set — all cross-origin requests are allowed on {}. \
+             Set CORS_ALLOWED_ORIGINS=https://yourdomain.com for server deployments.",
+            args.bind
+        );
+    }
+
     let db_url = radar_api::resolve_db_url(&args.db);
     let db_url = db_url.as_str();
     let static_dir = args.static_dir.as_deref();
@@ -71,7 +83,7 @@ async fn main() -> Result<()> {
             .await?
     };
     tokio::spawn(async move {
-        let period = tokio::time::Duration::from_secs(3600);
+        let period = tokio::time::Duration::from_secs(RETENTION_JOB_INTERVAL_SECS);
         let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             interval.tick().await;
@@ -84,7 +96,7 @@ async fn main() -> Result<()> {
             .ok()
             .flatten()
             .and_then(|v: String| v.parse().ok())
-            .unwrap_or(90);
+            .unwrap_or(RETENTION_DEFAULT_DAYS);
             match radar_api::purge_old_usage_events(&pool_for_retention, days).await {
                 Ok(n) => tracing::info!("retention: purged {n} old usage events (window={days}d)"),
                 Err(e) => tracing::warn!("retention job failed: {e}"),

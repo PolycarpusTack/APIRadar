@@ -56,6 +56,37 @@ fn spec_version_id(service_id: &str, git_ref: &str) -> String {
     .to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::spec_version_id;
+
+    #[test]
+    fn spec_version_id_is_deterministic() {
+        assert_eq!(
+            spec_version_id("svc-1", "main"),
+            spec_version_id("svc-1", "main"),
+        );
+    }
+
+    #[test]
+    fn spec_version_id_differs_by_service() {
+        assert_ne!(spec_version_id("svc-1", "main"), spec_version_id("svc-2", "main"));
+    }
+
+    #[test]
+    fn spec_version_id_differs_by_ref() {
+        assert_ne!(spec_version_id("svc-1", "main"), spec_version_id("svc-1", "dev"));
+    }
+
+    #[test]
+    fn spec_version_id_is_valid_uuid_format() {
+        let id = spec_version_id("svc-x", "abc123");
+        // UUID v5 is 36 chars: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        assert_eq!(id.len(), 36);
+        assert_eq!(id.chars().filter(|&c| c == '-').count(), 4);
+    }
+}
+
 // GET /v1/services/:id/diffs
 pub(crate) async fn list_diffs(
     Path(service_id): Path<String>,

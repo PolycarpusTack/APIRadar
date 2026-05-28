@@ -341,10 +341,40 @@ The bundled version is compiled into the binary at build time. To update without
 | `RADAR_SERVICE_TOKEN` | Environment variable / secret manager | Rotate quarterly |
 | `RADAR_JWT_SECRET` | Environment variable / secret manager | Rotate on suspected compromise |
 | `ANTHROPIC_API_KEY` | Environment variable / secret manager | Rotate quarterly |
+| `OPENAI_API_KEY` | Environment variable / secret manager | Rotate quarterly |
+| `GITHUB_COPILOT_TOKEN` | Environment variable / secret manager | Rotate quarterly |
 | DB password | Environment variable / secret manager | Rotate quarterly |
 | `GITHUB_TOKEN` (CI) | GitHub Actions secret | Managed by GitHub org admins |
+| `RADAR_OIDC_CLIENT_ID` | Environment variable / secret manager | Rotate on provider change |
+| `RADAR_OIDC_CLIENT_SECRET` | Environment variable / secret manager | Rotate on suspected compromise |
+| `RADAR_SMTP_USER` | Environment variable / secret manager | Rotate quarterly |
+| `RADAR_SMTP_PASSWORD` | Environment variable / secret manager | Rotate on suspected compromise |
+| `JIRA_TOKEN` (CLI) | Environment variable / CI secret | Rotate quarterly |
+| `POSTMAN_API_KEY` (CLI) | Environment variable / CI secret | Rotate quarterly |
 
 **Never** log any of the above values. The server explicitly omits them from all log lines.
+
+### Configuration environment variables
+
+The following variables control server behaviour but are not secret:
+
+| Variable | Description | Default |
+|---|---|---|
+| `RADAR_ALLOWED_HOSTS` | Glob-pattern allowlist for outbound HTTP (webhooks, scans, CSV runner). Comma-separated. Example: `*.example.com,api.partner.io` | `*` (all allowed) |
+| `RADAR_OIDC_PROVIDER_URL` | OIDC discovery base URL (e.g. `https://accounts.google.com`) | — (OIDC disabled) |
+| `RADAR_OIDC_REDIRECT_URI` | Callback URI registered with the OIDC provider | — |
+| `RADAR_OIDC_ORG_CLAIM` | JWT claim to extract as `org_id` (default: `org_id`) | `org_id` |
+| `RADAR_DIGEST_RECIPIENTS` | Comma-separated email addresses for the scheduled digest | — |
+| `RADAR_SMTP_HOST` | SMTP hostname for digest emails | — |
+| `RADAR_SMTP_PORT` | SMTP port | `587` |
+| `RADAR_SMTP_FROM` | From-address on digest emails | — |
+| `RADAR_REQUEST_TIMEOUT_SECS` | Per-request timeout for all outbound HTTP clients | `30` |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated CORS origins. **Required for server deployments** — omit only for desktop/local mode. A warning is logged when unset on `0.0.0.0`. | `*` (permissive) |
+| `RADAR_DB_MAX_CONNECTIONS` | Max DB connections in the request-handler pool. Increase for high-concurrency deployments. | `20` |
+| `RADAR_METRICS_TOKEN` | Bearer token required to scrape `/metrics`. If unset, the endpoint is open (acceptable for desktop/localhost; **set this in production**). | — (open) |
+| `RATE_LIMIT_PER_MINUTE` | Max requests per IP per minute (`0` = unlimited) | `300` |
+| `MAX_BODY_SIZE_MB` | Maximum request body in megabytes | `4` |
+| `BIND_ADDR` | Listen address for the API server | `0.0.0.0:8081` |
 
 ---
 

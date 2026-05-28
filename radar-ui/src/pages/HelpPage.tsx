@@ -3,7 +3,7 @@ import {
   HelpCircle, Terminal, Key, FileText, FlaskConical, Zap,
   BookOpen, Telescope, GitCompare, Users, LayoutDashboard,
   Server, AlertTriangle, Lightbulb, MessageSquare, CheckCircle2,
-  ArrowRight, Sparkles,
+  ArrowRight, Sparkles, Bell, Clock, Shield, GitBranch, Database, BarChart2,
 } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 
@@ -546,6 +546,101 @@ function BeginnersGuide() {
               spreadsheet supplies the variables. Radar sends the letters.
             </Callout>
           </TourStop>
+
+          <TourStop icon={Bell} page="Webhooks" badge="Integrations" tagline="Push change events to your own systems">
+            <p>
+              Register a webhook URL and Radar will POST a JSON payload to it every time a diff is
+              created or a breaking change is detected. Use this to trigger Slack messages, open Jira
+              tickets, or update a status page — without polling.
+            </p>
+            <p>
+              Each webhook can be tested with a single click (the <strong style={{ color: 'var(--text-1)' }}>Send test</strong> button),
+              and the delivery history panel shows the HTTP status and response body of every attempt,
+              so you can debug a misconfigured receiver without guessing.
+            </p>
+            <Callout variant="tip">
+              Webhooks respect the <Code>RADAR_ALLOWED_HOSTS</Code> server allowlist — your ops team
+              can restrict which external URLs the server is allowed to call.
+            </Callout>
+          </TourStop>
+
+          <TourStop icon={Clock} page="Scheduled Scans" badge="Integrations" tagline="Automated spec polling on a cron schedule">
+            <p>
+              Point Radar at any publicly reachable OpenAPI spec URL and give it a cron expression.
+              Radar will fetch the spec on schedule, diff it against the last known version, and
+              record any changes — no CI pipeline required.
+            </p>
+            <p>
+              The scan run history shows every execution: when it ran, what changed (or "no changes"),
+              and any fetch errors. Pair this with a webhook to get notified the moment a third-party
+              API you depend on silently changes its contract.
+            </p>
+            <Callout variant="analogy">
+              Think of it as a cron job that watches an API spec instead of a file. If the API
+              provider updates their docs, you find out before your consumers find out the hard way.
+            </Callout>
+          </TourStop>
+
+          <TourStop icon={Shield} page="Audit Trail" badge="Governance" tagline="A tamper-evident log of every action">
+            <p>
+              Every write operation in Radar — registering a service, running a diff, updating settings,
+              triggering a webhook — is recorded in the audit trail with a timestamp, the actor's
+              identity, and a metadata snapshot of what changed.
+            </p>
+            <p>
+              Use this page to answer "who changed the default policy?" or "when was consumer X
+              registered?" The trail is append-only and scoped to your organisation.
+            </p>
+            <Callout variant="tip">
+              Secrets are automatically redacted from audit metadata — tokens, passwords, and API keys
+              are replaced with <Code>[REDACTED]</Code> before storage, so the trail is safe to share
+              with auditors.
+            </Callout>
+          </TourStop>
+
+          <TourStop icon={GitBranch} page="Evolution Rules" badge="Governance" tagline="Allow-list expected changes so they don't block CI">
+            <p>
+              Sometimes a breaking change is intentional and agreed upon — for example, renaming a
+              legacy field across a planned migration window. An <strong style={{ color: 'var(--text-1)' }}>Evolution Rule</strong> tells
+              Radar "this specific change is expected; don't fail the CI gate for it."
+            </p>
+            <p>
+              Create a rule on this page, specifying the service, the change kind (e.g. field removed,
+              type changed), and an expiry date. The rule is automatically disabled after expiry so
+              it can't become a permanent bypass.
+            </p>
+          </TourStop>
+
+          <TourStop icon={Database} page="Catalog Sources" badge="Governance" tagline="Import your whole API estate in one sync">
+            <p>
+              Instead of registering services one by one, a <strong style={{ color: 'var(--text-1)' }}>Catalog Source</strong> connects
+              Radar to an existing service registry (e.g. Backstage, Apicurio, or a custom JSON/YAML
+              endpoint) and imports all registered APIs in bulk.
+            </p>
+            <p>
+              After the initial sync, Radar keeps track of the catalog version so subsequent syncs
+              only process what changed. Sync manually from this page, or configure a scheduled scan
+              to run it automatically.
+            </p>
+          </TourStop>
+
+          <TourStop icon={BarChart2} page="Evidence Coverage" badge="Analysis" tagline="See which consumers have real usage data">
+            <p>
+              Blast-radius accuracy depends on evidence: usage events, static call-site scans, or
+              collection file imports. The <strong style={{ color: 'var(--text-1)' }}>Evidence Coverage</strong> page shows,
+              per service and per consumer, what fraction of API operations have at least one piece
+              of evidence attached.
+            </p>
+            <p>
+              A consumer with low coverage appears in blast-radius reports only for fields it has
+              been <em>explicitly seen</em> accessing — meaning you might be underestimating impact.
+              Use this page to identify gaps and prioritise which consumers to instrument next.
+            </p>
+            <Callout variant="tip">
+              The sampling configuration panel (accessible from this page) lets you adjust the
+              lookback window and minimum-confidence threshold per service.
+            </Callout>
+          </TourStop>
         </div>
       </section>
 
@@ -1049,6 +1144,44 @@ radar generate-tests \\
 
           <Card>
             <p className="text-[12.5px] font-semibold" style={{ color: 'var(--text-1)' }}>
+              <Code>radar rule</Code> — Manage evolution rules (allow-list expected changes)
+            </p>
+            <div className="space-y-1.5 pt-1">
+              <Flag name="add"              desc="Create a rule: --name, --change-kind, --severity-override (safe|non_breaking_risky), --path-pattern (optional glob), --api-url" />
+              <Flag name="list"             desc="List all evolution rules for this org (--api-url)" />
+              <Flag name="delete <id>"      desc="Permanently delete a rule by ID" />
+              <Flag name="toggle <id>"      desc="Enable or disable a rule: --enabled true|false" />
+              <Flag name="test"             desc="Show which rules would apply to a specific diff: --diff-id <uuid>" />
+            </div>
+            <p className="text-[11.5px] pt-1" style={{ color: 'var(--text-3)' }}>
+              An active rule downgrades a specific <Code>change_kind</Code> to the
+              target <Code>severity_override</Code>, preventing a CI block for a planned change.
+            </p>
+          </Card>
+
+          <Card>
+            <p className="text-[12.5px] font-semibold" style={{ color: 'var(--text-1)' }}>
+              <Code>radar batch</Code> — Compare multiple spec pairs listed in a CSV file
+            </p>
+            <div className="space-y-1.5 pt-1">
+              <Flag name="--csv <path>"     desc="CSV file with columns: base, head (required); label, format, service_id (optional)" />
+              <Flag name="--api-url <url>"  desc="radar-api base URL (optional; enables posting results per-service)" />
+              <Flag name="--token <token>"  desc="Bearer token for the API" />
+              <Flag name="--json"           desc="Emit results as JSON instead of a colour table" />
+              <Flag name="--no-color"       desc="Disable ANSI colour in table output" />
+            </div>
+            <Block>{`# Example CSV
+base,head,label,service_id
+old-payments.yaml,new-payments.yaml,payments,abc-123
+old-orders.yaml,new-orders.yaml,orders,`}</Block>
+            <p className="text-[11.5px] pt-1" style={{ color: 'var(--text-3)' }}>
+              Each row is compared independently. Results are printed as a table (one row per pair)
+              or as a JSON array when <Code>--json</Code> is passed.
+            </p>
+          </Card>
+
+          <Card>
+            <p className="text-[12.5px] font-semibold" style={{ color: 'var(--text-1)' }}>
               <Code>radar completions &lt;shell&gt;</Code> — Print shell completion script to stdout
             </p>
             <p className="text-[12.5px] pt-1" style={{ color: 'var(--text-3)' }}>
@@ -1110,6 +1243,13 @@ radar completions fish > ~/.config/fish/completions/radar.fish`}</Block>
               <EnvVar name="GITHUB_TOKEN"         desc="Required for --post-comment and --post-github-release" />
               <EnvVar name="GITHUB_REPOSITORY"    desc="Set automatically by GitHub Actions (owner/repo)" />
               <EnvVar name="GITHUB_REF"           desc="Set automatically by GitHub Actions — used to extract the PR number" />
+              <EnvVar name="GITHUB_PR_NUMBER"     desc="Explicit PR number override for --post-comment (takes priority over GITHUB_REF and GITHUB_EVENT_PATH)" />
+              <EnvVar name="GITHUB_EVENT_PATH"    desc="Set automatically by GitHub Actions — path to the event JSON file; used to extract the PR number when GITHUB_PR_NUMBER is absent" />
+              <EnvVar name="NO_COLOR"             desc="Disable ANSI colour output in radar CLI (standard convention; also honoured by --no-color flag)" />
+            </div>
+            <div className="py-2">
+              <p className="text-[10.5px] font-semibold uppercase tracking-wider pb-2 pt-3" style={{ color: 'var(--text-dim)' }}>Security</p>
+              <EnvVar name="RADAR_ALLOWED_HOSTS"    desc="Glob-pattern allowlist for outbound HTTP (webhooks, scans, CSV runner). Comma-separated, e.g. *.example.com,api.partner.io. Default: all hosts allowed." />
             </div>
             <div className="py-2">
               <p className="text-[10.5px] font-semibold uppercase tracking-wider pb-2 pt-3" style={{ color: 'var(--text-dim)' }}>Server tuning</p>

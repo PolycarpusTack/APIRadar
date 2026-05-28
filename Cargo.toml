@@ -2,6 +2,13 @@
 members = ["radar-core", "radar-cli", "radar-api", "radar-scanner"]
 resolver = "2"
 
+[profile.release]
+opt-level    = 3       # maximum speed
+lto          = "thin"  # link-time optimisation (smaller binary, faster startup)
+codegen-units = 1      # single codegen unit for better inlining
+strip        = "symbols"  # remove debug symbols → ~60% smaller binary on Linux/Mac
+panic        = "abort" # no unwinding tables → smaller binary
+
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["macros"] }

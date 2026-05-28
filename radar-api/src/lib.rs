@@ -65,6 +65,8 @@ use uuid::Uuid;
 // TD-4: Per-token (Bearer) / per-IP sliding-window rate limiter
 // ---------------------------------------------------------------------------
 
+const RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
 #[derive(Clone)]
 struct RateLimiter {
     // key: Bearer token prefix (authenticated) or client IP (unauthenticated)
@@ -81,6 +83,17 @@ impl RateLimiter {
         }
     }
 
+    /// Remove entries whose window expired more than 2× the window ago.
+    /// Called from a background task every 10 minutes to bound memory growth.
+    fn prune_stale(&self) {
+        let cutoff = std::time::Duration::from_secs(RATE_LIMIT_WINDOW_SECS * 2);
+        let now = std::time::Instant::now();
+        self.state
+            .lock()
+            .unwrap()
+            .retain(|_, (_, window_start)| now.duration_since(*window_start) < cutoff);
+    }
+
     /// Returns `true` if the request is allowed; `false` if the limit is exceeded.
     fn check_and_record(&self, key: &str) -> bool {
         if self.max_per_minute == 0 {
@@ -89,7 +102,7 @@ impl RateLimiter {
         let mut state = self.state.lock().unwrap();
         let now = std::time::Instant::now();
         let entry = state.entry(key.to_string()).or_insert((0, now));
-        if now.duration_since(entry.1) >= std::time::Duration::from_secs(60) {
+        if now.duration_since(entry.1) >= std::time::Duration::from_secs(RATE_LIMIT_WINDOW_SECS) {
             *entry = (1, now);
             true
         } else if entry.0 < self.max_per_minute {
@@ -227,8 +240,15 @@ pub async fn run(
         .set(derive_sqlite_parent(effective_url))
         .ok();
 
+    let max_conns: u32 = std::env::var("RADAR_DB_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
     let pool = AnyPoolOptions::new()
-        .max_connections(5)
+        .max_connections(max_conns)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .max_lifetime(std::time::Duration::from_secs(1800))
+        .idle_timeout(std::time::Duration::from_secs(600))
         .connect(effective_url)
         .await?;
 
@@ -252,6 +272,17 @@ pub async fn run(
     let jwt_secret = std::env::var("RADAR_JWT_SECRET").ok().filter(|s| !s.is_empty());
 
     let limiter = Arc::new(RateLimiter::new(rate_limit_per_minute));
+
+    // Prune stale rate-limit buckets every 10 minutes to bound memory growth.
+    let limiter_for_prune = limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600));
+        loop {
+            interval.tick().await;
+            limiter_for_prune.prune_stale();
+        }
+    });
+
     let app = build_router(pool, static_dir, max_body_bytes, require_auth, jwt_secret);
 
     // D-7: Add rate limiting as the outermost layer so it wraps the entire app.
@@ -500,12 +531,24 @@ async fn health(State(pool): State<sqlx::AnyPool>) -> impl IntoResponse {
 }
 
 // GET /metrics — Prometheus text exposition
-async fn metrics_handler() -> impl IntoResponse {
+async fn metrics_handler(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    // When RADAR_METRICS_TOKEN is set, require a matching Bearer token.
+    // If unset, the endpoint is open (backwards-compatible for desktop / CI).
+    if let Ok(expected) = std::env::var("RADAR_METRICS_TOKEN") {
+        let provided = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        if provided != Some(expected.as_str()) {
+            return (StatusCode::UNAUTHORIZED, "").into_response();
+        }
+    }
     let body = get_prometheus_handle().render();
     (
         [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         body,
     )
+        .into_response()
 }
 
 
@@ -544,8 +587,8 @@ mod tests {
             .await
             .expect("failed to run migrations");
         if is_sqlite {
-            // Disable FK enforcement so SQLite unit tests can insert rows freely.
-            sqlx::query("PRAGMA foreign_keys = OFF")
+            // Enable FK enforcement to match PostgreSQL behaviour.
+            sqlx::query("PRAGMA foreign_keys = ON")
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -2737,6 +2780,18 @@ mod tests {
     async fn gateway_logs_path_normalised() {
         let pool = test_pool().await;
 
+        // Insert parent rows required by usage_event FK constraints.
+        sqlx::query(
+            "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("s-norm").bind("s-norm").bind("").bind("").bind("openapi")
+        .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("c-norm").bind("c-norm").bind("").bind("").bind("")
+        .execute(&pool).await.unwrap();
+
         // Insert a usage event via gateway log and verify the stored operation is normalised.
         let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None);
         let body = serde_json::json!([
@@ -4242,6 +4297,164 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body: Value = serde_json::from_str(&resp.text()).unwrap();
         assert_eq!(body["overall"], "ready");
+    }
+
+    // -----------------------------------------------------------------------
+    // Diffs — pagination
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_list_all_diffs_per_page_is_respected() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+
+        let svc = client.post_json(
+            "/v1/services",
+            &serde_json::json!({ "name": "pag-svc", "repo_url": "", "owner_team": "", "spec_format": "openapi" }),
+        ).await;
+        let svc_id = serde_json::from_str::<Value>(&svc.text()).unwrap()["id"]
+            .as_str().unwrap().to_string();
+
+        for i in 0..3u32 {
+            client.post_json(
+                &format!("/v1/services/{svc_id}/diffs"),
+                &serde_json::json!({ "service_name": "pag-svc", "repo_url": "", "owner_team": "", "from_git_ref": format!("a{i}"), "to_git_ref": format!("b{i}"), "spec_format": "openapi", "changes": [] }),
+            ).await;
+        }
+
+        let resp = client.get("/v1/diffs?limit=2").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&resp.text()).unwrap();
+        assert!(body.as_array().unwrap().len() <= 2, "limit=2 must return at most 2 diffs");
+    }
+
+    // -----------------------------------------------------------------------
+    // Diffs — org isolation
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_diffs_are_scoped_to_org() {
+        let pool = test_pool().await;
+        let client_a = test_helpers::TestClient::new_with_jwt(pool.clone(), "org-alpha");
+        let client_b = test_helpers::TestClient::new_with_jwt(pool.clone(), "org-beta");
+
+        // Register service and diff under org-alpha
+        let svc = client_a.post_json(
+            "/v1/services",
+            &serde_json::json!({ "name": "iso-svc", "repo_url": "", "owner_team": "", "spec_format": "openapi" }),
+        ).await;
+        assert_eq!(svc.status(), StatusCode::CREATED);
+        let svc_id = serde_json::from_str::<Value>(&svc.text()).unwrap()["id"]
+            .as_str().unwrap().to_string();
+
+        client_a.post_json(
+            &format!("/v1/services/{svc_id}/diffs"),
+            &serde_json::json!({ "service_name": "iso-svc", "repo_url": "", "owner_team": "", "from_git_ref": "x", "to_git_ref": "y", "spec_format": "openapi", "changes": [] }),
+        ).await;
+
+        // org-beta must not see org-alpha's diffs in the global list
+        let resp = client_b.get("/v1/diffs").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let diffs: Vec<Value> = serde_json::from_str(&resp.text()).unwrap();
+        let found = diffs.iter().any(|d| d["service_id"].as_str() == Some(&svc_id));
+        assert!(!found, "org-beta must not see org-alpha's diffs");
+    }
+
+    // -----------------------------------------------------------------------
+    // Consumers — upsert idempotency
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_upsert_consumer_by_name_is_idempotent() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+
+        let first = client.post_json(
+            "/v1/consumers/upsert",
+            &serde_json::json!({ "name": "upsert-consumer", "catalog_source": "test" }),
+        ).await;
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let id1 = serde_json::from_str::<Value>(&first.text()).unwrap()["id"]
+            .as_str().unwrap().to_string();
+
+        let second = client.post_json(
+            "/v1/consumers/upsert",
+            &serde_json::json!({ "name": "upsert-consumer", "catalog_source": "test" }),
+        ).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let id2 = serde_json::from_str::<Value>(&second.text()).unwrap()["id"]
+            .as_str().unwrap().to_string();
+
+        assert_eq!(id1, id2, "upsert with same name must return the same consumer id");
+    }
+
+    // -----------------------------------------------------------------------
+    // Services — duplicate names allowed (uniqueness is on id, not name)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_create_service_same_name_produces_distinct_ids() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+
+        let body = serde_json::json!({ "name": "dup-svc", "repo_url": "", "owner_team": "", "spec_format": "openapi" });
+        let first = client.post_json("/v1/services", &body).await;
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let id1 = serde_json::from_str::<Value>(&first.text()).unwrap()["id"]
+            .as_str().unwrap().to_string();
+
+        let second = client.post_json("/v1/services", &body).await;
+        assert_eq!(second.status(), StatusCode::CREATED,
+            "same-name services are allowed; uniqueness is enforced on id only");
+        let id2 = serde_json::from_str::<Value>(&second.text()).unwrap()["id"]
+            .as_str().unwrap().to_string();
+
+        assert_ne!(id1, id2, "two services with the same name must get distinct ids");
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit events — org scoping and secret redaction
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_audit_event_secret_fields_are_redacted() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+
+        let post = client.post_json(
+            "/v1/audit-events",
+            &serde_json::json!({
+                "actor": "ci-bot",
+                "action": "secret.redact.test",
+                "meta": { "api_key": "super-secret-key", "label": "visible" }
+            }),
+        ).await;
+        assert_eq!(post.status(), StatusCode::CREATED);
+
+        // POST returns {"ok": true}; retrieve the stored event via the list endpoint.
+        let list = client.get("/v1/audit-events?action=secret.redact.test").await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&list.text()).unwrap();
+        let entry = &body["entries"][0];
+        let meta = &entry["meta"];
+        assert_ne!(meta["api_key"], "super-secret-key",
+            "api_key must be redacted in stored audit event");
+        assert_eq!(meta["label"], "visible", "non-secret field must be preserved");
+    }
+
+    // -----------------------------------------------------------------------
+    // Evidence coverage — returns flat rows
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_evidence_coverage_returns_array() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+
+        let resp = client.get("/v1/evidence/coverage").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&resp.text()).unwrap();
+        assert!(body.is_array(), "evidence/coverage must return a JSON array");
     }
 }
 

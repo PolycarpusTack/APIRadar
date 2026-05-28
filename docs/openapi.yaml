@@ -19,6 +19,9 @@ info:
     When neither env var is set, authentication is **optional** (dev mode).
     Set `RADAR_REQUIRE_AUTH=true` to force rejection of unauthenticated requests
     even without a token configured.
+
+    **Not documented here:** `GET /metrics` (Prometheus text exposition format,
+    internal scraping use only — not intended for external API consumers).
   contact:
     name: Radar Monitor
   license:
@@ -46,6 +49,17 @@ tags:
   - name: webhooks
   - name: scheduled-scans
   - name: notifications
+  - name: csv-runs
+  - name: audit-events
+  - name: acknowledgements
+  - name: policy-decisions
+  - name: catalog-sources
+  - name: evolution-rules
+  - name: evidence
+  - name: readiness
+  - name: scalar
+  - name: auth
+  - name: share
 
 paths:
   /health:
@@ -832,6 +846,858 @@ paths:
               schema:
                 type: string
 
+  /v1/services/{serviceId}/diffs/compare:
+    parameters:
+      - $ref: "#/components/parameters/serviceId"
+    post:
+      tags: [diffs]
+      summary: Compare two spec bodies without posting from CI
+      operationId: compareSpecs
+      description: |
+        Accepts base and head spec bodies directly (not git refs). Creates a diff row and
+        returns it. Useful for the in-browser "Compare Specs" panel.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompareSpecsRequest"
+      responses:
+        "200":
+          description: Diff created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Diff"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /v1/compare/batch:
+    post:
+      tags: [diffs]
+      summary: Compare multiple spec pairs listed by URL
+      operationId: batchCompare
+      description: |
+        Each entry provides a base URL and head URL pointing to spec files to fetch and
+        compare. Results are returned in the same order as the input. This is the API-side
+        counterpart to `radar batch --csv`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/BatchCompareItem"
+      responses:
+        "200":
+          description: Array of result summaries, one per input item
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BatchResultItem"
+
+  /v1/consumers/upsert:
+    post:
+      tags: [consumers]
+      summary: Register or update a consumer by name (idempotent)
+      operationId: upsertConsumer
+      description: |
+        Creates the consumer if it does not exist; updates `owner_team` and `contact` if it does.
+        Idempotent on `(org_id, name)`. Used by the collection-file scanner so it can register
+        consumers without knowing their UUID in advance.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertConsumerRequest"
+      responses:
+        "200":
+          description: Consumer row (created or updated)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Consumer"
+
+  /v1/evidence/collection:
+    post:
+      tags: [evidence]
+      summary: Ingest collection evidence items (call sites from a Postman or OpenAPI scan)
+      operationId: ingestCollectionEvidence
+      description: |
+        Accepts an array of evidence items. Each item records a (consumer, service, operation,
+        field_path) tuple. Idempotent — re-posting the same items produces the same rows
+        (deterministic IDs based on the tuple).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/CollectionEvidenceItem"
+      responses:
+        "200":
+          description: Number of evidence entries written
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  inserted:
+                    type: integer
+
+  /v1/evidence/coverage:
+    get:
+      tags: [evidence]
+      summary: Evidence coverage across all services and consumers
+      operationId: getEvidenceCoverage
+      description: |
+        Returns per-service operation coverage statistics: what fraction of known operations
+        have at least one piece of evidence attached (runtime usage, call site, or collection file).
+      responses:
+        "200":
+          description: Coverage data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/EvidenceCoverageEntry"
+
+  /v1/services/{serviceId}/sampling:
+    parameters:
+      - $ref: "#/components/parameters/serviceId"
+    get:
+      tags: [evidence]
+      summary: Get sampling configuration for a service
+      operationId: getSampling
+      responses:
+        "200":
+          description: Sampling configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SamplingConfig"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [evidence]
+      summary: Update sampling configuration for a service
+      operationId: putSampling
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SamplingConfig"
+      responses:
+        "200":
+          description: Updated sampling configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SamplingConfig"
+
+  /v1/otlp/v1/traces:
+    post:
+      tags: [usage]
+      summary: Ingest OpenTelemetry trace spans as usage events
+      operationId: ingestOtlpTraces
+      description: |
+        Accepts an OTLP JSON trace payload. Radar extracts HTTP span attributes
+        (`http.method`, `http.route`, `http.target`) and maps them to usage events.
+        Compatible with OpenTelemetry Collector HTTP exporter.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: OTLP ExportTraceServiceRequest JSON
+      responses:
+        "200":
+          description: Ingested
+
+  /v1/gateway/logs:
+    post:
+      tags: [usage]
+      summary: Ingest API gateway access logs as usage events
+      operationId: ingestGatewayLogs
+      description: |
+        Accepts an array of structured gateway log entries. Radar maps each entry to a
+        usage event. Compatible with Kong, AWS API Gateway, and Nginx access log formats.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+                description: Gateway log entry (format auto-detected)
+      responses:
+        "200":
+          description: Ingested
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ingested:
+                    type: integer
+
+  /v1/policy-decisions:
+    get:
+      tags: [policy-decisions]
+      summary: List policy decisions
+      operationId: listPolicyDecisions
+      parameters:
+        - name: service_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Paginated policy decisions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyDecisionListResponse"
+    post:
+      tags: [policy-decisions]
+      summary: Record a policy decision from the CLI
+      operationId: createPolicyDecision
+      description: |
+        Called by `radar check` after evaluating a diff against the policy. Records the outcome
+        (pass/fail/warn), the number of breaking changes, whether the blast radius was active,
+        and whether an override label was present.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePolicyDecisionRequest"
+      responses:
+        "201":
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyDecision"
+
+  /v1/acknowledgements:
+    get:
+      tags: [acknowledgements]
+      summary: List acknowledgements
+      operationId: listAcknowledgements
+      parameters:
+        - name: diff_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Array of acknowledgements
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Acknowledgement"
+    post:
+      tags: [acknowledgements]
+      summary: Acknowledge a diff (sign-off by a reviewer)
+      operationId: createAcknowledgement
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAcknowledgementRequest"
+      responses:
+        "201":
+          description: Acknowledgement created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Acknowledgement"
+
+  /v1/diffs/{diffId}/acknowledgements:
+    parameters:
+      - $ref: "#/components/parameters/diffId"
+    get:
+      tags: [acknowledgements]
+      summary: List acknowledgements for a specific diff
+      operationId: listDiffAcknowledgements
+      responses:
+        "200":
+          description: Array of acknowledgements for the diff
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Acknowledgement"
+
+  /v1/catalog-sources:
+    get:
+      tags: [catalog-sources]
+      summary: List catalog sources
+      operationId: listCatalogSources
+      responses:
+        "200":
+          description: Array of catalog sources
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CatalogSource"
+    post:
+      tags: [catalog-sources]
+      summary: Register a catalog source
+      operationId: createCatalogSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCatalogSourceRequest"
+      responses:
+        "201":
+          description: Catalog source created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogSource"
+
+  /v1/catalog-sources/{catalogSourceId}/sync:
+    parameters:
+      - name: catalogSourceId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags: [catalog-sources]
+      summary: Trigger a manual sync of a catalog source
+      operationId: syncCatalogSource
+      description: |
+        Fetches the catalog endpoint, imports new services, and updates existing ones.
+        Returns the number of services upserted.
+      responses:
+        "200":
+          description: Sync completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  upserted:
+                    type: integer
+
+  /v1/evolution-rules:
+    get:
+      tags: [evolution-rules]
+      summary: List evolution rules
+      operationId: listEvolutionRules
+      responses:
+        "200":
+          description: Wrapped array of evolution rules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EvolutionRule"
+    post:
+      tags: [evolution-rules]
+      summary: Create an evolution rule
+      operationId: createEvolutionRule
+      description: |
+        Allow-lists a specific change kind (and optionally a field path) for a service so that
+        `radar check` does not block CI for that change. Rules expire automatically.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEvolutionRuleRequest"
+      responses:
+        "201":
+          description: Rule created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvolutionRule"
+
+  /v1/evolution-rules/{ruleId}:
+    parameters:
+      - name: ruleId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      tags: [evolution-rules]
+      summary: Delete an evolution rule
+      operationId: deleteEvolutionRule
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [evolution-rules]
+      summary: Toggle an evolution rule (enable or disable)
+      operationId: toggleEvolutionRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [active]
+              properties:
+                active:
+                  type: boolean
+      responses:
+        "200":
+          description: Updated rule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvolutionRule"
+
+  /v1/csv-runs:
+    get:
+      tags: [csv-runs]
+      summary: List CSV runner jobs
+      operationId: listCsvRuns
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: Array of CSV runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CsvRun"
+    post:
+      tags: [csv-runs]
+      summary: Start a new CSV runner job
+      operationId: createCsvRun
+      description: |
+        Accepts a CSV body and a request template. Rows are dispatched asynchronously.
+        The response contains the job ID; poll `GET /v1/csv-runs/{id}` for status.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCsvRunRequest"
+      responses:
+        "202":
+          description: Job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CsvRun"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          description: SSRF protection rejected the target URL
+
+  /v1/csv-runs/{csvRunId}:
+    parameters:
+      - name: csvRunId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [csv-runs]
+      summary: Get a CSV runner job by ID
+      operationId: getCsvRun
+      responses:
+        "200":
+          description: CSV run detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CsvRun"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [csv-runs]
+      summary: Cancel a CSV runner job
+      operationId: cancelCsvRun
+      description: |
+        Cancels a pending or running job. Returns 404 if the job is already completed or does
+        not exist.
+      responses:
+        "204":
+          description: Cancelled
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/csv-runs/{csvRunId}/results:
+    parameters:
+      - name: csvRunId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [csv-runs]
+      summary: Get per-row results for a CSV runner job
+      operationId: getCsvRunResults
+      responses:
+        "200":
+          description: Array of row results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CsvRunResult"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/audit-events:
+    get:
+      tags: [audit-events]
+      summary: List audit events
+      operationId: listAuditEvents
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: action
+          in: query
+          description: Filter by exact action string (e.g. "diff.created")
+          schema:
+            type: string
+        - name: entity_type
+          in: query
+          description: Filter by entity type (e.g. "diff", "consumer")
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Array of audit events (newest first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditEvent"
+    post:
+      tags: [audit-events]
+      summary: Write a custom audit event
+      operationId: createAuditEvent
+      description: |
+        Allows external systems (e.g. the CLI, CI pipeline) to write arbitrary audit events
+        into the trail. Secrets in `meta` are automatically redacted before storage.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAuditEventRequest"
+      responses:
+        "201":
+          description: Event recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditEvent"
+
+  /v1/readiness:
+    get:
+      tags: [readiness]
+      summary: Product readiness summary
+      operationId: getReadiness
+      description: |
+        Returns a checklist of readiness items: whether at least one service is registered,
+        at least one consumer is registered, at least one diff has been run, and whether the
+        AI provider is configured. Shown on the Overview page to guide first-time setup.
+      security: []
+      responses:
+        "200":
+          description: Readiness checklist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+
+  /v1/release-notes/{releaseNoteId}/generate-status:
+    parameters:
+      - name: releaseNoteId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [release-notes]
+      summary: Poll async generation status of a release note
+      operationId: getReleaseNoteGenerateStatus
+      description: |
+        Returns the current `generation_status` of a release note: `pending`, `running`,
+        `completed`, or `failed`. Poll until status is `completed` or `failed`.
+      responses:
+        "200":
+          description: Generation status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerateStatusResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/release-notes/{releaseNoteId}/status:
+    parameters:
+      - name: releaseNoteId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    patch:
+      tags: [release-notes]
+      summary: Update the workflow status of a release note
+      operationId: patchReleaseNoteStatus
+      description: |
+        Moves a release note through the sign-off workflow: `draft` → `reviewed` → `published`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [draft, reviewed, published]
+      responses:
+        "200":
+          description: Updated release note summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReleaseNoteRow"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/diffs/{diffId}/migration-guide:
+    parameters:
+      - $ref: "#/components/parameters/diffId"
+    get:
+      tags: [release-notes]
+      summary: Get AI-generated per-consumer migration guide for a diff
+      operationId: getMigrationGuide
+      description: |
+        Returns the stored migration guide for this diff (generated by `radar explain
+        --migration-guide`). Returns 404 if no guide has been generated yet.
+      responses:
+        "200":
+          description: Migration guide Markdown text
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  diff_id:
+                    type: string
+                    format: uuid
+                  content:
+                    type: string
+                    description: Markdown migration guide
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/diffs/{diffId}/test-suites:
+    parameters:
+      - $ref: "#/components/parameters/diffId"
+    get:
+      tags: [generate-tests]
+      summary: List generated test suites associated with a diff
+      operationId: listDiffTestSuites
+      responses:
+        "200":
+          description: Array of test suite summaries for the diff
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TestSuiteSummary"
+
+  /scalar/version:
+    get:
+      tags: [scalar]
+      summary: Get Scalar bundle version information
+      operationId: getScalarVersion
+      security: []
+      description: |
+        Returns the bundled (compiled-in) version, any runtime override version, the active
+        version, and whether a newer version is available on npm.
+      responses:
+        "200":
+          description: Version information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScalarVersionResponse"
+
+  /scalar/update:
+    post:
+      tags: [scalar]
+      summary: Download and apply the latest Scalar bundle
+      operationId: postScalarUpdate
+      security: []
+      description: |
+        Fetches the latest `@scalar/api-reference` bundle from jsDelivr and writes it to the
+        override path (`<db-dir>/scalar_override.js`). Only available in SQLite mode.
+        Returns 422 in PostgreSQL (web/production) mode.
+      responses:
+        "200":
+          description: Update applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScalarVersionResponse"
+        "422":
+          description: Not available in PostgreSQL mode
+
+  /auth/login:
+    get:
+      tags: [auth]
+      summary: Initiate OIDC login flow
+      operationId: oidcLogin
+      security: []
+      description: Redirects the browser to the OIDC provider's authorization endpoint.
+      responses:
+        "302":
+          description: Redirect to OIDC provider
+
+  /auth/callback:
+    get:
+      tags: [auth]
+      summary: OIDC authorization code callback
+      operationId: oidcCallback
+      security: []
+      description: |
+        Exchanges the authorization code for tokens. Issues two Set-Cookie headers:
+        `radar_session` (HS256 JWT, HttpOnly, SameSite=Lax, 24h) and clears the
+        `oidc_state` cookie. Redirects to `/app/` on success.
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+      responses:
+        "302":
+          description: Redirect to dashboard on success
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Get the current authenticated user's profile
+      operationId: oidcMe
+      description: Returns the subject, email, and org claim from the active session.
+      responses:
+        "200":
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthUser"
+        "401":
+          description: Not authenticated
+
+  /auth/logout:
+    get:
+      tags: [auth]
+      summary: Destroy the current session
+      operationId: oidcLogout
+      responses:
+        "200":
+          description: Session destroyed
+        "302":
+          description: Redirect to login page
+
+  /share/{token}:
+    parameters:
+      - name: token
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [share]
+      summary: Retrieve a shared diff by share token
+      operationId: getSharedDiff
+      security: []
+      description: |
+        Returns a diff and its changes using a pre-generated share token. No authentication
+        required — share tokens are scoped to a single diff and do not expose org-level data.
+      responses:
+        "200":
+          description: Shared diff
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Diff"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
 components:
   parameters:
     serviceId:
@@ -1549,6 +2415,606 @@ components:
         last_run_at:
           type: string
           format: date-time
+
+    CompareSpecsRequest:
+      type: object
+      required: [base_spec, head_spec, spec_format]
+      properties:
+        base_spec:
+          type: string
+          description: Full spec body for the base (older) version
+        head_spec:
+          type: string
+          description: Full spec body for the head (newer) version
+        spec_format:
+          type: string
+          enum: [openapi, graphql, protobuf]
+          default: openapi
+        base_ref:
+          type: string
+          default: "base"
+        head_ref:
+          type: string
+          default: "head"
+
+    BatchCompareItem:
+      type: object
+      required: [base_url, head_url]
+      properties:
+        label:
+          type: string
+          description: Human-readable label for this pair (echoed in the response)
+        service_id:
+          type: string
+          format: uuid
+          description: Optional — enables posting the diff to the API if provided
+        format:
+          type: string
+          enum: [openapi, graphql, protobuf]
+          default: openapi
+        base_url:
+          type: string
+          description: URL of the base spec file
+        head_url:
+          type: string
+          description: URL of the head spec file
+
+    BatchResultItem:
+      type: object
+      properties:
+        label:
+          type: string
+        status:
+          type: string
+          enum: [ok, breaking, error]
+        diff_id:
+          type: string
+          format: uuid
+          nullable: true
+        breaking_count:
+          type: integer
+        changes_count:
+          type: integer
+        error:
+          type: string
+          nullable: true
+
+    UpsertConsumerRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        catalog_source:
+          type: string
+          default: "collection_file"
+          description: Label identifying what registered this consumer (e.g. "collection_file", "backstage")
+
+    CollectionEvidenceItem:
+      type: object
+      required: [consumer_id, service_id]
+      properties:
+        consumer_id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        operation:
+          type: string
+          default: ""
+          description: API operation string e.g. "GET /users"
+        field_path:
+          type: string
+          default: ""
+          description: Dot-separated field path accessed by this call
+        evidence_uri:
+          type: string
+          default: ""
+          description: Source URI of the collection file for traceability
+
+    EvidenceCoverageEntry:
+      description: |
+        Flat row from the evidence coverage query. One row per (consumer × service × source_type)
+        combination. The UI groups by service_id to build the nested view.
+      type: object
+      properties:
+        consumer_id:
+          type: string
+          format: uuid
+        consumer_name:
+          type: string
+        service_id:
+          type: string
+          format: uuid
+        service_name:
+          type: string
+        source_type:
+          type: string
+          enum: [runtime_usage, static_call_site, collection_file]
+        event_count:
+          type: integer
+          description: Total evidence items of this source_type for this (consumer, service) pair
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+        is_stale:
+          type: boolean
+          description: True when no evidence was recorded in the last 7 days
+
+    SamplingConfig:
+      type: object
+      properties:
+        sample_rate:
+          type: number
+          format: double
+          minimum: 0.0
+          maximum: 1.0
+          default: 1.0
+          description: Fraction of incoming usage events to store (1.0 = store all)
+        field_deny_list:
+          type: array
+          items:
+            type: string
+          default: []
+          description: Field paths to exclude from evidence ingestion (e.g. "password", "ssn")
+
+    PolicyDecision:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        org_id:
+          type: string
+        diff_id:
+          type: string
+          format: uuid
+          nullable: true
+        service_id:
+          type: string
+          format: uuid
+          nullable: true
+        verdict:
+          type: string
+          description: Outcome of the policy check (e.g. "pass", "fail", "warn")
+        fail_mode:
+          type: string
+          description: Policy mode in effect (e.g. "active_consumers", "any_break", "never")
+        actor:
+          type: string
+          nullable: true
+          description: CI actor or user who triggered the check
+        created_at:
+          type: string
+          format: date-time
+
+    PolicyDecisionListResponse:
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyDecision"
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    CreatePolicyDecisionRequest:
+      type: object
+      required: [verdict, fail_mode]
+      properties:
+        diff_id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        verdict:
+          type: string
+          description: "Pass/fail/warn outcome from the policy evaluation"
+        fail_mode:
+          type: string
+          description: "Policy block_on setting in effect: active_consumers | any_break | never"
+        actor:
+          type: string
+          description: CI actor identifier (e.g. GitHub Actions runner, username)
+
+    Acknowledgement:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        diff_id:
+          type: string
+          format: uuid
+          nullable: true
+        change_id:
+          type: string
+          format: uuid
+          nullable: true
+        consumer_id:
+          type: string
+          format: uuid
+          nullable: true
+        service_id:
+          type: string
+          format: uuid
+          nullable: true
+        acknowledged_by:
+          type: string
+        reason:
+          type: string
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    CreateAcknowledgementRequest:
+      type: object
+      required: [acknowledged_by]
+      properties:
+        diff_id:
+          type: string
+          format: uuid
+        change_id:
+          type: string
+          format: uuid
+        consumer_id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        acknowledged_by:
+          type: string
+          minLength: 1
+        reason:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+
+    CatalogSource:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        org_id:
+          type: string
+        name:
+          type: string
+        url:
+          type: string
+          format: uri
+          nullable: true
+        kind:
+          type: string
+        token_env:
+          type: string
+          nullable: true
+          description: Name of the environment variable holding the auth token for this catalog
+        sync_interval_secs:
+          type: integer
+          nullable: true
+        last_synced_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    CreateCatalogSourceRequest:
+      type: object
+      required: [name, kind]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        kind:
+          type: string
+        url:
+          type: string
+          format: uri
+        token_env:
+          type: string
+          description: Name of an env var on the server holding the auth token for this catalog
+        sync_interval_secs:
+          type: integer
+          minimum: 60
+
+    EvolutionRule:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        change_kind:
+          type: string
+          description: The change kind this rule targets (e.g. field_removed)
+        path_pattern:
+          type: string
+          nullable: true
+          description: Optional dot-separated field path glob (e.g. "users.*", "**.legacy_field")
+        severity_override:
+          type: string
+          enum: [safe, non_breaking_risky]
+          description: Downgrade matched changes to this severity instead of blocking
+        enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    CreateEvolutionRuleRequest:
+      type: object
+      required: [name, change_kind, severity_override]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Human-readable label for this rule
+        change_kind:
+          type: string
+          description: ChangeKind to target (e.g. field_added, enum_value_added)
+        path_pattern:
+          type: string
+          description: Optional dot-separated field path glob
+        severity_override:
+          type: string
+          enum: [safe, non_breaking_risky]
+
+    CsvRun:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, completed_with_failures, failed, cancelled]
+        total_rows:
+          type: integer
+        completed_rows:
+          type: integer
+        error_count:
+          type: integer
+        error_message:
+          type: string
+          nullable: true
+          description: Top-level error if the entire job failed (not per-row errors)
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    RequestTemplate:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          description: URL template. Use {{column_name}} placeholders for per-row substitution.
+          example: "https://api.example.com/users/{{id}}"
+        method:
+          type: string
+          enum: [GET, POST, PUT, PATCH, DELETE]
+          default: GET
+        headers:
+          type: array
+          items:
+            $ref: "#/components/schemas/HeaderPair"
+          default: []
+        body:
+          type: string
+          default: ""
+          description: Request body template. May use {{column_name}} placeholders.
+        capture_body:
+          type: boolean
+          default: false
+          description: Store up to 10 KB of each response body alongside the result.
+        enable_retry:
+          type: boolean
+          default: false
+          description: |
+            Retry rows on 5xx / network errors (up to 3 attempts: 0s, 1s, 4s backoff).
+            GET and HEAD always get the full retry budget regardless of this flag.
+
+    HeaderPair:
+      type: object
+      required: [key, value]
+      properties:
+        key:
+          type: string
+        value:
+          type: string
+          description: May use {{column_name}} placeholders.
+
+    CreateCsvRunRequest:
+      type: object
+      required: [request, rows]
+      properties:
+        name:
+          type: string
+          default: ""
+          description: Optional human-readable label for this run
+        request:
+          $ref: "#/components/schemas/RequestTemplate"
+        rows:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+          description: |
+            Pre-parsed CSV rows as JSON objects. Keys are column headers; values are the
+            cell strings. Maximum 500 rows per request.
+
+    CsvRunResult:
+      type: object
+      properties:
+        row_number:
+          type: integer
+        http_status:
+          type: integer
+          nullable: true
+        duration_ms:
+          type: integer
+        error:
+          type: string
+          nullable: true
+        url:
+          type: string
+          description: The resolved URL that was called for this row
+        response_body:
+          type: string
+          nullable: true
+          description: First 10 KB of response body, present only when capture_body was true.
+        row_data:
+          type: string
+          description: Serialised JSON of the original input row
+
+    AuditEvent:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        org_id:
+          type: string
+        actor:
+          type: string
+          description: JWT sub or static token identifier
+        action:
+          type: string
+          example: "diff.created"
+        entity_type:
+          type: string
+          example: "diff"
+          nullable: true
+        entity_id:
+          type: string
+          format: uuid
+          nullable: true
+        meta:
+          type: object
+          description: Arbitrary key-value context. Secret values are automatically redacted.
+        created_at:
+          type: string
+          format: date-time
+
+    CreateAuditEventRequest:
+      type: object
+      required: [actor, action]
+      properties:
+        actor:
+          type: string
+          description: Identifier of the actor recording the event
+        action:
+          type: string
+          example: "ci.check.triggered"
+        entity_type:
+          type: string
+        entity_id:
+          type: string
+        meta:
+          type: object
+
+    ReadinessItem:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Item identifier (e.g. "services", "consumers", "diffs", "ai_provider")
+        status:
+          type: string
+          enum: [ok, missing, warn]
+        hint:
+          type: string
+          description: Human-readable guidance shown when status is not ok
+        count:
+          type: integer
+        last_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ReadinessResponse:
+      type: object
+      properties:
+        overall:
+          type: string
+          enum: [ready, setup_required]
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReadinessItem"
+
+    GenerateStatusResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        generation_status:
+          type: string
+          enum: [pending, running, completed, failed]
+        generation_error:
+          type: string
+          nullable: true
+
+    ScalarVersionResponse:
+      type: object
+      properties:
+        bundled:
+          type: string
+          description: Version compiled into the binary
+        override:
+          type: string
+          nullable: true
+          description: Version stored as a runtime override, or null
+        active:
+          type: string
+          description: Currently-served version (override if present, otherwise bundled)
+        latest:
+          type: string
+          nullable: true
+          description: Latest version available on npm, or null if the check failed
+        update_available:
+          type: boolean
+
+    AuthUser:
+      type: object
+      properties:
+        sub:
+          type: string
+          description: Subject identifier from the OIDC provider
+        email:
+          type: string
+          format: email
+        org_id:
+          type: string
+          description: Extracted from the claim named by RADAR_OIDC_ORG_CLAIM
 
   securitySchemes:
     bearerAuth:

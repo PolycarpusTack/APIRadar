@@ -114,6 +114,27 @@ impl TestClient {
         }
     }
 
+    /// Build a client that injects a `JwtClaims` extension with the given
+    /// `org_id` on every request.  Use this for tests that need data scoped
+    /// to a specific org without going through real JWT validation.
+    pub(crate) fn new_with_jwt(pool: sqlx::AnyPool, org_id: &str) -> Self {
+        let claims = super::JwtClaims {
+            sub: "test-user".into(),
+            org_id: org_id.to_string(),
+            exp: usize::MAX,
+        };
+        let app = super::build_router(pool, None, 4 * 1024 * 1024, false, None).layer(
+            axum::middleware::from_fn(move |mut req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
+                let c = claims.clone();
+                async move {
+                    req.extensions_mut().insert(c);
+                    next.run(req).await
+                }
+            }),
+        );
+        TestClient { app }
+    }
+
     pub(crate) async fn get(&self, uri: &str) -> TestResponse {
         self.send(
             Request::builder()

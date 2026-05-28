@@ -60,7 +60,12 @@ fn is_rfc1918_or_loopback(ip: std::net::IpAddr) -> bool {
             || oct[0] == 127                                     // 127.0.0.0/8
             || (oct[0] == 169 && oct[1] == 254)                  // 169.254.0.0/16 link-local
         }
-        std::net::IpAddr::V6(v6) => v6.is_loopback(),
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            v6.is_loopback()                       // ::1
+            || (s[0] & 0xfe00) == 0xfc00           // fc00::/7 — ULA (private unicast)
+            || (s[0] & 0xffc0) == 0xfe80           // fe80::/10 — link-local
+        }
     }
 }
 
@@ -282,6 +287,19 @@ mod tests {
     fn ssrf_blocked_ipv6_loopback_literal() {
         // ::1 is the IPv6 loopback address.
         assert!(is_ssrf_blocked("https://[::1]/hook"));
+    }
+
+    #[test]
+    fn ssrf_blocked_ipv6_ula() {
+        // fc00::/7 — Unique Local Addresses (private unicast, equivalent to RFC 1918 for IPv6).
+        assert!(is_ssrf_blocked("https://[fd00::1]/hook"));
+        assert!(is_ssrf_blocked("https://[fc00::1]/hook"));
+    }
+
+    #[test]
+    fn ssrf_blocked_ipv6_link_local() {
+        // fe80::/10 — link-local (equivalent to 169.254.0.0/16 for IPv6).
+        assert!(is_ssrf_blocked("https://[fe80::1]/hook"));
     }
 
     // is_host_allowed — covers empty list, exact match, wildcard subdomain

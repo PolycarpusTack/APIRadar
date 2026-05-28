@@ -8,8 +8,8 @@ This project uses the AI-Native Software Delivery framework. All task execution 
 - `Agents/backlog-builder-v5.1.md` — story/task templates, DoR/DoD
 - `Agents/core-specification-v1.md` — shared principles, modes, global DoD
 
-Current execution mode: DELIVERY (EPIC J)
-Active stories: see `DEVELOPMENT_PLAN.md` — EPICs A–I complete, EPIC J (Non-Technical UX) is next.
+Current execution mode: MAINTENANCE (all EPICs A–L complete)
+Active stories: none — see `DEVELOPMENT_PLAN.md` for full history. Phases 1–5 of the maturity plan are also complete.
 
 ---
 
@@ -86,7 +86,7 @@ Migration compatibility rules:
 - Use `TEXT` for IDs and timestamps — never `SERIAL`, `BIGSERIAL`, or `TIMESTAMPTZ`
 - All migrations must work on **both** SQLite and PostgreSQL
 - Test locally against SQLite; CI and production use PostgreSQL
-- Current migrations: 001–013 (013 adds `catalog_source` to consumer)
+- Current migrations: 001–032 (032 adds `generation_status` / `generation_error` to release_note)
 
 ---
 
@@ -150,4 +150,4 @@ Every task must be labelled with exactly one hat before implementation begins:
 - The Electron desktop build is skipped in CI for the same reason
 - `pnpm-lock.yaml` is committed and must never be `.gitignore`d
 - Clippy warnings are treated as errors (`-D warnings`) in CI
-- Test counts (approximate): radar-scanner 27, radar-api 42, radar-cli (unit + integration) ~55+
+- Test counts (approximate): radar-scanner 27, radar-api 171, radar-cli (unit + integration) ~55+

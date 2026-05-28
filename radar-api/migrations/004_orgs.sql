@@ -3,6 +3,12 @@
 -- indicates pre-migration legacy rows (accessible to all authenticated callers).
 -- Compatible with SQLite and PostgreSQL.
 
+-- NOTE: The org table is scaffolded here for future org-management endpoints
+-- (create org, list orgs, rename org). It is NOT currently queried — org_id is
+-- treated as an opaque string from the JWT claim, not a FK to this table.
+-- Do not add a FK constraint on org_id columns until the org management API
+-- is implemented; doing so would reject all existing rows whose org_id has
+-- no corresponding org row.
 CREATE TABLE IF NOT EXISTS org (
     id         TEXT NOT NULL PRIMARY KEY,
     name       TEXT NOT NULL,
