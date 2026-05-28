@@ -271,12 +271,11 @@ function closeSplash(splash: BrowserWindow): void {
 function createWindow(): BrowserWindow {
   const preloadPath = join(__dirname, '../preload/index.js')
 
-  // resources/icon.ico is used for the installer; runtime taskbar icon falls back
-  // to the source asset in dev. A valid multi-size ICO (must include 256x256) must
-  // be placed at radar-desktop/resources/icon.ico before running pnpm dist.
+  // Packaged:    process.resourcesPath/icon.ico  (copied via extraResources in build.config.json)
+  // Development: radar-desktop/resources/icon.ico (the fixed multi-size ICO built by Pillow)
   const iconPath = app.isPackaged
     ? join(process.resourcesPath ?? '', 'icon.ico')
-    : join(__dirname, '..', '..', '..', 'docs', 'APIRadar_Icon.ico')
+    : join(__dirname, '..', '..', 'resources', 'icon.ico')
 
   const win = new BrowserWindow({
     width: 1280,
@@ -312,6 +311,13 @@ function createWindow(): BrowserWindow {
 ipcMain.handle('get-api-url', () => 'http://127.0.0.1:17380')
 
 // ── App lifecycle ──────────────────────────────────────────────────────────────
+
+// Tell Windows to group this app under our appId rather than the generic
+// electron.exe AppUserModelId — required for the taskbar icon to reflect
+// the BrowserWindow icon instead of the Electron default.
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.radarmonitor.desktop')
+}
 
 app.whenReady().then(async () => {
   const splash = createSplashWindow()

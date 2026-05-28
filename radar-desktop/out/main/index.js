@@ -234,7 +234,7 @@ function closeSplash(splash) {
 }
 function createWindow() {
   const preloadPath = path.join(__dirname, "../preload/index.js");
-  const iconPath = electron.app.isPackaged ? path.join(process.resourcesPath ?? "", "icon.ico") : path.join(__dirname, "..", "..", "..", "docs", "APIRadar_Icon.ico");
+  const iconPath = electron.app.isPackaged ? path.join(process.resourcesPath ?? "", "icon.ico") : path.join(__dirname, "..", "..", "resources", "icon.ico");
   const win = new electron.BrowserWindow({
     width: 1280,
     height: 800,
@@ -260,6 +260,9 @@ function createWindow() {
   return win;
 }
 electron.ipcMain.handle("get-api-url", () => "http://127.0.0.1:17380");
+if (process.platform === "win32") {
+  electron.app.setAppUserModelId("com.radarmonitor.desktop");
+}
 electron.app.whenReady().then(async () => {
   const splash = createSplashWindow();
   apiProcess = startApiSidecar();

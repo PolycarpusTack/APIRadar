@@ -99,7 +99,10 @@ pub(crate) async fn put_sampling(
     }))))
 }
 
-/// GET /v1/evidence/coverage — aggregated evidence stats by consumer and source type.
+/// GET /v1/evidence/coverage — aggregated evidence stats by consumer × service × source type.
+///
+/// Returns a flat JSON array of `CoverageRow` objects so the UI can call `.filter()` directly.
+/// Field names match the TypeScript `CoverageRow` interface in `EvidenceCoveragePage.tsx`.
 pub(crate) async fn evidence_coverage(
     State(pool): State<sqlx::AnyPool>,
     org: Option<axum::extract::Extension<JwtClaims>>,
@@ -109,61 +112,77 @@ pub(crate) async fn evidence_coverage(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let service_id = params.get("service_id").cloned().unwrap_or_default();
 
-    // "Stale" = no evidence in the past 7 days.
+    // "Stale" = no recent evidence in the past 7 days.
     let stale_cutoff = (Utc::now() - Duration::days(7)).to_rfc3339();
+    let now_str = Utc::now().to_rfc3339();
 
-    let (rows, query_str): (Vec<_>, _) = if service_id.is_empty() {
-        let r = sqlx::query(
-            r#"SELECT consumer_id, source_type,
-                      COUNT(*) AS total,
-                      MAX(observed_at) AS last_seen,
-                      SUM(CASE WHEN observed_at >= ? THEN 1 ELSE 0 END) AS recent
-               FROM impact_evidence
-               WHERE org_id = ? AND (expires_at IS NULL OR expires_at > ?)
-               GROUP BY consumer_id, source_type
-               ORDER BY last_seen DESC"#,
+    let rows: Vec<_> = if service_id.is_empty() {
+        sqlx::query(
+            r#"SELECT ie.consumer_id,
+                      COALESCE(c.name, ie.consumer_id) AS consumer_name,
+                      ie.producer_service_id            AS service_id,
+                      COALESCE(s.name, ie.producer_service_id) AS service_name,
+                      ie.source_type,
+                      COUNT(*)                          AS event_count,
+                      MAX(ie.observed_at)               AS last_seen_at,
+                      SUM(CASE WHEN ie.observed_at >= ? THEN 1 ELSE 0 END) AS recent
+               FROM impact_evidence ie
+               LEFT JOIN consumer c ON c.id = ie.consumer_id
+               LEFT JOIN service  s ON s.id = ie.producer_service_id
+               WHERE ie.org_id = ? AND (ie.expires_at IS NULL OR ie.expires_at > ?)
+               GROUP BY ie.consumer_id, c.name, ie.producer_service_id, s.name, ie.source_type
+               ORDER BY MAX(ie.observed_at) DESC"#,
         )
         .bind(&stale_cutoff)
         .bind(&org_id)
-        .bind(Utc::now().to_rfc3339())
+        .bind(&now_str)
         .fetch_all(&pool)
-        .await?;
-        (r, "all")
+        .await?
     } else {
-        let r = sqlx::query(
-            r#"SELECT consumer_id, source_type,
-                      COUNT(*) AS total,
-                      MAX(observed_at) AS last_seen,
-                      SUM(CASE WHEN observed_at >= ? THEN 1 ELSE 0 END) AS recent
-               FROM impact_evidence
-               WHERE org_id = ? AND producer_service_id = ? AND (expires_at IS NULL OR expires_at > ?)
-               GROUP BY consumer_id, source_type
-               ORDER BY last_seen DESC"#,
+        sqlx::query(
+            r#"SELECT ie.consumer_id,
+                      COALESCE(c.name, ie.consumer_id) AS consumer_name,
+                      ie.producer_service_id            AS service_id,
+                      COALESCE(s.name, ie.producer_service_id) AS service_name,
+                      ie.source_type,
+                      COUNT(*)                          AS event_count,
+                      MAX(ie.observed_at)               AS last_seen_at,
+                      SUM(CASE WHEN ie.observed_at >= ? THEN 1 ELSE 0 END) AS recent
+               FROM impact_evidence ie
+               LEFT JOIN consumer c ON c.id = ie.consumer_id
+               LEFT JOIN service  s ON s.id = ie.producer_service_id
+               WHERE ie.org_id = ? AND ie.producer_service_id = ?
+                 AND (ie.expires_at IS NULL OR ie.expires_at > ?)
+               GROUP BY ie.consumer_id, c.name, ie.producer_service_id, s.name, ie.source_type
+               ORDER BY MAX(ie.observed_at) DESC"#,
         )
         .bind(&stale_cutoff)
         .bind(&org_id)
         .bind(&service_id)
-        .bind(Utc::now().to_rfc3339())
+        .bind(&now_str)
         .fetch_all(&pool)
-        .await?;
-        (r, "filtered")
+        .await?
     };
-    let _ = query_str;
 
+    // Return a flat array — matches CoverageRow[] expected by the UI.
     let entries: Vec<Value> = rows
         .iter()
         .map(|r| {
-            let last_seen: String = r.try_get("last_seen").unwrap_or_default();
+            let last_seen_at: String = r.try_get("last_seen_at").unwrap_or_default();
             let recent: i64 = r.try_get("recent").unwrap_or(0);
+            let last_seen_at_opt: Option<String> = if last_seen_at.is_empty() { None } else { Some(last_seen_at) };
             json!({
-                "consumer_id":  r.get::<String, _>("consumer_id"),
-                "source_type":  r.get::<String, _>("source_type"),
-                "total":        r.get::<i64, _>("total"),
-                "last_seen":    last_seen,
-                "stale":        recent == 0,
+                "consumer_id":   r.try_get::<String, _>("consumer_id").unwrap_or_default(),
+                "consumer_name": r.try_get::<String, _>("consumer_name").unwrap_or_default(),
+                "service_id":    r.try_get::<String, _>("service_id").unwrap_or_default(),
+                "service_name":  r.try_get::<String, _>("service_name").unwrap_or_default(),
+                "source_type":   r.try_get::<String, _>("source_type").unwrap_or_default(),
+                "event_count":   r.try_get::<i64, _>("event_count").unwrap_or(0),
+                "last_seen_at":  last_seen_at_opt,
+                "is_stale":      recent == 0,
             })
         })
         .collect();
 
-    Ok((StatusCode::OK, Json(json!({ "entries": entries, "stale_cutoff_days": 7 }))))
+    Ok((StatusCode::OK, Json(entries)))
 }

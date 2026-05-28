@@ -16,6 +16,8 @@ export default defineConfig(({ command }) => ({
     proxy: {
       '/v1': 'http://localhost:8081',
       '/health': 'http://localhost:8081',
+      '/scalar.js': 'http://localhost:8081',
+      '/scalar': 'http://localhost:8081',
     },
   },
   build: {

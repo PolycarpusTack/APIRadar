@@ -57,9 +57,12 @@ export default defineConfig({
     },
     plugins: [react(), removeCrossoriginPlugin()],
     server: {
+      port: 5181,
       proxy: {
         '/v1': 'http://127.0.0.1:17380',
         '/health': 'http://127.0.0.1:17380',
+        '/scalar.js': 'http://127.0.0.1:17380',
+        '/scalar': 'http://127.0.0.1:17380',
       },
     },
   },

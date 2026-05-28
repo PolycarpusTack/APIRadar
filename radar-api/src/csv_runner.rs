@@ -180,7 +180,7 @@ pub(crate) async fn list_csv_runs(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
     let rows = sqlx::query(
-        "SELECT id, name, status, total_rows, completed_rows, error_count, \
+        "SELECT id, name, status, total_rows, completed_rows, error_count, error_message, \
                 created_at, started_at, completed_at \
          FROM csv_run_job WHERE org_id = ? ORDER BY created_at DESC LIMIT 50",
     )

@@ -5,6 +5,9 @@ target/
 **/*.rs.bk
 # Cargo.lock is committed — workspace contains binary crates
 
+# Vendored third-party assets (committed intentionally — do NOT gitignore)
+# radar-api/vendor/scalar.js  ← Scalar standalone bundle, updated via `pnpm vendor:scalar`
+
 # =============================================================================
 # Node / pnpm
 # =============================================================================

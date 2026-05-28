@@ -21,6 +21,10 @@
       {
         "from": "../target/release/radar-api.exe",
         "to": "radar-api.exe"
+      },
+      {
+        "from": "resources/icon.ico",
+        "to": "icon.ico"
       }
     ]
   },

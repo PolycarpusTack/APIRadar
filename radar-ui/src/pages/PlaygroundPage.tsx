@@ -13,6 +13,24 @@ const LOCAL_STORAGE_KEY = 'drift-playground-envs-local'
 // CSS variables are inaccessible. Keep in sync with :root { --bg-base } in index.css.
 const BG_BASE_DARK = '#0B0F19'
 
+/**
+ * Absolute URL for the locally-served Scalar bundle (vendor/scalar.js embedded
+ * in radar-api and exposed at GET /scalar.js).
+ *
+ * The iframe uses sandbox="allow-scripts" without allow-same-origin, so it runs
+ * in a null origin and cannot use relative URLs — an absolute URL is required.
+ *
+ * - Packaged desktop  (file:// renderer) → radar-api always at 127.0.0.1:17380
+ * - Desktop/web dev   (Vite dev server)  → Vite proxy forwards /scalar.js to radar-api
+ * - Web production    (same origin)      → radar-api serves /scalar.js directly
+ */
+const SCALAR_SRC: string = (() => {
+  if (window.location.protocol === 'file:') {
+    return 'http://127.0.0.1:17380/scalar.js'
+  }
+  return `${window.location.origin}/scalar.js`
+})()
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -69,7 +87,7 @@ function buildScalarHtml(specUrl: string, env?: SandboxEnv | null) {
 </head>
 <body>
   <script id="api-reference" data-url="${specUrl}" data-configuration='${JSON.stringify(config)}'></script>
-  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+  <script src="${SCALAR_SRC}"></script>
 </body>
 </html>`
 }
@@ -490,7 +508,7 @@ export default function PlaygroundPage() {
             key={iframeKey}
             srcDoc={buildScalarHtml(activeUrl, activeEnv)}
             title="API Playground"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+            sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
             style={{ width: '100%', height: '100%', border: 'none' }}
           />
         </div>

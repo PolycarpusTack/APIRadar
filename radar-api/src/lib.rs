@@ -22,6 +22,7 @@ pub(crate) mod notifications;
 pub(crate) mod csv_runner;
 pub(crate) mod audit;
 pub(crate) mod readiness;
+pub(crate) mod scalar_update;
 
 pub(crate) use errors::get_prometheus_handle;
 pub(crate) use auth::{
@@ -45,7 +46,7 @@ pub(crate) use ai_tests::templates_from_changes;
 use anyhow::Result;
 use axum::{
     extract::{DefaultBodyLimit, Request, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -191,6 +192,23 @@ pub fn resolve_db_url(db_url: &str) -> String {
     }
 }
 
+/// Derive the parent directory of the SQLite database file from a resolved
+/// `sqlite://…` URL, so we can place override files alongside the database.
+/// Returns `None` for in-memory databases and non-SQLite (Postgres) URLs.
+fn derive_sqlite_parent(effective_url: &str) -> Option<std::path::PathBuf> {
+    // Effective URLs produced by `resolve_db_url` look like:
+    //   sqlite:///C:/Users/.../drift.db   (Windows)
+    //   sqlite:///unix/abs/path/drift.db  (Unix — note triple slash)
+    if !effective_url.starts_with("sqlite://") {
+        return None;
+    }
+    // Replace the scheme so the standard `url` crate can parse the path.
+    let as_file = effective_url.replacen("sqlite://", "file://", 1);
+    let parsed = url::Url::parse(&as_file).ok()?;
+    let file_path = parsed.to_file_path().ok()?;
+    file_path.parent().map(|p| p.to_path_buf())
+}
+
 pub async fn run(
     db_url: &str,
     static_dir: Option<&str>,
@@ -202,6 +220,12 @@ pub async fn run(
 
     let effective_url = resolve_db_url(db_url);
     let effective_url = effective_url.as_str();
+
+    // Register override dir for the Scalar runtime-update feature.
+    // `set` silently no-ops if called a second time (should not happen in production).
+    scalar_update::OVERRIDE_DIR
+        .set(derive_sqlite_parent(effective_url))
+        .ok();
 
     let pool = AnyPoolOptions::new()
         .max_connections(5)
@@ -369,6 +393,9 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
     let mut app = Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
+        .route("/scalar.js", get(serve_scalar_js))
+        .route("/scalar/version", get(scalar_update::get_version))
+        .route("/scalar/update", post(scalar_update::post_update))
         .route("/auth/login", get(oidc_login))
         .route("/auth/callback", get(oidc_callback))
         .route("/auth/me", get(oidc_me))
@@ -435,6 +462,28 @@ fn default_page_limit() -> i64 {
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+/// Serve the Scalar API-reference standalone browser bundle.
+///
+/// Prefers a disk-based override (written by `POST /scalar/update`) over the
+/// compiled-in bundle.  The compiled-in bundle is cached for 24 h as immutable;
+/// an override is cached for 1 h so a subsequent update is picked up quickly.
+async fn serve_scalar_js() -> impl IntoResponse {
+    let (bytes, is_bundled) = scalar_update::active_js();
+    let cache_control = if is_bundled {
+        "public, max-age=86400, immutable"
+    } else {
+        "public, max-age=3600"
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, cache_control),
+        ],
+        bytes,
+    )
+}
 
 async fn health(State(pool): State<sqlx::AnyPool>) -> impl IntoResponse {
     match sqlx::query("SELECT 1").execute(&pool).await {
@@ -2792,12 +2841,13 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let entries = json["entries"].as_array().unwrap();
+        // Response is a flat array (no envelope) — matches CoverageRow[] in the UI.
+        let entries: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let entries = entries.as_array().unwrap();
         assert!(!entries.is_empty());
         let entry = &entries[0];
         assert_eq!(entry["consumer_id"], "consumer-cov-1");
-        assert_eq!(entry["stale"], false); // just inserted = not stale
+        assert_eq!(entry["is_stale"], false); // just inserted = not stale
     }
 
     // ── F+: Evolution rule helpers ───────────────────────────────────────────

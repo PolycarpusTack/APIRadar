@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { CheckCircle, XCircle, Webhook, Trash2, Send, ChevronDown, ChevronUp, ScanLine, Plus, AlertTriangle, Clock } from 'lucide-react'
+import { CheckCircle, XCircle, Webhook, Trash2, Send, ChevronDown, ChevronUp, ScanLine, Plus, AlertTriangle, Clock, RefreshCw, Download } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import TermTooltip, { TERM_DEFINITIONS } from '../components/TermTooltip'
 import { api, ApiError } from '../lib/apiClient'
@@ -268,6 +268,126 @@ function WebhooksSection() {
           </form>
           {createError && <p className="text-[12px]" style={{ color: 'var(--red)' }}>{createError}</p>}
         </div>
+      )}
+    </SectionCard>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Scalar update
+// ---------------------------------------------------------------------------
+
+interface ScalarVersionInfo {
+  bundled: string
+  override: string | null
+  active: string
+  latest: string | null
+  update_available: boolean
+}
+
+function ScalarUpdateSection() {
+  const [versionInfo, setVersionInfo] = useState<ScalarVersionInfo | null>(null)
+  const [checking, setChecking] = useState(false)
+  const [updating, setUpdating] = useState(false)
+  const [updateResult, setUpdateResult] = useState<{ version: string } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  async function checkVersion() {
+    setChecking(true); setError(null); setUpdateResult(null)
+    try {
+      const data = await api.get<ScalarVersionInfo>('/scalar/version')
+      setVersionInfo(data)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err))
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  async function doUpdate() {
+    setUpdating(true); setError(null)
+    try {
+      const data = await api.post<{ version: string; bytes: number }>('/scalar/update')
+      setUpdateResult({ version: data.version })
+      setVersionInfo(prev =>
+        prev
+          ? { ...prev, active: data.version, update_available: false, override: data.version }
+          : prev
+      )
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? (err.body as { error?: string })?.error ?? err.message
+          : String(err)
+      )
+    } finally {
+      setUpdating(false)
+    }
+  }
+
+  return (
+    <SectionCard
+      title="API Explorer (Scalar)"
+      description="The embedded Scalar bundle powers the Playground tab. Check npm for updates and apply them without rebuilding the application."
+    >
+      <FieldRow label="Active version" hint="Version of @scalar/api-reference currently served to the Playground.">
+        <div className="flex items-center gap-2">
+          <span className="text-[12.5px] font-mono" style={{ color: 'var(--text-1)' }}>
+            {versionInfo ? versionInfo.active : '—'}
+          </span>
+          {versionInfo?.override && (
+            <span
+              className="rounded px-1.5 py-px text-[10.5px] font-medium"
+              style={{ background: 'var(--bg-active)', color: 'var(--cobalt-mid)' }}
+            >
+              override active
+            </span>
+          )}
+        </div>
+      </FieldRow>
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          type="button"
+          onClick={checkVersion}
+          disabled={checking || updating}
+          className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
+          style={{ borderColor: 'var(--border-mid)', color: 'var(--text-2)', opacity: checking ? 0.7 : 1 }}
+        >
+          <RefreshCw className={`h-3.5 w-3.5${checking ? ' animate-spin' : ''}`} />
+          {checking ? 'Checking…' : 'Check for updates'}
+        </button>
+
+        {versionInfo?.update_available && (
+          <button
+            type="button"
+            onClick={doUpdate}
+            disabled={updating}
+            className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-semibold transition-colors"
+            style={{ background: 'var(--cobalt)', color: 'var(--text-inverse)', opacity: updating ? 0.7 : 1 }}
+          >
+            <Download className="h-3.5 w-3.5" />
+            {updating ? 'Updating…' : `Update to ${versionInfo.latest}`}
+          </button>
+        )}
+      </div>
+
+      {versionInfo && !versionInfo.update_available && !updateResult && (
+        <p className="text-[12px]" style={{ color: 'var(--green)' }}>
+          ✓ Already on the latest version
+          {versionInfo.latest ? ` (${versionInfo.latest})` : ''}.
+          {' '}Bundled: {versionInfo.bundled}.
+        </p>
+      )}
+
+      {updateResult && (
+        <p className="text-[12px]" style={{ color: 'var(--green)' }}>
+          ✓ Updated to {updateResult.version}. Open the Playground to use the new version — no restart needed.
+        </p>
+      )}
+
+      {error && (
+        <p className="text-[12px]" style={{ color: 'var(--red)' }}>{error}</p>
       )}
     </SectionCard>
   )
@@ -598,6 +718,7 @@ export default function SettingsPage() {
               )}
             </SectionCard>
 
+            <ScalarUpdateSection />
             <ScheduledScansSection />
             <WebhooksSection />
 

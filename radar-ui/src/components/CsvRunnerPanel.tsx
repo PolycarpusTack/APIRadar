@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback, useEffect } from 'react'
+import { useRef, useState, useCallback, useEffect, Fragment } from 'react'
 import {
   Upload, Play, Square, Download, FileDown,
   CheckCircle, XCircle, AlertCircle, Loader2, Eye, EyeOff, History,
@@ -135,6 +135,7 @@ export default function CsvRunnerPanel() {
   const [showPreview, setShowPreview] = useState(false)
 
   // Server-side job state
+  const [isSubmitting, setIsSubmitting] = useState(false)  // true during POST, before job ID arrives
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<CsvRunJob | null>(null)
   const [results, setResults] = useState<RowResult[]>([])
@@ -153,7 +154,7 @@ export default function CsvRunnerPanel() {
   const [recentRuns, setRecentRuns] = useState<CsvRunJob[]>([])
   const [historyOpen, setHistoryOpen] = useState(false)
 
-  const running = job !== null && (job.status === 'pending' || job.status === 'running')
+  const running = isSubmitting || (job !== null && (job.status === 'pending' || job.status === 'running'))
 
   // Recompute mapping whenever request or CSV headers change
   useEffect(() => {
@@ -274,6 +275,7 @@ export default function CsvRunnerPanel() {
     setResults([])
     setJob(null)
     setJobId(null)
+    setIsSubmitting(true)  // block the Run button immediately, before the POST completes
 
     try {
       setResponseBodies({})
@@ -302,6 +304,8 @@ export default function CsvRunnerPanel() {
       pollRef.current = setInterval(() => pollJob(data.id), 2000)
     } catch (err) {
       setRunError((err as Error).message)
+    } finally {
+      setIsSubmitting(false)
     }
   }, [rows, request, pollJob])
 
@@ -607,8 +611,8 @@ export default function CsvRunnerPanel() {
                   const body = responseBodies[r.rowNumber]
                   const isExpanded = expandedBodies.has(r.rowNumber)
                   return (
-                    <>
-                      <tr key={r.rowNumber} style={{ borderBottom: body && isExpanded ? 'none' : '1px solid var(--border)' }}>
+                    <Fragment key={r.rowNumber}>
+                      <tr style={{ borderBottom: body && isExpanded ? 'none' : '1px solid var(--border)' }}>
                         <td className="px-4 py-2" style={{ color: 'var(--text-dim)' }}>{r.rowNumber}</td>
                         <td className="px-4 py-2">
                           {r.error
@@ -646,7 +650,7 @@ export default function CsvRunnerPanel() {
                         </td>
                       </tr>
                       {body && isExpanded && (
-                        <tr key={`body-${r.rowNumber}`} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <tr style={{ borderBottom: '1px solid var(--border)' }}>
                           <td colSpan={6} className="px-4 pb-3 pt-0">
                             <pre
                               className="rounded p-3 text-[11px] font-mono overflow-x-auto max-h-40"
@@ -657,7 +661,7 @@ export default function CsvRunnerPanel() {
                           </td>
                         </tr>
                       )}
-                    </>
+                    </Fragment>
                   )
                 })}
               </tbody>

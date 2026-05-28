@@ -74,7 +74,7 @@ export default function EvidenceCoveragePage() {
 
   useEffect(() => {
     api.get<CoverageRow[]>('/v1/evidence/coverage')
-      .then((data) => setRows(data))
+      .then((data) => setRows(Array.isArray(data) ? data : []))
       .catch((e) => setError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setLoading(false))
   }, [])
