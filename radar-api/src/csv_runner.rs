@@ -14,6 +14,13 @@ use crate::auth::JwtClaims;
 use crate::errors::ApiError;
 use crate::utils::{is_host_allowed, is_ssrf_blocked};
 
+// Thread-local SSRF bypass for in-process echo-server tests.
+// Compiled out of non-test builds; never reachable in production.
+#[cfg(test)]
+thread_local! {
+    static SSRF_BYPASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -115,7 +122,11 @@ pub(crate) async fn create_csv_run(
     // the check here and let the per-row guard handle it.
     if template_url_has_concrete_host(&body.request.url) {
         let stripped = strip_placeholders(&body.request.url);
-        if is_ssrf_blocked(&stripped) || !is_host_allowed(&stripped) {
+        #[cfg(not(test))]
+        let ssrf_bypass = false;
+        #[cfg(test)]
+        let ssrf_bypass = SSRF_BYPASS.with(|v| v.get());
+        if !ssrf_bypass && (is_ssrf_blocked(&stripped) || !is_host_allowed(&stripped)) {
             return Err(ApiError::BadRequest(
                 "request URL is blocked by SSRF policy".into(),
             ));
@@ -290,7 +301,8 @@ pub(crate) async fn get_csv_run_results(
 // Background executor — orchestrator
 // ---------------------------------------------------------------------------
 
-async fn execute_csv_run(
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) async fn execute_csv_run(
     pool: sqlx::AnyPool,
     job_id: String,
     template: RequestTemplate,
@@ -410,7 +422,13 @@ async fn dispatch_row(
     };
 
     let resolved_url = resolve_vars(&template.url, row_obj);
-    if is_ssrf_blocked(&resolved_url) || !is_host_allowed(&resolved_url) {
+    // In test builds: SSRF_BYPASS thread-local allows in-process echo servers at
+    // 127.0.0.1 to receive requests.  Compiled out of production builds entirely.
+    #[cfg(not(test))]
+    let ssrf_bypass = false;
+    #[cfg(test)]
+    let ssrf_bypass = SSRF_BYPASS.with(|v| v.get());
+    if !ssrf_bypass && (is_ssrf_blocked(&resolved_url) || !is_host_allowed(&resolved_url)) {
         return RowOutcome {
             row_number, http_status: None, duration_ms: 0,
             error: Some("URL blocked by SSRF policy".into()), url: resolved_url,
@@ -874,5 +892,118 @@ mod tests {
         // 'running' must still be excluded by the WHERE status filter.
         let deleted = purge_old_csv_runs(&pool, 0).await.unwrap();
         assert_eq!(deleted, 0, "running jobs must not be purged");
+    }
+
+    // --- Phase 5 / Story 2: echo server integration tests ---
+    // Tests bypass the HTTP creation endpoint via direct DB insert + execute_csv_run()
+    // so the loopback SSRF guard (which protects the public API) doesn't interfere.
+    // RADAR_TEST_ALLOW_LOCAL=1 is still needed for the per-row dispatch guard.
+
+    async fn insert_job_and_run(
+        pool: &sqlx::AnyPool,
+        job_id: &str,
+        url: &str,
+        method: &str,
+        capture_body: bool,
+        rows: Vec<serde_json::Value>,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let template = super::RequestTemplate {
+            url: url.to_string(),
+            method: method.to_string(),
+            headers: vec![],
+            body: String::new(),
+            capture_body,
+            enable_retry: false,
+        };
+        let request_json = serde_json::to_string(&template).unwrap();
+        sqlx::query(
+            "INSERT INTO csv_run_job \
+             (id, org_id, name, request_json, status, total_rows, completed_rows, error_count, created_at) \
+             VALUES (?, '', 'echo-test', ?, 'pending', ?, 0, 0, ?)",
+        )
+        .bind(job_id)
+        .bind(&request_json)
+        .bind(rows.len() as i64)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
+        super::execute_csv_run(pool.clone(), job_id.to_string(), template, rows).await;
+    }
+
+    async fn wait_for_status(pool: &sqlx::AnyPool, job_id: &str, timeout_ms: u64) -> String {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+        loop {
+            let s: String = sqlx::query_scalar("SELECT status FROM csv_run_job WHERE id = ?")
+                .bind(job_id).fetch_one(pool).await.unwrap();
+            if s != "pending" && s != "running" { return s; }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("job {job_id} did not finish within {timeout_ms}ms (status={s})");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn csv_run_with_echo_server_completes_successfully() {
+        super::SSRF_BYPASS.with(|v| v.set(true));
+        let echo = crate::test_helpers::spawn_echo_server().await;
+        let url = format!("http://127.0.0.1:{}/echo", echo.addr.port());
+        let pool = test_pool().await;
+        let job_id = "job-echo-ok";
+
+        insert_job_and_run(&pool, job_id, &url, "GET", false,
+            vec![serde_json::json!({"id":"r1"}), serde_json::json!({"id":"r2"})]).await;
+
+        echo.wait_for_requests(2, 3000).await;
+        assert_eq!(wait_for_status(&pool, job_id, 1000).await, "completed");
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM csv_run_result WHERE job_id = ? AND http_status = 200",
+        )
+        .bind(job_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 2, "both rows must record http_status=200");
+        super::SSRF_BYPASS.with(|v| v.set(false));
+    }
+
+    #[tokio::test]
+    async fn csv_run_capture_body_stores_response() {
+        super::SSRF_BYPASS.with(|v| v.set(true));
+        let echo = crate::test_helpers::spawn_echo_server().await;
+        let url = format!("http://127.0.0.1:{}/echo", echo.addr.port());
+        let pool = test_pool().await;
+        let job_id = "job-echo-capture";
+
+        insert_job_and_run(&pool, job_id, &url, "POST", true,
+            vec![serde_json::json!({"id":"abc"})]).await;
+
+        echo.wait_for_requests(1, 3000).await;
+        wait_for_status(&pool, job_id, 1000).await;
+
+        let resp_body: Option<String> = sqlx::query_scalar(
+            "SELECT response_body FROM csv_run_result WHERE job_id = ?",
+        )
+        .bind(job_id).fetch_optional(&pool).await.unwrap().flatten();
+        assert!(resp_body.is_some(), "response_body must be captured when capture_body=true");
+        super::SSRF_BYPASS.with(|v| v.set(false));
+    }
+
+    #[tokio::test]
+    async fn csv_run_completed_with_failures_on_server_error() {
+        super::SSRF_BYPASS.with(|v| v.set(true));
+        let echo = crate::test_helpers::spawn_echo_server().await;
+        // Echo server returns 500 when ?status=500 is in the URL.
+        let url = format!("http://127.0.0.1:{}/echo?status=500", echo.addr.port());
+        let pool = test_pool().await;
+        let job_id = "job-echo-5xx";
+
+        insert_job_and_run(&pool, job_id, &url, "GET", false,
+            vec![serde_json::json!({"id":"row1"})]).await;
+
+        // GET gets 3 retry attempts (0 s, 1 s, 4 s) — wait up to 8 s.
+        assert_eq!(wait_for_status(&pool, job_id, 8000).await, "completed_with_failures",
+                   "all rows failed with 5xx → completed_with_failures");
+        super::SSRF_BYPASS.with(|v| v.set(false));
     }
 }

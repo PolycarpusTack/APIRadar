@@ -1,0 +1,72 @@
+name: Desktop Smoke Test
+
+# Runs only on tagged releases after the release job has produced the installer.
+# Validates that the packaged Electron binary starts, the sidecar spawns, and
+# the health endpoint responds before the binary exits.
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+
+jobs:
+  smoke-windows:
+    name: Smoke (Windows)
+    runs-on: windows-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download installer artifact
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          run_id: ${{ github.event.workflow_run.id }}
+          name: radar-desktop-windows-installer
+          path: installer/
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Install the app silently (NSIS installer with /S flag).
+      - name: Install application
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem installer/*.exe | Select-Object -First 1
+          Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait
+
+      # Launch the installed app in headless mode and wait for the sidecar health check.
+      - name: Run smoke test
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          # Start the installed Electron app (no display needed — it will spawn the API sidecar).
+          $appPath = "$env:LOCALAPPDATA\Programs\radar-desktop\radar-desktop.exe"
+          if (-not (Test-Path $appPath)) {
+            Write-Error "Installed binary not found at $appPath"
+            exit 1
+          }
+          $proc = Start-Process -FilePath $appPath -PassThru
+
+          # Poll the sidecar health endpoint for up to 30 seconds.
+          $healthUrl = "http://127.0.0.1:17380/health"
+          $deadline = (Get-Date).AddSeconds(30)
+          $healthy = $false
+          while ((Get-Date) -lt $deadline) {
+            try {
+              $resp = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2
+              if ($resp.StatusCode -eq 200) { $healthy = $true; break }
+            } catch { }
+            Start-Sleep -Milliseconds 500
+          }
+
+          # Terminate the app regardless of outcome.
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+
+          if (-not $healthy) {
+            Write-Error "Sidecar health check did not return 200 within 30s"
+            exit 1
+          }
+          Write-Host "Smoke test passed — sidecar responded 200 at $healthUrl"

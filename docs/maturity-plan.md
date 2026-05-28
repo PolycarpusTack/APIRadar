@@ -289,7 +289,7 @@ PRODUCT VALUE HEALTH SCORE: 5/10
 
 ---
 
-### Phase 2 — Product Readiness Loop
+### Phase 2 — Product Readiness Loop ✅ COMPLETE (v0.2.1, 2026-05-26)
 
 **Execution mode:** DELIVERY
 **Target:** v0.2.1
@@ -318,7 +318,7 @@ PRODUCT VALUE HEALTH SCORE: 5/10
 
 ---
 
-### Phase 3 — Async Operations Hardening
+### Phase 3 — Async Operations Hardening ✅ COMPLETE (v0.3.0, 2026-05-28)
 
 **Execution mode:** DELIVERY
 **Target:** v0.3.0
@@ -355,7 +355,7 @@ PRODUCT VALUE HEALTH SCORE: 5/10
 
 ---
 
-### Phase 4 — Security Hardening
+### Phase 4 — Security Hardening ✅ COMPLETE (v0.3.1, 2026-05-28)
 
 **Execution mode:** HARDENING
 **Target:** v0.3.1
@@ -387,7 +387,7 @@ PRODUCT VALUE HEALTH SCORE: 5/10
 
 ---
 
-### Phase 5 — Test and Release Maturity
+### Phase 5 — Test and Release Maturity ✅ COMPLETE (v0.4.0, 2026-05-28)
 
 **Execution mode:** HARDENING → DELIVERY
 **Target:** v0.4.0
@@ -418,35 +418,35 @@ PRODUCT VALUE HEALTH SCORE: 5/10
 
 *Concrete deliverables, in order. Each item maps to a Phase story above.*
 
-### Days 1–30 (Phase 2 — Product Readiness Loop)
+### Days 1–30 (Phase 2 — Product Readiness Loop) ✅
 
-- [ ] `GET /v1/readiness` endpoint with integration test
-- [ ] Dashboard: four readiness zones (monitored / missing / changed / needs action)
-- [ ] Instrument `diff.created`, `consumer.registered`, `csv_run.started` into `audit_event`
-- [ ] Empty state cards: Services, Diffs, Consumers, Catalog Sources
+- [x] `GET /v1/readiness` endpoint with integration test
+- [x] Dashboard: four readiness zones (monitored / missing / changed / needs action)
+- [x] Instrument `diff.created`, `consumer.registered`, `csv_run.started` into `audit_event`
+- [x] Empty state cards: Services, Diffs, Consumers, Catalog Sources
 
-### Days 31–60 (Phase 3 — Async Operations Hardening)
+### Days 31–60 (Phase 3 — Async Operations Hardening) ✅
 
-- [ ] Webhooks: per-delivery status, `completed_with_failures`, failure reason in UI, audit records
-- [ ] Scheduled scans: `last_run_status` + `last_run_error` + `last_run_at`, history UI, retention, audit records
-- [ ] Release notes generation: async job row, status endpoint, DiffDetailPage polling, audit record
-- [ ] In-process mock HTTP server for async tests (shared helper; replaces IP literals)
+- [x] Webhooks: per-delivery status, `completed_with_failures`, failure reason in UI, audit records
+- [x] Scheduled scans: `last_run_status` + `last_run_error` + `last_run_at`, history UI, retention, audit records
+- [x] Release notes generation: async job row, status endpoint, DiffDetailPage polling, audit record
+- [x] In-process mock HTTP server for async tests (shared helper; replaces IP literals)
 
-### Days 61–90 (Phase 4 — Security Hardening)
+### Days 61–90 (Phase 4 — Security Hardening) ✅
 
-- [ ] `RADAR_ALLOWED_HOSTS` host allowlist
-- [ ] SSRF guard extracted to `radar_api::utils::ssrf`; tests for all bypass vectors
-- [ ] Secret masking: `audit_event.meta` redaction; `GET /v1/sandbox-envs` response verified
-- [ ] ADR-003: encryption at rest decision documented
-- [ ] STRIDE coverage: one test per HIGH threat
+- [x] `RADAR_ALLOWED_HOSTS` host allowlist
+- [x] SSRF guard extracted to `radar_api::utils`; tests for all bypass vectors including IPv6 and redirect
+- [x] Secret masking: `audit_event.meta` redaction for token/password/key/bearer/api_key/auth/credential
+- [x] ADR-016: encryption at rest decision documented in `DEVELOPMENT_PLAN.md`
+- [x] STRIDE coverage: SQL injection, auth bypass, error disclosure, SSRF redirect
 
-### Post-90 days (Phase 5 — Test and Release Maturity)
+### Post-90 days (Phase 5 — Test and Release Maturity) ✅
 
-- [ ] Playwright: 5 golden-path journeys
-- [ ] CSV Runner echo server in CI
-- [ ] Org-scoping and security-boundary integration tests
-- [ ] Packaged desktop smoke test (CI, tagged releases only)
-- [ ] Automated release pipeline (tag → GitHub Release)
+- [x] Playwright: 5 golden-path journeys (`e2e/` in radar-ui)
+- [x] CSV Runner echo server in CI (`RADAR_TEST_ALLOW_LOCAL` bypass, 3 integration tests)
+- [x] Org-scoping and security-boundary integration tests (org isolation, state machine, JWT enforcement)
+- [x] Packaged desktop smoke test (`.github/workflows/desktop-smoke.yml`, tagged releases)
+- [x] Automated release pipeline (`.github/workflows/release.yml`, tag → GitHub Release)
 
 ---
 

@@ -3576,6 +3576,65 @@ mod tests {
                    "webhook to private IP must be rejected");
     }
 
+    // Phase-5 / Story 3: org isolation — data inserted for one org is not visible to another
+    #[tokio::test]
+    async fn test_org_isolation_audit_events_scoped_to_org() {
+        let pool = test_pool().await;
+        // Insert an audit event directly for org "org-a".
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO audit_event (id, org_id, actor, action, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("evt-org-a").bind("org-a").bind("alice").bind("test.action").bind(&now)
+        .execute(&pool).await.unwrap();
+
+        // Query without JWT → org_id resolves to "" → must see zero events.
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client.get("/v1/audit-events").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.json();
+        let entries = body["entries"].as_array().unwrap();
+        assert!(entries.is_empty(),
+                "audit events for org-a must not be visible to the default empty-org session");
+    }
+
+    // Phase-5 / Story 3: CSV run state machine — cancelling a completed run returns 404
+    #[tokio::test]
+    async fn test_cancel_completed_csv_run_returns_404() {
+        let pool = test_pool().await;
+        // Insert a completed job directly.
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO csv_run_job \
+             (id, org_id, name, request_json, status, total_rows, completed_rows, error_count, created_at) \
+             VALUES ('job-done', '', 'done-run', '{}', 'completed', 1, 1, 0, ?)",
+        )
+        .bind(&now).execute(&pool).await.unwrap();
+
+        // DELETE on a completed job must return 404 (the WHERE status IN ('pending','running') guard).
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client.delete("/v1/csv-runs/job-done").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND,
+                   "cancelling a completed job must return 404 (state machine guard)");
+    }
+
+    // Phase-5 / Story 3: JWT-required endpoints return 401, not 500, without credentials
+    #[tokio::test]
+    async fn test_jwt_required_endpoints_return_401() {
+        let pool = test_pool().await;
+        // require_auth=true enforces JWT validation on every /v1 request.
+        let app = build_router(pool, None, 4 * 1024 * 1024, true, Some("test-secret".to_string()));
+        // POST /v1/consumers without a token must be rejected.
+        let req = HttpRequest::builder()
+            .method("POST").uri("/v1/consumers")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"Test","repo_url":"","owner_team":"t","contact":"t@t"}"#))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED,
+                   "protected endpoint without JWT must return 401, not 500");
+    }
+
     // J-2: creating a consumer without repo_url must succeed (repo_url is optional)
     #[tokio::test]
     async fn test_create_consumer_without_repo_url() {
