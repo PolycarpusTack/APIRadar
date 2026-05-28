@@ -168,6 +168,21 @@ pub(crate) async fn create_diff(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let now = Utc::now().to_rfc3339();
 
+    // Org isolation: reject if an existing service with this ID belongs to a different org.
+    if !org_id.is_empty() {
+        if let Some(existing_org) = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
+        )
+        .bind(&service_id)
+        .fetch_optional(&pool)
+        .await?
+        {
+            if !existing_org.is_empty() && existing_org != org_id {
+                return Err(ApiError::Forbidden("service belongs to another org".into()));
+            }
+        }
+    }
+
     sqlx::query(
         r#"
         INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id)
@@ -918,6 +933,21 @@ pub(crate) async fn compare_specs(
 
     let now = Utc::now().to_rfc3339();
 
+    // Org isolation: reject if an existing service with this ID belongs to a different org.
+    if !org_id.is_empty() {
+        if let Some(existing_org) = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
+        )
+        .bind(&service_id)
+        .fetch_optional(&pool)
+        .await?
+        {
+            if !existing_org.is_empty() && existing_org != org_id {
+                return Err(ApiError::Forbidden("service belongs to another org".into()));
+            }
+        }
+    }
+
     // Upsert the service record so the endpoint is self-contained.
     sqlx::query(
         "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) \
@@ -1116,6 +1146,14 @@ async fn run_batch_item(
     org_id: &str,
     label: &str,
 ) -> anyhow::Result<BatchResultItem> {
+    // SSRF guard: block private/loopback addresses and non-HTTPS URLs.
+    if crate::utils::is_ssrf_blocked(&item.base_url) {
+        anyhow::bail!("base_url is blocked by SSRF policy");
+    }
+    if crate::utils::is_ssrf_blocked(&item.head_url) {
+        anyhow::bail!("head_url is blocked by SSRF policy");
+    }
+
     let base_content = http.get(&item.base_url)
         .send().await.map_err(|e| anyhow::anyhow!("fetch base_url: {e}"))?
         .error_for_status().map_err(|e| anyhow::anyhow!("base_url HTTP error: {e}"))?
@@ -1159,6 +1197,22 @@ async fn run_batch_item(
     });
 
     let now = Utc::now().to_rfc3339();
+
+    // Org isolation: reject if an existing service with this ID belongs to a different org.
+    if !org_id.is_empty() {
+        if let Some(existing_org) = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
+        )
+        .bind(&service_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("org check: {e}"))?
+        {
+            if !existing_org.is_empty() && existing_org != org_id {
+                anyhow::bail!("service belongs to another org");
+            }
+        }
+    }
 
     sqlx::query(
         "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) \

@@ -1,13 +1,66 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
-import { spawn } from 'child_process'
+import { spawn, spawnSync } from 'child_process'
 import type { ChildProcess } from 'child_process'
-import { existsSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, createWriteStream, renameSync } from 'fs'
+import type { WriteStream } from 'fs'
 import { tmpdir } from 'os'
 
 // ── API sidecar ────────────────────────────────────────────────────────────────
 
 let apiProcess: ChildProcess | null = null
+
+function userDataDir(): string {
+  return app.getPath('userData')
+}
+
+function sidecarLogPath(): string {
+  return join(userDataDir(), 'radar-api.log')
+}
+
+function sidecarDbPath(): string {
+  return join(userDataDir(), 'drift.db')
+}
+
+// ── PID file — stale-sidecar cleanup ──────────────────────────────────────────
+// On crash or force-kill, before-quit never fires and the sidecar survives.
+// We write its PID on spawn and kill it on next startup so port 17380 is free.
+
+function pidFilePath(): string {
+  return join(userDataDir(), 'radar-api.pid')
+}
+
+function killStaleSidecar(): void {
+  const pidFile = pidFilePath()
+  if (!existsSync(pidFile)) return
+  try {
+    const pid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10)
+    if (Number.isFinite(pid) && pid > 0) {
+      if (process.platform === 'win32') {
+        // taskkill /F forces immediate termination; /T kills the process tree.
+        spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore' })
+      } else {
+        try { process.kill(pid) } catch { /* already dead */ }
+      }
+      console.log(`[main] Killed stale radar-api sidecar (pid ${pid})`)
+    }
+  } catch {
+    // Corrupt PID file or process already gone — proceed normally.
+  }
+  try { unlinkSync(pidFile) } catch { /* best-effort */ }
+}
+
+function writePidFile(pid: number): void {
+  try {
+    writeFileSync(pidFilePath(), String(pid), 'utf8')
+  } catch (err) {
+    console.warn('[main] Failed to write PID file:', err)
+  }
+}
+
+function deletePidFile(): void {
+  try { unlinkSync(pidFilePath()) } catch { /* best-effort */ }
+}
 
 function resolveApiBinary(): string | null {
   // 1. Explicit override for development / CI
@@ -38,16 +91,29 @@ function resolveApiBinary(): string | null {
 }
 
 function startApiSidecar(): ChildProcess | null {
-  const dbPath = `sqlite:${join(app.getPath('userData'), 'drift.db')}`
+  // Electron does not guarantee userData exists before first write — create it
+  // now so SQLite can create drift.db inside it.
+  const dataDir = userDataDir()
+  mkdirSync(dataDir, { recursive: true })
+
+  const logPath = sidecarLogPath()
+  const logStream = createWriteStream(logPath, { flags: 'w' })
+  const logLine = (s: string) => { console.log(s); logStream.write(s + '\n') }
+
+  logLine(`[main] radar-api sidecar starting — ${new Date().toISOString()}`)
+  logLine(`[main] userData: ${dataDir}`)
+
+  const dbPath = `sqlite:${sidecarDbPath()}`
   // Bind to loopback only — sidecar must never be reachable from the network in desktop mode.
   const args = ['--db', dbPath, '--bind', '127.0.0.1:17380']
 
   const bin = resolveApiBinary()
+  logLine(`[main] resolved binary: ${bin ?? '(not found)'}`)
 
   if (!bin) {
     // Development fallback: attempt `cargo run` from the workspace root
     const workspaceRoot = join(__dirname, '..', '..', '..')
-    console.warn(
+    logLine(
       '[main] radar-api binary not found — falling back to `cargo run`. ' +
         'Run `cargo build -p radar-api` to avoid this slow start.'
     )
@@ -57,10 +123,13 @@ function startApiSidecar(): ChildProcess | null {
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: false,
       })
-      wireProcessLogs(cargoProcess, 'radar-api(cargo)')
+      wireProcessLogs(cargoProcess, 'radar-api(cargo)', logStream)
+      if (cargoProcess.pid != null) { writePidFile(cargoProcess.pid); logLine(`[main] pid: ${cargoProcess.pid}`) }
       return cargoProcess
     } catch (err) {
-      console.error('[main] Failed to start radar-api via cargo run:', err)
+      const msg = `[main] Failed to start radar-api via cargo run: ${String(err)}`
+      logLine(msg)
+      logStream.end()
       return null
     }
   }
@@ -70,46 +139,90 @@ function startApiSidecar(): ChildProcess | null {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
     })
-    wireProcessLogs(proc, 'radar-api')
+    wireProcessLogs(proc, 'radar-api', logStream)
+    if (proc.pid != null) { writePidFile(proc.pid); logLine(`[main] pid: ${proc.pid}`) }
     return proc
   } catch (err) {
-    console.error('[main] Failed to spawn radar-api binary:', err)
+    const msg = `[main] Failed to spawn radar-api binary: ${String(err)}`
+    logLine(msg)
+    logStream.end()
     return null
   }
 }
 
-function wireProcessLogs(proc: ChildProcess, label: string): void {
+function wireProcessLogs(proc: ChildProcess, label: string, logStream?: WriteStream): void {
+  const write = (line: string) => {
+    if (logStream && !logStream.closed) logStream.write(line + '\n')
+  }
   proc.stdout?.on('data', (chunk: Buffer) => {
     for (const line of chunk.toString().split('\n')) {
-      if (line.trim()) console.log(`[${label}] ${line}`)
+      if (line.trim()) { console.log(`[${label}] ${line}`); write(line) }
     }
   })
   proc.stderr?.on('data', (chunk: Buffer) => {
     for (const line of chunk.toString().split('\n')) {
-      if (line.trim()) console.error(`[${label}] ${line}`)
+      if (line.trim()) { console.error(`[${label}] ${line}`); write(line) }
     }
   })
   proc.on('exit', (code, signal) => {
-    console.log(`[${label}] exited code=${String(code)} signal=${String(signal)}`)
+    const msg = `[${label}] exited code=${String(code)} signal=${String(signal)}`
+    console.log(msg)
+    write(msg)
+    logStream?.end()
   })
   proc.on('error', (err) => {
-    console.error(`[${label}] process error:`, err)
+    const msg = `[${label}] process error: ${String(err)}`
+    console.error(msg)
+    write(msg)
+    logStream?.end()
   })
 }
 
 // ── Health poll ────────────────────────────────────────────────────────────────
 
-function waitForApi(url: string, maxRetries: number): Promise<void> {
+function waitForApi(url: string, maxRetries: number, proc: ChildProcess | null): Promise<void> {
   return new Promise((resolve, reject) => {
     let attempts = 0
+    let settled = false
+
+    const cleanup = () => {
+      proc?.off('exit', onExit)
+      proc?.off('error', onError)
+    }
+
+    const fail = (err: Error) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(err)
+    }
+
+    const pass = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve()
+    }
+
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      fail(new Error(`radar-api exited before health check passed (code=${String(code)} signal=${String(signal)})`))
+    }
+
+    const onError = (err: Error) => {
+      fail(err)
+    }
+
+    proc?.once('exit', onExit)
+    proc?.once('error', onError)
 
     function attempt() {
+      if (settled) return
       attempts++
       fetch(url)
         .then((res) => {
           if (res.ok) {
             console.log(`[main] radar-api healthy after ${attempts} attempt(s)`)
-            resolve()
+            pass()
           } else {
             retry()
           }
@@ -118,8 +231,9 @@ function waitForApi(url: string, maxRetries: number): Promise<void> {
     }
 
     function retry() {
+      if (settled) return
       if (attempts >= maxRetries) {
-        reject(new Error(`radar-api did not become healthy after ${maxRetries} attempts`))
+        fail(new Error(`radar-api did not become healthy after ${maxRetries} attempts`))
         return
       }
       setTimeout(attempt, 500)
@@ -127,6 +241,46 @@ function waitForApi(url: string, maxRetries: number): Promise<void> {
 
     attempt()
   })
+}
+
+function sidecarLogContainsMigrationChecksumError(): boolean {
+  try {
+    const log = readFileSync(sidecarLogPath(), 'utf8')
+    return log.includes('previously applied but has been modified')
+  } catch {
+    return false
+  }
+}
+
+function backupIncompatibleSqliteDb(): boolean {
+  const db = sidecarDbPath()
+  if (!existsSync(db)) return false
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const backup = `${db}.migration-backup-${stamp}`
+
+  try {
+    renameSync(db, backup)
+    for (const suffix of ['-wal', '-shm']) {
+      const sidecarFile = `${db}${suffix}`
+      if (existsSync(sidecarFile)) {
+        renameSync(sidecarFile, `${backup}${suffix}`)
+      }
+    }
+    console.warn(`[main] Backed up incompatible SQLite DB to ${backup}`)
+    return true
+  } catch (err) {
+    console.error('[main] Failed to back up incompatible SQLite DB:', err)
+    return false
+  }
+}
+
+function setSplashStatus(splash: BrowserWindow, message: string): void {
+  if (splash.isDestroyed()) return
+  const escaped = JSON.stringify(message)
+  void splash.webContents.executeJavaScript(
+    `document.getElementById('status') && (document.getElementById('status').textContent = ${escaped})`,
+  )
 }
 
 // ── Splash screen ──────────────────────────────────────────────────────────────
@@ -182,9 +336,9 @@ function getSplashHtml(): string {
     .bar{
       height:100%;border-radius:0 1px 1px 0;
       background:linear-gradient(90deg,#3805E3 0%,#5B33F0 60%,#B3FC4F 100%);
-      animation:fill 8s cubic-bezier(.1,0,.3,1) forwards;
+      animation:fill 28s cubic-bezier(.1,0,.3,1) forwards;
     }
-    @keyframes fill{0%{width:0}20%{width:35%}50%{width:60%}80%{width:80%}100%{width:90%}}
+    @keyframes fill{0%{width:0}10%{width:25%}30%{width:50%}60%{width:72%}85%{width:85%}100%{width:92%}}
   </style>
 </head>
 <body>
@@ -220,9 +374,22 @@ function getSplashHtml(): string {
       <span class="wm-radar">Radar</span>
       <span class="wm-sub">Contract Monitor</span>
     </div>
-    <span class="status">Starting services…</span>
+    <span class="status" id="status">Starting services…</span>
   </div>
   <div class="track"><div class="bar"></div></div>
+  <script>
+    var msgs = [
+      [8000,  'Starting — this may take a moment on first run…'],
+      [15000, 'Still starting — security scan may be in progress…'],
+      [22000, 'Almost there…']
+    ];
+    msgs.forEach(function(m) {
+      setTimeout(function() {
+        var el = document.getElementById('status');
+        if (el) el.textContent = m[1];
+      }, m[0]);
+    });
+  </script>
 </body>
 </html>`
 }
@@ -322,12 +489,28 @@ if (process.platform === 'win32') {
 app.whenReady().then(async () => {
   const splash = createSplashWindow()
 
+  killStaleSidecar()
   apiProcess = startApiSidecar()
 
   try {
-    await waitForApi('http://127.0.0.1:17380/health', 20)
+    await waitForApi('http://127.0.0.1:17380/health', 60, apiProcess)
   } catch (err) {
-    console.warn('[main] radar-api health check failed — continuing anyway:', err)
+    console.warn('[main] radar-api health check failed:', err)
+
+    if (sidecarLogContainsMigrationChecksumError() && backupIncompatibleSqliteDb()) {
+      setSplashStatus(splash, 'Updating local database...')
+      apiProcess = startApiSidecar()
+      try {
+        await waitForApi('http://127.0.0.1:17380/health', 60, apiProcess)
+      } catch (retryErr) {
+        console.error('[main] radar-api retry after database backup failed:', retryErr)
+        setSplashStatus(splash, 'API failed to start. See radar-api.log in app data.')
+        return
+      }
+    } else {
+      setSplashStatus(splash, 'API failed to start. See radar-api.log in app data.')
+      return
+    }
   }
 
   const win = createWindow()
@@ -356,4 +539,5 @@ app.on('before-quit', () => {
     apiProcess.kill('SIGTERM')
     apiProcess = null
   }
+  deletePidFile()
 })

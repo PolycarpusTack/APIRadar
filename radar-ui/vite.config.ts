@@ -14,10 +14,11 @@ export default defineConfig(({ command }) => ({
   server: {
     port: 6173,
     proxy: {
-      '/v1': 'http://localhost:8081',
-      '/health': 'http://localhost:8081',
-      '/scalar.js': 'http://localhost:8081',
-      '/scalar': 'http://localhost:8081',
+      '/v1': 'http://localhost:17380',
+      '/auth': 'http://localhost:17380',
+      '/health': 'http://localhost:17380',
+      '/scalar.js': 'http://localhost:17380',
+      '/scalar': 'http://localhost:17380',
     },
   },
   build: {

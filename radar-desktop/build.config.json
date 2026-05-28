@@ -60,6 +60,11 @@
   },
   "nsis": {
     "oneClick": false,
-    "allowToChangeInstallationDirectory": true
+    "allowToChangeInstallationDirectory": true,
+    "shortcutName": "API Radar",
+    "createDesktopShortcut": "always",
+    "createStartMenuShortcut": true,
+    "runAfterFinish": true,
+    "deleteAppDataOnUninstall": false
   }
 }

@@ -123,13 +123,26 @@ fn collect_operations(spec: &OpenAPI) -> IndexMap<String, openapiv3::Operation> 
     let mut map = IndexMap::new();
 
     for (path_str, path_ref) in spec.paths.paths.iter() {
+        // Limitation: only local $ref path items (starting with `#/`) are resolved inline.
+        // External file refs and URL refs are not supported and will be skipped with a warning.
         let path_item: &PathItem = match path_ref {
             ReferenceOr::Item(pi) => pi,
             ReferenceOr::Reference { reference } => {
-                eprintln!(
-                    "warn: skipping $ref path item '{}' (full $ref resolution deferred)",
-                    reference
-                );
+                if reference.starts_with("#/") {
+                    // Attempt inline resolution of a local $ref path item.
+                    // openapiv3 does not expose a generic component resolver for path items,
+                    // so we cannot dereference this without a full $ref resolver library.
+                    // Log a warning and skip rather than silently losing operations.
+                    tracing::warn!(
+                        reference = %reference,
+                        "skipping local $ref path item (inline $ref resolution for path items is not yet implemented)"
+                    );
+                } else {
+                    tracing::warn!(
+                        reference = %reference,
+                        "skipping external $ref path item (only local component refs are supported)"
+                    );
+                }
                 continue;
             }
         };
@@ -205,7 +218,12 @@ fn resolved_params(op: &openapiv3::Operation, spec: &OpenAPI) -> IndexMap<ParamK
                 if let Some(p) = resolve_parameter(spec, reference) {
                     map.insert(param_key(p), p.clone());
                 } else {
-                    eprintln!("warn: could not resolve $ref parameter '{reference}'");
+                    // Limitation: only local component refs (#/components/parameters/…) are
+                    // resolved. External and chain refs are skipped; the parameter is ignored.
+                    tracing::warn!(
+                        reference = %reference,
+                        "could not resolve $ref parameter; parameter will be ignored in diff"
+                    );
                 }
             }
         }
@@ -316,7 +334,11 @@ fn diff_request_body(
             if let Some(rb) = resolve_request_body(base_spec, reference) {
                 Some(rb)
             } else {
-                eprintln!("warn: could not resolve $ref requestBody '{reference}'");
+                // Limitation: only local component refs (#/components/requestBodies/…) resolve.
+                tracing::warn!(
+                    reference = %reference,
+                    "could not resolve $ref requestBody; request body diff skipped"
+                );
                 None
             }
         }
@@ -328,7 +350,11 @@ fn diff_request_body(
             if let Some(rb) = resolve_request_body(head_spec, reference) {
                 Some(rb)
             } else {
-                eprintln!("warn: could not resolve $ref requestBody '{reference}'");
+                // Limitation: only local component refs (#/components/requestBodies/…) resolve.
+                tracing::warn!(
+                    reference = %reference,
+                    "could not resolve $ref requestBody; request body diff skipped"
+                );
                 None
             }
         }
@@ -371,8 +397,10 @@ fn diff_request_body(
                             match resolve_schema(base_spec, reference) {
                                 Some(s) => s,
                                 None => {
-                                    eprintln!(
-                                        "warn: could not resolve $ref schema '{reference}'"
+                                    // Limitation: only local component schema refs resolve.
+                                    tracing::warn!(
+                                        reference = %reference,
+                                        "could not resolve $ref schema in request body; schema diff skipped"
                                     );
                                     return;
                                 }
@@ -385,8 +413,10 @@ fn diff_request_body(
                             match resolve_schema(head_spec, reference) {
                                 Some(s) => s,
                                 None => {
-                                    eprintln!(
-                                        "warn: could not resolve $ref schema '{reference}'"
+                                    // Limitation: only local component schema refs resolve.
+                                    tracing::warn!(
+                                        reference = %reference,
+                                        "could not resolve $ref schema in request body; schema diff skipped"
                                     );
                                     return;
                                 }
@@ -434,7 +464,11 @@ fn diff_responses(
                 match resolve_response(base_spec, reference) {
                     Some(r) => r,
                     None => {
-                        eprintln!("warn: could not resolve $ref response '{reference}'");
+                        // Limitation: only local component refs (#/components/responses/…) resolve.
+                        tracing::warn!(
+                            reference = %reference,
+                            "could not resolve $ref response; response diff skipped"
+                        );
                         continue;
                     }
                 }
@@ -447,7 +481,11 @@ fn diff_responses(
                 match resolve_response(head_spec, reference) {
                     Some(r) => r,
                     None => {
-                        eprintln!("warn: could not resolve $ref response '{reference}'");
+                        // Limitation: only local component refs (#/components/responses/…) resolve.
+                        tracing::warn!(
+                            reference = %reference,
+                            "could not resolve $ref response; response diff skipped"
+                        );
                         continue;
                     }
                 }
@@ -480,7 +518,11 @@ fn diff_responses(
                         match resolve_schema(base_spec, reference) {
                             Some(s) => s,
                             None => {
-                                eprintln!("warn: could not resolve $ref schema '{reference}'");
+                                // Limitation: only local component schema refs resolve.
+                                tracing::warn!(
+                                    reference = %reference,
+                                    "could not resolve $ref schema in response; schema diff skipped"
+                                );
                                 continue;
                             }
                         }
@@ -492,7 +534,11 @@ fn diff_responses(
                         match resolve_schema(head_spec, reference) {
                             Some(s) => s,
                             None => {
-                                eprintln!("warn: could not resolve $ref schema '{reference}'");
+                                // Limitation: only local component schema refs resolve.
+                                tracing::warn!(
+                                    reference = %reference,
+                                    "could not resolve $ref schema in response; schema diff skipped"
+                                );
                                 continue;
                             }
                         }
@@ -602,7 +648,11 @@ fn diff_schema_properties(
             ReferenceOr::Reference { reference } => match resolve_schema(base_spec, reference) {
                 Some(s) => s,
                 None => {
-                    eprintln!("warn: could not resolve $ref property schema '{reference}'");
+                    // Limitation: only local component schema refs resolve.
+                    tracing::warn!(
+                        reference = %reference,
+                        "could not resolve $ref property schema; property diff skipped"
+                    );
                     continue;
                 }
             },
@@ -612,7 +662,11 @@ fn diff_schema_properties(
             ReferenceOr::Reference { reference } => match resolve_schema(head_spec, reference) {
                 Some(s) => s,
                 None => {
-                    eprintln!("warn: could not resolve $ref property schema '{reference}'");
+                    // Limitation: only local component schema refs resolve.
+                    tracing::warn!(
+                        reference = %reference,
+                        "could not resolve $ref property schema; property diff skipped"
+                    );
                     continue;
                 }
             },

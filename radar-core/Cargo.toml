@@ -20,6 +20,7 @@ openapiv3 = { workspace = true }
 serde_yml = { workspace = true }
 indexmap = { workspace = true }
 graphql-parser = "0.4"
+tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

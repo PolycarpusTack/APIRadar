@@ -113,7 +113,32 @@ pub(crate) async fn get_version() -> impl IntoResponse {
 /// POST /scalar/update
 /// Downloads the latest Scalar bundle from jsDelivr and stores it as the disk override.
 /// Only works in SQLite (desktop) mode; returns 400 for PostgreSQL deployments.
-pub(crate) async fn post_update() -> impl IntoResponse {
+/// Requires a valid Bearer token when either RADAR_JWT_SECRET or RADAR_SERVICE_TOKEN is set.
+pub(crate) async fn post_update(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    // Require Bearer token if either auth mechanism is configured.
+    let jwt_secret = std::env::var("RADAR_JWT_SECRET").unwrap_or_default();
+    let service_token = std::env::var("RADAR_SERVICE_TOKEN").unwrap_or_default();
+    if !jwt_secret.is_empty() || !service_token.is_empty() {
+        let auth = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let ok = if !jwt_secret.is_empty() {
+            auth.strip_prefix("Bearer ")
+                .and_then(|t| crate::auth::validate_jwt(t, &jwt_secret))
+                .is_some()
+        } else {
+            auth == format!("Bearer {service_token}")
+        };
+        if !ok {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({"error": "unauthorized"})),
+            )
+                .into_response();
+        }
+    }
+
     let override_dir = match OVERRIDE_DIR.get() {
         Some(Some(dir)) => dir.clone(),
         _ => {

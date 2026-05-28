@@ -1987,6 +1987,7 @@ dependencies = [
  "serde",
  "serde_yml",
  "thiserror 1.0.69",
+ "tracing",
  "uuid",
 ]
 

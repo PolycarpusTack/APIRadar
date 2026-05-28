@@ -29,6 +29,23 @@ pub(crate) async fn create_service(
     }
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let id = body.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    // Org isolation: if a service with this ID already exists, ensure it belongs
+    // to the caller's org before allowing an overwrite.
+    if !org_id.is_empty() {
+        if let Some(existing_org) = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
+        )
+        .bind(&id)
+        .fetch_optional(&pool)
+        .await?
+        {
+            if !existing_org.is_empty() && existing_org != org_id {
+                return Err(ApiError::Forbidden("service belongs to another org".into()));
+            }
+        }
+    }
+
     sqlx::query(
         r#"
         INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id)

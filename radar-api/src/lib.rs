@@ -124,7 +124,8 @@ fn client_key(req: &Request) -> String {
                 .or_else(|| v.strip_prefix("bearer "))
                 .unwrap_or_default();
             if !token.is_empty() {
-                return format!("token:{token}");
+                let hashed = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, token.as_bytes());
+                return format!("token:{hashed}");
             }
         }
     }
@@ -133,7 +134,7 @@ fn client_key(req: &Request) -> String {
         .get("x-forwarded-for")
         .or_else(|| req.headers().get("x-real-ip"))
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+        .map(|s| s.split(',').last().unwrap_or(s).trim().to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -3475,7 +3476,9 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         let key = client_key(&req);
-        assert_eq!(key, "token:abc123token");
+        // Token is hashed — assert prefix and that the raw token is not stored.
+        assert!(key.starts_with("token:"), "key={key}");
+        assert!(!key.contains("abc123token"), "raw token must not appear in key");
     }
 
     #[test]
@@ -3485,7 +3488,8 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         let key = client_key(&req);
-        assert_eq!(key, "token:mytoken99");
+        assert!(key.starts_with("token:"), "key={key}");
+        assert!(!key.contains("mytoken99"), "raw token must not appear in key");
     }
 
     #[test]

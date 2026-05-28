@@ -410,7 +410,7 @@ async fn main() -> Result<()> {
                         from_ref: &base,
                         to_ref: &head,
                         pr_url: None,
-                        spec_format: "openapi",
+                        spec_format: &detected,
                         changes: &changes,
                         token: token_ref,
                     },
