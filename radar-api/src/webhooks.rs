@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::auth::JwtClaims;
 use crate::errors::ApiError;
-use crate::utils::is_ssrf_blocked;
+use crate::utils::{is_host_allowed, is_ssrf_blocked};
 
 // ---------------------------------------------------------------------------
 // HMAC-SHA256 payload signing (ADR-K-2)
@@ -103,7 +103,7 @@ pub(crate) async fn create_webhook(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    if is_ssrf_blocked(&body.url) {
+    if is_ssrf_blocked(&body.url) || !is_host_allowed(&body.url) {
         return Err(ApiError::BadRequest(
             "url must be a reachable HTTPS endpoint outside private address space".into(),
         ));
@@ -411,6 +411,7 @@ async fn deliver_webhook_event(t: DeliveryTask) {
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .user_agent("radar-api/webhook")
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap_or_default();
 
@@ -648,6 +649,7 @@ async fn retry_pending_delivery(
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .user_agent("radar-api/webhook-outbox")
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap_or_default();
 

@@ -34,6 +34,33 @@ pub(crate) struct CreateBody {
     pub meta: Option<Value>,
 }
 
+// Keys whose values must be redacted in audit event meta — prevents tokens,
+// passwords, and API keys from appearing in the audit log.
+const SECRET_KEYS: &[&str] = &[
+    "token", "password", "secret", "key", "bearer", "api_key", "auth", "credential",
+];
+
+/// Redact any object field whose key contains a known secret keyword.
+/// Applied recursively to nested objects.  Arrays and scalars are passed through.
+fn redact_secrets(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                let lower = k.to_lowercase();
+                if SECRET_KEYS.iter().any(|s| lower.contains(s)) {
+                    out.insert(k.clone(), Value::String("[REDACTED]".into()));
+                } else {
+                    out.insert(k.clone(), redact_secrets(val));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(redact_secrets).collect()),
+        other => other.clone(),
+    }
+}
+
 /// Internal helper — other modules call this to append an audit event.
 /// Failures are silently swallowed so audit never blocks the caller.
 pub(crate) async fn record_event(
@@ -47,7 +74,7 @@ pub(crate) async fn record_event(
 ) {
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let meta_str = meta.map(|m| m.to_string());
+    let meta_str = meta.map(|m| redact_secrets(m).to_string());
     let _ = sqlx::query(
         "INSERT INTO audit_event \
          (id, org_id, actor, action, entity_type, entity_id, meta, created_at) \

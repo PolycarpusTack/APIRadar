@@ -295,14 +295,148 @@ pub(crate) async fn get_migration_guide(
 }
 
 // POST /v1/diffs/:id/release-notes/generate
-// Generates Markdown release notes from the diff's stored changes and saves them.
+// Creates a release note row immediately (generation_status='pending') and
+// spawns a background task to fill in the content.  Returns { id, generation_status }
+// so the caller can poll GET /v1/release-notes/:id/generate-status.
 pub(crate) async fn generate_release_note(
     Path(diff_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Verify diff exists before queuing.
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM diff WHERE id = ?")
+        .bind(&diff_id)
+        .fetch_optional(&pool)
+        .await?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound(format!("diff {diff_id} not found")));
+    }
+
+    let id  = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO release_note (id, diff_id, content, generation_status, created_at) \
+         VALUES (?, ?, '', 'pending', ?)",
+    )
+    .bind(&id)
+    .bind(&diff_id)
+    .bind(&now)
+    .execute(&pool)
+    .await?;
+
+    // Audit start.
+    {
+        let p2 = pool.clone();
+        let nid = id.clone();
+        let did = diff_id.clone();
+        tokio::spawn(async move {
+            crate::audit::record_event(&p2, "default", "system", "release_note.generate.started",
+                Some("release_note"), Some(&nid),
+                Some(&serde_json::json!({ "diff_id": did }))).await;
+        });
+    }
+
+    // Background generation task.
+    {
+        let p2  = pool.clone();
+        let nid = id.clone();
+        let did = diff_id.clone();
+        tokio::spawn(async move {
+            match build_release_note_content(&p2, &did).await {
+                Ok(md) => {
+                    let _ = sqlx::query(
+                        "UPDATE release_note SET content = ?, generation_status = 'completed' WHERE id = ?",
+                    )
+                    .bind(&md)
+                    .bind(&nid)
+                    .execute(&p2)
+                    .await;
+                    crate::audit::record_event(&p2, "default", "system", "release_note.generate.completed",
+                        Some("release_note"), Some(&nid), None).await;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let _ = sqlx::query(
+                        "UPDATE release_note SET generation_status = 'failed', generation_error = ? WHERE id = ?",
+                    )
+                    .bind(&msg)
+                    .bind(&nid)
+                    .execute(&p2)
+                    .await;
+                    crate::audit::record_event(&p2, "default", "system", "release_note.generate.failed",
+                        Some("release_note"), Some(&nid),
+                        Some(&serde_json::json!({ "error": msg }))).await;
+                }
+            }
+        });
+    }
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        axum::Json(serde_json::json!({
+            "id":                id,
+            "diff_id":           diff_id,
+            "status":            "draft",
+            "generation_status": "pending",
+            "created_at":        now,
+        })),
+    ))
+}
+
+// GET /v1/release-notes/:id/generate-status
+// Poll this endpoint after POST .../generate.  Returns generation_status and
+// content once completed.
+pub(crate) async fn get_generate_status(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    State(pool): State<sqlx::AnyPool>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
     use sqlx::Row;
 
-    // Verify diff exists and fetch refs + service name.
+    let row = sqlx::query(
+        "SELECT id, diff_id, content, generation_status, generation_error, status, created_at \
+         FROM release_note WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&pool)
+    .await?;
+
+    let Some(r) = row else {
+        return Err(ApiError::NotFound(format!("release note {id} not found")));
+    };
+
+    let gen_status: Option<String> = r.try_get("generation_status").ok().flatten();
+    let gen_error:  Option<String> = r.try_get("generation_error").ok().flatten();
+    let content:    String         = r.try_get("content").unwrap_or_default();
+    let status:     String         = r.try_get("status").unwrap_or_else(|_| "draft".into());
+    let created_at: String         = r.try_get("created_at").unwrap_or_default();
+
+    let mut resp = serde_json::json!({
+        "id":                id,
+        "diff_id":           r.try_get::<String, _>("diff_id").unwrap_or_default(),
+        "status":            status,
+        "generation_status": gen_status,
+        "created_at":        created_at,
+    });
+
+    if let Some(e) = gen_error {
+        resp["generation_error"] = serde_json::json!(e);
+    }
+    // Only include content once generation is done — avoids returning an empty string.
+    if resp["generation_status"] == "completed" {
+        resp["content"] = serde_json::json!(content);
+    }
+
+    Ok(axum::Json(resp))
+}
+
+/// Build the Markdown content for a release note from DB.
+/// Extracted so the background task and any future direct callers share the logic.
+async fn build_release_note_content(
+    pool: &sqlx::AnyPool,
+    diff_id: &str,
+) -> Result<String, crate::errors::ApiError> {
+    use sqlx::Row;
+
     let diff_row = sqlx::query(
         r#"SELECT d.id, sv_from.git_ref AS from_ref, sv_to.git_ref AS to_ref,
                   s.name AS service_name
@@ -312,23 +446,23 @@ pub(crate) async fn generate_release_note(
            JOIN service s            ON s.id        = sv_from.service_id
            WHERE d.id = ?"#,
     )
-    .bind(&diff_id)
-    .fetch_optional(&pool)
+    .bind(diff_id)
+    .fetch_optional(pool)
     .await?;
 
     let Some(dr) = diff_row else {
         return Err(ApiError::NotFound(format!("diff {diff_id} not found")));
     };
 
-    let from_ref: String = dr.try_get("from_ref").unwrap_or_default();
-    let to_ref: String = dr.try_get("to_ref").unwrap_or_default();
-    let service_name: String = dr.try_get("service_name").unwrap_or_else(|_| diff_id.clone());
+    let from_ref:     String = dr.try_get("from_ref").unwrap_or_default();
+    let to_ref:       String = dr.try_get("to_ref").unwrap_or_default();
+    let service_name: String = dr.try_get("service_name").unwrap_or_else(|_| diff_id.to_owned());
 
     let change_rows = sqlx::query(
         "SELECT path, kind, severity, description FROM change WHERE diff_id = ? ORDER BY severity DESC, path",
     )
-    .bind(&diff_id)
-    .fetch_all(&pool)
+    .bind(diff_id)
+    .fetch_all(pool)
     .await?;
 
     let breaking: Vec<_> = change_rows.iter().filter(|r| r.try_get::<String, _>("severity").unwrap_or_default() == "breaking").collect();
@@ -384,32 +518,7 @@ pub(crate) async fn generate_release_note(
     }
 
     md.push_str("---\n\n*Generated by Radar Monitor*\n");
-
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-
-    sqlx::query(
-        "INSERT INTO release_note (id, diff_id, content, created_at) VALUES (?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(&diff_id)
-    .bind(&md)
-    .bind(&now)
-    .execute(&pool)
-    .await?;
-
-    metrics::counter!("radar_diffs_created_total").increment(0); // keep linkage
-
-    Ok((
-        axum::http::StatusCode::CREATED,
-        axum::Json(serde_json::json!({
-            "id":         id,
-            "diff_id":    diff_id,
-            "content":    md,
-            "status":     "draft",
-            "created_at": now,
-        })),
-    ))
+    Ok(md)
 }
 
 fn migration_advice(md: &mut String, kind: &str, path: &str) {

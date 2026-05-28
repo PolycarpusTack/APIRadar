@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::auth::JwtClaims;
 use crate::errors::ApiError;
-use crate::utils::is_ssrf_blocked;
+use crate::utils::{is_host_allowed, is_ssrf_blocked};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -115,7 +115,7 @@ pub(crate) async fn create_csv_run(
     // the check here and let the per-row guard handle it.
     if template_url_has_concrete_host(&body.request.url) {
         let stripped = strip_placeholders(&body.request.url);
-        if is_ssrf_blocked(&stripped) {
+        if is_ssrf_blocked(&stripped) || !is_host_allowed(&stripped) {
             return Err(ApiError::BadRequest(
                 "request URL is blocked by SSRF policy".into(),
             ));
@@ -410,7 +410,7 @@ async fn dispatch_row(
     };
 
     let resolved_url = resolve_vars(&template.url, row_obj);
-    if is_ssrf_blocked(&resolved_url) {
+    if is_ssrf_blocked(&resolved_url) || !is_host_allowed(&resolved_url) {
         return RowOutcome {
             row_number, http_status: None, duration_ms: 0,
             error: Some("URL blocked by SSRF policy".into()), url: resolved_url,

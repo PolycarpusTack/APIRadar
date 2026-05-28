@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::auth::JwtClaims;
 use crate::errors::ApiError;
-use crate::utils::is_ssrf_blocked;
+use crate::utils::{is_host_allowed, is_ssrf_blocked};
 use crate::webhooks::dispatch_diff_event;
 
 // ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ pub(crate) async fn create_scan(
     if body.spec_url.is_empty() {
         return Err(ApiError::BadRequest("spec_url is required".into()));
     }
-    if is_ssrf_blocked(&body.spec_url) {
+    if is_ssrf_blocked(&body.spec_url) || !is_host_allowed(&body.spec_url) {
         return Err(ApiError::BadRequest(
             "spec_url must be a reachable HTTPS endpoint outside private address space".into(),
         ));
@@ -269,10 +269,10 @@ async fn execute_scan(
 ) {
     let now = Utc::now().to_rfc3339();
 
-    // Defense-in-depth SSRF check.
-    if is_ssrf_blocked(&spec_url) {
-        tracing::warn!("scan {scan_id}: SSRF-blocked spec_url — skipping execution");
-        set_scan_status(&pool, &scan_id, &now, "skipped", Some("SSRF-blocked spec_url")).await;
+    // Defense-in-depth SSRF + allowlist check.
+    if is_ssrf_blocked(&spec_url) || !is_host_allowed(&spec_url) {
+        tracing::warn!("scan {scan_id}: SSRF-blocked or disallowed spec_url — skipping execution");
+        set_scan_status(&pool, &scan_id, &now, "skipped", Some("SSRF-blocked or disallowed spec_url")).await;
         return;
     }
 
@@ -288,6 +288,7 @@ async fn execute_scan(
     let http = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .user_agent("radar-api/scheduled-scan")
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,

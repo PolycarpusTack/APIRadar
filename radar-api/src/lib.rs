@@ -323,6 +323,7 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
         .route("/release-notes", get(release_notes::list_release_notes))
         .route("/release-notes/:id", get(release_notes::get_release_note))
         .route("/release-notes/:id/status", axum::routing::patch(release_notes::patch_release_note_status))
+        .route("/release-notes/:id/generate-status", get(release_notes::get_generate_status))
         .route("/diffs/:id/release-notes", post(release_notes::create_release_note))
         .route("/diffs/:id/release-notes/generate", post(release_notes::generate_release_note))
         .route("/diffs/:id/migration-guide", get(release_notes::get_migration_guide))
@@ -3462,12 +3463,11 @@ mod tests {
         assert_eq!(key, "192.168.1.1");
     }
 
-    // J-6: POST /v1/diffs/:id/release-notes/generate creates a release note from diff data
+    // J-6 / Phase-3: POST generate returns pending job; GET generate-status returns completed content
     #[tokio::test]
-    async fn test_generate_release_note_returns_201() {
+    async fn test_generate_release_note_async_job() {
         let pool = test_pool().await;
 
-        // Insert prerequisite data
         sqlx::query("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind("svc-rn").bind("RN Svc").bind("").bind("team").bind("openapi")
             .execute(&pool).await.unwrap();
@@ -3485,20 +3485,95 @@ mod tests {
             .bind("chg-rn").bind("diff-rn").bind("GET /users → phone").bind("field_removed").bind("breaking").bind(Option::<String>::None)
             .execute(&pool).await.unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
+        let client = test_helpers::TestClient::new(pool.clone());
+
+        // POST → should return 201 with generation_status pending.
+        let resp = client.post_json("/v1/diffs/diff-rn/release-notes/generate", &serde_json::json!({})).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = resp.json();
+        let note_id = body["id"].as_str().expect("id must be present").to_owned();
+        assert_eq!(body["generation_status"], "pending");
+        assert!(body.get("content").and_then(|v| v.as_str()).map(|s| s.is_empty()).unwrap_or(true),
+                "content should not be returned in pending state");
+
+        // Background task completes almost instantly (template, no I/O).
+        // Poll up to 1 s to be safe.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
+        let mut gen_status = String::new(); // initialised by loop body; Rust requires definite assignment
+        let mut final_content = String::new();
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+            let status_resp = client.get(&format!("/v1/release-notes/{note_id}/generate-status")).await;
+            assert_eq!(status_resp.status(), StatusCode::OK);
+            let status_body = status_resp.json();
+            gen_status = status_body["generation_status"].as_str().unwrap_or("").to_owned();
+            if gen_status == "completed" {
+                final_content = status_body["content"].as_str().unwrap_or("").to_owned();
+                break;
+            }
+            if gen_status == "failed" { break; }
+            if std::time::Instant::now() >= deadline { break; }
+        }
+        assert_eq!(gen_status, "completed", "generation did not complete in time");
+        assert!(final_content.contains("field_removed"),
+                "expected generated content to mention field_removed, got: {final_content}");
+    }
+
+    // Phase-4 / STRIDE: SQL injection attempt in path param does not cause 500
+    #[tokio::test]
+    async fn test_stride_injection_in_path_returns_not_found_not_500() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        // A typical SQL injection string as a path parameter.
+        let resp = client.get("/v1/diffs/1%27%20OR%20%271%27%3D%271").await;
+        assert_ne!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR,
+                   "SQL injection attempt must not cause 500");
+    }
+
+    // Phase-4 / STRIDE: unauthenticated request when JWT_SECRET is configured returns 401
+    #[tokio::test]
+    async fn test_stride_unauthenticated_request_returns_401_when_jwt_required() {
+        let pool = test_pool().await;
+        // Build a router with JWT enabled (non-empty secret).
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, Some("test-secret".into()));
         let req = HttpRequest::builder()
-            .method("POST")
-            .uri("/v1/diffs/diff-rn/release-notes/generate")
+            .method("GET")
+            .uri("/v1/services")
             .body(Body::empty())
             .unwrap();
-
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED,
+                   "unauthenticated requests must be rejected with 401 when JWT is enabled");
+    }
 
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(json["id"].is_string());
-        assert!(json["content"].as_str().unwrap_or("").contains("field_removed"));
+    // Phase-4 / STRIDE: error responses do not leak internal details (DB path, connection string)
+    #[tokio::test]
+    async fn test_stride_error_bodies_do_not_leak_db_path() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        // Force a 404 on a non-existent resource — error body must not contain DB internals.
+        let resp = client.get("/v1/diffs/nonexistent-diff-id-xyz").await;
+        let body_text = resp.text().to_lowercase();
+        assert!(!body_text.contains("sqlite"),           "error must not reveal DB engine");
+        assert!(!body_text.contains("drift.db"),         "error must not reveal DB file path");
+        assert!(!body_text.contains("sqlx"),             "error must not reveal ORM details");
+        assert!(!body_text.contains("connection string"), "error must not reveal DB credentials");
+    }
+
+    // Phase-4 / STRIDE: SSRF — redirect to private IP from a 3xx response is blocked
+    // (reqwest is configured with redirect::Policy::none() so 3xx are not followed)
+    #[tokio::test]
+    async fn test_stride_webhook_disallows_redirect_to_private_ip() {
+        // We test at the URL-validation layer: a private IP must be rejected on registration.
+        // Redirect bypass at delivery time is prevented by Policy::none() (verified in unit tests).
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool);
+        let resp = client.post_json(
+            "/v1/webhooks",
+            &serde_json::json!({ "url": "https://10.0.0.1/hook", "events": ["diff.created"] }),
+        ).await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY,
+                   "webhook to private IP must be rejected");
     }
 
     // J-2: creating a consumer without repo_url must succeed (repo_url is optional)
@@ -3889,6 +3964,71 @@ mod tests {
         let resp = client.get(&format!("/v1/webhooks/{id}/deliveries")).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(resp.json().as_array().is_some());
+    }
+
+    // Phase-3 / K-SMOKE: webhook delivery with in-process echo server
+    // Verifies that dispatch_diff_event fires a real HTTP POST to the registered URL.
+    #[tokio::test]
+    async fn test_webhook_delivery_reaches_echo_server() {
+        let echo = test_helpers::spawn_echo_server().await;
+        let url = format!("http://127.0.0.1:{}/hook", echo.addr.port());
+
+        // radar-api SSRF guard blocks non-HTTPS and RFC1918 IPs at *registration* time.
+        // For this test we bypass registration and insert the webhook directly so the
+        // delivery path is tested without interference from the input-validation guard.
+        let pool = test_pool().await;
+        let wh_id  = uuid::Uuid::new_v4().to_string();
+        let secret = uuid::Uuid::new_v4().to_string();
+        let now    = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO webhook (id, org_id, url, events, secret, active, created_at) \
+             VALUES (?, ?, ?, ?, ?, 1, ?)",
+        )
+        .bind(&wh_id).bind("").bind(&url)
+        .bind("diff.created").bind(&secret).bind(&now)
+        .execute(&pool).await.unwrap();
+
+        // Insert a diff to trigger webhook dispatch.
+        sqlx::query("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind("svc-wh").bind("WH Svc").bind("").bind("team").bind("openapi")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind("sv-wh-a").bind("svc-wh").bind("v1").bind(&now).bind("openapi")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind("sv-wh-b").bind("svc-wh").bind("v2").bind(&now).bind("openapi")
+            .execute(&pool).await.unwrap();
+
+        let client = test_helpers::TestClient::new(pool.clone());
+        let diff_resp = client.post_json(
+            "/v1/services/svc-wh/diffs",
+            &serde_json::json!({
+                "service_name": "WH Svc",
+                "repo_url": "",
+                "owner_team": "team",
+                "from_git_ref": "v1",
+                "to_git_ref": "v2",
+                "spec_format": "openapi",
+                "changes": []
+            }),
+        ).await;
+        assert_eq!(diff_resp.status(), StatusCode::CREATED,
+                   "diff creation failed: {}", diff_resp.text());
+
+        // Dispatch is in a spawned task — wait up to 3 s for the delivery.
+        echo.wait_for_requests(1, 3000).await;
+
+        let reqs = echo.requests.lock().await;
+        assert_eq!(reqs.len(), 1, "expected exactly one delivery, got {}", reqs.len());
+        let r = &reqs[0];
+        assert_eq!(r.method, "POST");
+        assert!(r.path.starts_with("/hook"));
+        // Payload must include diff_id and breaking_count.
+        let payload: serde_json::Value = serde_json::from_str(&r.body).expect("delivery body must be JSON");
+        assert!(payload["diff_id"].is_string(), "payload must contain diff_id");
+        // HMAC signature header must be present.
+        let has_sig = r.headers.iter().any(|(k, _)| k.to_lowercase() == "x-radar-signature-256");
+        assert!(has_sig, "delivery must carry X-Radar-Signature-256 header");
     }
 
     // --- scheduled-scan happy-path ---

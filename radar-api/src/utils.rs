@@ -2,6 +2,32 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
+// Host allowlist (RADAR_ALLOWED_HOSTS)
+// ---------------------------------------------------------------------------
+
+/// Returns true if the URL's hostname matches at least one of the patterns in
+/// `RADAR_ALLOWED_HOSTS` (comma-separated glob-style patterns, e.g.
+/// `*.internal,api.github.com`).
+///
+/// When `RADAR_ALLOWED_HOSTS` is unset or empty, all non-SSRF hosts are allowed.
+pub(crate) fn is_host_allowed(url_str: &str) -> bool {
+    let allowlist = std::env::var("RADAR_ALLOWED_HOSTS").unwrap_or_default();
+    if allowlist.trim().is_empty() {
+        return true; // no restriction beyond SSRF guard
+    }
+    let Ok(url) = url::Url::parse(url_str) else { return false };
+    let host = url.host_str().unwrap_or("").to_lowercase();
+    allowlist.split(',').any(|pat| {
+        let p = pat.trim().to_lowercase();
+        if let Some(suffix) = p.strip_prefix("*.") {
+            host == suffix || host.ends_with(&format!(".{suffix}"))
+        } else {
+            host == p
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // SSRF protection — shared guard for webhooks and scheduled scans
 // ---------------------------------------------------------------------------
 
@@ -250,6 +276,39 @@ mod tests {
     #[test]
     fn ssrf_blocked_loopback_ip_literal() {
         assert!(is_ssrf_blocked("https://127.0.0.1/hook"));
+    }
+
+    #[test]
+    fn ssrf_blocked_ipv6_loopback_literal() {
+        // ::1 is the IPv6 loopback address.
+        assert!(is_ssrf_blocked("https://[::1]/hook"));
+    }
+
+    // is_host_allowed — covers empty list, exact match, wildcard subdomain
+    #[test]
+    fn host_allowed_empty_list_permits_all() {
+        std::env::remove_var("RADAR_ALLOWED_HOSTS");
+        assert!(is_host_allowed("https://api.github.com/hook"));
+        assert!(is_host_allowed("https://example.com/hook"));
+    }
+
+    #[test]
+    fn host_allowed_exact_match() {
+        std::env::set_var("RADAR_ALLOWED_HOSTS", "api.github.com,hooks.slack.com");
+        assert!( is_host_allowed("https://api.github.com/hook"));
+        assert!( is_host_allowed("https://hooks.slack.com/services/T0/B0/xyz"));
+        assert!(!is_host_allowed("https://evil.com/hook"));
+        std::env::remove_var("RADAR_ALLOWED_HOSTS");
+    }
+
+    #[test]
+    fn host_allowed_wildcard_subdomain() {
+        std::env::set_var("RADAR_ALLOWED_HOSTS", "*.internal");
+        assert!( is_host_allowed("https://api.internal/hook"));
+        assert!( is_host_allowed("https://build.ci.internal/hook"));
+        assert!(!is_host_allowed("https://notinternal.com/hook"));
+        assert!(!is_host_allowed("https://evil.internal.attacker.com/hook"));
+        std::env::remove_var("RADAR_ALLOWED_HOSTS");
     }
 }
 

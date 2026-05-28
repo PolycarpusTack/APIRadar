@@ -13,6 +13,17 @@ pub(crate) enum ApiError {
     UnprocessableEntity { error: String, detail: String, spec: String },
 }
 
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApiError::Db(e) => write!(f, "database error: {e}"),
+            ApiError::BadRequest(m) | ApiError::NotFound(m) | ApiError::Forbidden(m) | ApiError::TooManyRequests(m) => write!(f, "{m}"),
+            ApiError::Unauthorized => write!(f, "unauthorized"),
+            ApiError::UnprocessableEntity { error, .. } => write!(f, "{error}"),
+        }
+    }
+}
+
 impl From<sqlx::Error> for ApiError {
     fn from(e: sqlx::Error) -> Self {
         ApiError::Db(e)
