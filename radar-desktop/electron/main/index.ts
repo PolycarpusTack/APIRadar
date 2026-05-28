@@ -90,18 +90,41 @@ function resolveApiBinary(): string | null {
   return null
 }
 
-function startApiSidecar(): ChildProcess | null {
-  // Electron does not guarantee userData exists before first write — create it
-  // now so SQLite can create drift.db inside it.
-  const dataDir = userDataDir()
-  mkdirSync(dataDir, { recursive: true })
-
-  const logPath = sidecarLogPath()
-  const logStream = createWriteStream(logPath, { flags: 'w' })
+// Step 2 extraction: userData dir setup + log stream always go together.
+function openSidecarLog(): { logStream: WriteStream; logLine: (s: string) => void } {
+  mkdirSync(userDataDir(), { recursive: true })
+  const logStream = createWriteStream(sidecarLogPath(), { flags: 'w' })
   const logLine = (s: string) => { console.log(s); logStream.write(s + '\n') }
+  return { logStream, logLine }
+}
+
+// Step 1 extraction: spawn + wire logs + record PID — same pattern for both launch paths.
+function spawnSidecar(
+  cmd: string,
+  args: string[],
+  label: string,
+  logStream: WriteStream,
+  logLine: (s: string) => void,
+  cwd?: string,
+): ChildProcess {
+  const proc = spawn(cmd, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: false,
+    ...(cwd !== undefined ? { cwd } : {}),
+  })
+  wireProcessLogs(proc, label, logStream)
+  if (proc.pid != null) {
+    writePidFile(proc.pid)
+    logLine(`[main] pid: ${proc.pid}`)
+  }
+  return proc
+}
+
+function startApiSidecar(): ChildProcess | null {
+  const { logStream, logLine } = openSidecarLog()
 
   logLine(`[main] radar-api sidecar starting — ${new Date().toISOString()}`)
-  logLine(`[main] userData: ${dataDir}`)
+  logLine(`[main] userData: ${userDataDir()}`)
 
   const dbPath = `sqlite:${sidecarDbPath()}`
   // Bind to loopback only — sidecar must never be reachable from the network in desktop mode.
@@ -111,40 +134,21 @@ function startApiSidecar(): ChildProcess | null {
   logLine(`[main] resolved binary: ${bin ?? '(not found)'}`)
 
   if (!bin) {
-    // Development fallback: attempt `cargo run` from the workspace root
     const workspaceRoot = join(__dirname, '..', '..', '..')
-    logLine(
-      '[main] radar-api binary not found — falling back to `cargo run`. ' +
-        'Run `cargo build -p radar-api` to avoid this slow start.'
-    )
+    logLine('[main] radar-api binary not found — falling back to `cargo run`. Run `cargo build -p radar-api` to avoid this slow start.')
     try {
-      const cargoProcess = spawn('cargo', ['run', '--bin', 'radar-api', '--', ...args], {
-        cwd: workspaceRoot,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: false,
-      })
-      wireProcessLogs(cargoProcess, 'radar-api(cargo)', logStream)
-      if (cargoProcess.pid != null) { writePidFile(cargoProcess.pid); logLine(`[main] pid: ${cargoProcess.pid}`) }
-      return cargoProcess
+      return spawnSidecar('cargo', ['run', '--bin', 'radar-api', '--', ...args], 'radar-api(cargo)', logStream, logLine, workspaceRoot)
     } catch (err) {
-      const msg = `[main] Failed to start radar-api via cargo run: ${String(err)}`
-      logLine(msg)
+      logLine(`[main] Failed to start radar-api via cargo run: ${String(err)}`)
       logStream.end()
       return null
     }
   }
 
   try {
-    const proc = spawn(bin, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: false,
-    })
-    wireProcessLogs(proc, 'radar-api', logStream)
-    if (proc.pid != null) { writePidFile(proc.pid); logLine(`[main] pid: ${proc.pid}`) }
-    return proc
+    return spawnSidecar(bin, args, 'radar-api', logStream, logLine)
   } catch (err) {
-    const msg = `[main] Failed to spawn radar-api binary: ${String(err)}`
-    logLine(msg)
+    logLine(`[main] Failed to spawn radar-api binary: ${String(err)}`)
     logStream.end()
     return null
   }
