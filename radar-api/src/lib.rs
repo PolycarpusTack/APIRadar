@@ -721,6 +721,9 @@ mod tests {
             .connect(&url)
             .await
             .expect("failed to create test pool");
+        // Isolate each Postgres test in its own schema so parallel tests sharing
+        // the CI database don't collide (no-op on SQLite).
+        test_helpers::isolate_postgres_schema(&pool, &url).await;
         sqlx::migrate!("./migrations")
             .run(&pool)
             .await

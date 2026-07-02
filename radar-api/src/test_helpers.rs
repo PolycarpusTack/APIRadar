@@ -3,6 +3,35 @@ use axum::{body::Body, http::Request, http::StatusCode, Router};
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
 
+/// Isolate a Postgres-backed test pool in its own private schema.
+///
+/// On SQLite this is a no-op: each `test_pool()` already gets an independent
+/// `sqlite::memory:` database. On Postgres (the `rust-postgres` CI job) every
+/// test shares one `radar_test` database, so without isolation parallel tests
+/// see each other's rows — "list returns empty" assertions fail and fixed IDs
+/// collide. This creates a unique schema and pins the connection's `search_path`
+/// to it, so migrations and all subsequent queries for this test land in a
+/// private namespace. Must be called AFTER connecting but BEFORE running
+/// migrations so the tables are created inside the schema.
+///
+/// Relies on the pool using a single connection (`max_connections(1)`), so the
+/// session-level `search_path` persists for the pool's lifetime.
+pub(crate) async fn isolate_postgres_schema(pool: &sqlx::AnyPool, url: &str) {
+    if url.starts_with("sqlite") {
+        return;
+    }
+    // Schema identifier: 't' + 32 hex chars — always a valid unquoted identifier.
+    let schema = format!("t{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+        .execute(pool)
+        .await
+        .expect("failed to create isolated test schema");
+    sqlx::query(&format!("SET search_path TO \"{schema}\""))
+        .execute(pool)
+        .await
+        .expect("failed to set search_path for isolated test schema");
+}
+
 // ---------------------------------------------------------------------------
 // In-process echo/mock HTTP server
 // ---------------------------------------------------------------------------

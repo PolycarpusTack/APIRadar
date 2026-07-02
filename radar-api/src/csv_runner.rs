@@ -748,6 +748,7 @@ mod tests {
             .connect(&url)
             .await
             .expect("pool");
+        crate::test_helpers::isolate_postgres_schema(&pool, &url).await;
         sqlx::migrate!("./migrations")
             .run(&pool)
             .await
