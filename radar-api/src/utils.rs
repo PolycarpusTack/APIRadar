@@ -170,8 +170,19 @@ pub(crate) fn sample_keep(rate: f64) -> bool {
     let ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
-        .unwrap_or(1);
-    (ns as f64 / u32::MAX as f64) < rate
+        .unwrap_or(0);
+    // NOTE: sampling uses the clock's sub-second part as a cheap pseudo-random
+    // source; it is adequate but weakly distributed under burst traffic (a real
+    // RNG would be better). What matters for correctness is the [0.0, 1.0) range.
+    unit_sample_from_nanos(ns) < rate
+}
+
+/// Map a sub-second nanosecond count to a sample in `[0.0, 1.0)`.
+/// `subsec_nanos()` spans `[0, 1_000_000_000)`, so it must be divided by 1e9.
+/// (Dividing by `u32::MAX` (~4.29e9) capped the sample at ~0.233 and made every
+/// `sample_rate >= 0.24` keep 100% of events — the bug this replaces.)
+fn unit_sample_from_nanos(ns: u32) -> f64 {
+    ns as f64 / 1_000_000_000.0
 }
 
 fn severity_rank(s: &str) -> u8 {
@@ -305,6 +316,25 @@ mod tests {
         assert!(!constant_time_eq(b"Bearer abc", b"Bearer abd"));
         assert!(!constant_time_eq(b"short", b"longer-value"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn unit_sample_spans_full_range() {
+        // The regression guard for the divisor bug: the old code divided by
+        // u32::MAX and produced ~0.233 for max nanos, so any rate >= 0.24 kept
+        // everything. With /1e9 the sample spans the full [0,1) range.
+        assert_eq!(unit_sample_from_nanos(0), 0.0);
+        assert!(unit_sample_from_nanos(999_999_999) > 0.999);
+        let mid = unit_sample_from_nanos(500_000_000);
+        assert!((0.49..0.51).contains(&mid), "mid sample was {mid}");
+    }
+
+    #[test]
+    fn sample_keep_boundaries() {
+        assert!(sample_keep(1.0));
+        assert!(sample_keep(2.0)); // >= 1.0 keeps all
+        assert!(!sample_keep(0.0));
+        assert!(!sample_keep(-0.5)); // <= 0.0 drops all
     }
 
     #[test]
