@@ -60,7 +60,7 @@ cargo fmt --all                           # format
 ### Node / pnpm
 
 ```sh
-pnpm dev:ui                               # start radar-ui Vite dev server (localhost:5173)
+pnpm dev:ui                               # start radar-ui Vite dev server (localhost:6173)
 pnpm dev:desktop                          # start radar-desktop in Electron dev mode
 pnpm build:ui                             # build radar-ui static bundle
 pnpm --recursive lint                     # lint all workspaces

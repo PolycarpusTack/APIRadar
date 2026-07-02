@@ -20,8 +20,8 @@ info:
     Set `RADAR_REQUIRE_AUTH=true` to force rejection of unauthenticated requests
     even without a token configured.
 
-    **Not documented here:** `GET /metrics` (Prometheus text exposition format,
-    internal scraping use only — not intended for external API consumers).
+    `GET /metrics` exposes Prometheus text exposition format for internal
+    scraping (not intended for external API consumers).
   contact:
     name: Radar Monitor
   license:
@@ -82,6 +82,26 @@ paths:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
 
+  /metrics:
+    get:
+      tags: [health]
+      summary: Prometheus metrics (text exposition format)
+      description: |
+        Prometheus text exposition format, for internal scraping.
+        Open by default; when `RADAR_METRICS_TOKEN` is set the endpoint
+        requires a matching `Authorization: Bearer <token>` header.
+      operationId: metrics
+      security: []
+      responses:
+        "200":
+          description: Metrics in Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          description: Missing or invalid bearer token (when RADAR_METRICS_TOKEN is set)
+
   /v1/services:
     get:
       tags: [services]
@@ -117,7 +137,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Service"
-        "400":
+        "422":
           $ref: "#/components/responses/BadRequest"
         "409":
           $ref: "#/components/responses/Conflict"
@@ -253,7 +273,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Consumer"
-        "400":
+        "422":
           $ref: "#/components/responses/BadRequest"
 
   /v1/diffs:
@@ -350,6 +370,42 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReleaseNote"
+
+  /v1/diffs/{diffId}/release-notes/generate:
+    parameters:
+      - $ref: "#/components/parameters/diffId"
+    post:
+      tags: [release-notes]
+      summary: Queue AI generation of release notes for a diff
+      description: |
+        Creates a release-note record in `pending` state and starts a
+        background task that generates the Markdown content. Returns
+        immediately; poll `GET /v1/release-notes/{id}/generate-status`
+        to observe progress (`pending` → `completed` | `failed`).
+      operationId: generateReleaseNote
+      responses:
+        "201":
+          description: Generation queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  diff_id:
+                    type: string
+                  status:
+                    type: string
+                    example: draft
+                  generation_status:
+                    type: string
+                    enum: [pending, completed, failed]
+                  created_at:
+                    type: string
+                    format: date-time
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/release-notes:
     get:
@@ -461,7 +517,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TestSuiteDetail"
-        "400":
+        "422":
           $ref: "#/components/responses/BadRequest"
         "503":
           description: No AI provider configured
@@ -520,7 +576,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxEnv"
-        "400":
+        "422":
           $ref: "#/components/responses/BadRequest"
 
   /v1/sandbox-envs/{id}:
@@ -548,7 +604,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxEnv"
-        "400":
+        "422":
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
@@ -589,7 +645,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AppSettings"
-        "400":
+        "422":
           $ref: "#/components/responses/BadRequest"
 
   /v1/settings/integrations:
@@ -869,7 +925,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Diff"
-        "400":
+        "422":
           $ref: "#/components/responses/BadRequest"
 
   /v1/compare/batch:
@@ -1331,10 +1387,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CsvRun"
-        "400":
-          $ref: "#/components/responses/BadRequest"
         "422":
-          description: SSRF protection rejected the target URL
+          description: Invalid run config, or SSRF protection rejected the target URL
 
   /v1/csv-runs/{csvRunId}:
     parameters:
@@ -1643,7 +1697,7 @@ paths:
       responses:
         "302":
           description: Redirect to dashboard on success
-        "400":
+        "422":
           $ref: "#/components/responses/BadRequest"
 
   /auth/me:
@@ -1737,7 +1791,9 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     BadRequest:
-      description: Invalid request body or parameters
+      description: |
+        Invalid request body or parameters. The server returns this as
+        HTTP 422 Unprocessable Entity (see `ApiError::BadRequest`), not 400.
       content:
         application/json:
           schema:

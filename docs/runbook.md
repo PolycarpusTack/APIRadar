@@ -53,8 +53,9 @@ Key env vars:
 | `DATABASE_URL` | DB connection string | `sqlite:drift.db` |
 | `BIND_ADDR` | Listen address | `0.0.0.0:8080` |
 | `STATIC_DIR` | Path to radar-ui `dist/` | _(none — UI not served)_ |
-| `RADAR_SERVICE_TOKEN` | Static Bearer token for v1 routes | _(none — auth disabled)_ |
+| `RADAR_SERVICE_TOKEN` | Static Bearer token required on all v1 routes when set (desktop sets this automatically for its sidecar) | _(none — auth disabled)_ |
 | `RADAR_JWT_SECRET` | HS256 secret for JWT auth (overrides static token) | _(none)_ |
+| `RADAR_TRUST_PROXY` | Trust `X-Forwarded-For` for rate-limit keying (only behind a trusted proxy); default uses the socket peer | `false` |
 | `RATE_LIMIT_PER_MINUTE` | Max requests/min per client IP (0 = off) | `300` |
 | `ANTHROPIC_API_KEY` | Enables Claude-powered release notes | _(none)_ |
 
@@ -208,9 +209,11 @@ Example Prometheus `scrape_configs` entry:
 
 ### Rate limiter and reverse proxy
 
-The per-IP rate limiter reads the client IP from `X-Forwarded-For` (first value) or `X-Real-IP`, falling back to `"unknown"`. Clients that control their own headers can spoof these values to bypass rate limiting.
+By default (`RADAR_TRUST_PROXY` unset or `false`) the per-IP rate limiter keys on the **socket peer address**, which clients cannot spoof. `X-Forwarded-For` / `X-Real-IP` are ignored in this mode.
 
-**Mitigation:** deploy `radar-api` behind a reverse proxy (nginx, Caddy) and configure the proxy to **overwrite** `X-Forwarded-For` with the real peer address rather than appending to a client-supplied value.
+Set `RADAR_TRUST_PROXY=true` **only** when `radar-api` runs behind a trusted reverse proxy that overwrites `X-Forwarded-For`. In that mode the limiter keys on the first `X-Forwarded-For` value so it sees the real client IP instead of the proxy's address.
+
+**When trusting the proxy:** configure it to **overwrite** `X-Forwarded-For` with the real peer address rather than appending to a client-supplied value — otherwise clients can spoof the header to bypass rate limiting.
 
 Example nginx snippet:
 ```nginx
@@ -220,8 +223,6 @@ location / {
     proxy_pass http://radar-api:8080;
 }
 ```
-
-Without this, rate limiting is advisory only (it deters casual flooding, not a determined attacker).
 
 ### Auth in production
 
@@ -372,6 +373,7 @@ The following variables control server behaviour but are not secret:
 | `CORS_ALLOWED_ORIGINS` | Comma-separated CORS origins. **Required for server deployments** — omit only for desktop/local mode. A warning is logged when unset on `0.0.0.0`. | `*` (permissive) |
 | `RADAR_DB_MAX_CONNECTIONS` | Max DB connections in the request-handler pool. Increase for high-concurrency deployments. | `20` |
 | `RADAR_METRICS_TOKEN` | Bearer token required to scrape `/metrics`. If unset, the endpoint is open (acceptable for desktop/localhost; **set this in production**). | — (open) |
+| `RADAR_TRUST_PROXY` | When `true`, trust `X-Forwarded-For` (first value) for rate-limit keying — use only behind a reverse proxy that overwrites the header. When `false` (default) the limiter keys on the unspoofable socket peer address. | `false` |
 | `RATE_LIMIT_PER_MINUTE` | Max requests per IP per minute (`0` = unlimited) | `300` |
 | `MAX_BODY_SIZE_MB` | Maximum request body in megabytes | `4` |
 | `BIND_ADDR` | Listen address for the API server | `0.0.0.0:8081` |

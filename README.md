@@ -48,13 +48,13 @@ docker compose up
 
 ### Local development (web mode)
 
-**Prerequisites:** Rust 1.80+, Node 22+, pnpm
+**Prerequisites:** Rust 1.80+, Node 20+, pnpm
 
 ```sh
 # Start the API (SQLite, binds to 0.0.0.0:8080 by default)
 cargo run -p radar-api -- --db sqlite:drift.db
 
-# In another terminal — start the UI dev server (proxies /v1 to :8081)
+# In another terminal — start the UI dev server on :6173 (proxies /v1 to :17380)
 pnpm dev:ui
 
 # CLI
@@ -198,7 +198,8 @@ Confidence affects the policy engine: `closed` mode blocks when at least one **h
 | `BIND_ADDR` | Listen address for web/Docker mode | `0.0.0.0:8080` |
 | `RADAR_API_BIN` | Override sidecar binary path in Electron desktop dev mode | _(auto-resolved)_ |
 | `RADAR_REQUIRE_AUTH` | Reject unauthenticated requests (`true`/`1`) | `false` |
-| `RADAR_SERVICE_TOKEN` | Static bearer token for API auth | — |
+| `RADAR_SERVICE_TOKEN` | Static bearer token required on all `/v1` requests when set (clients pass `Authorization: Bearer <token>`). The Electron desktop app generates and sets this automatically for its local sidecar. | — |
+| `RADAR_TRUST_PROXY` | When `true`, trust the `X-Forwarded-For` header for rate-limit keying (use only behind a trusted reverse proxy). When `false` (default) the socket peer address is used. | `false` |
 | `RADAR_JWT_SECRET` | HS256 secret for JWT auth (`org_id` claim for tenancy) | — |
 | `RADAR_OIDC_PROVIDER_URL` | OIDC provider base URL (e.g. `https://accounts.google.com`) | — |
 | `RADAR_OIDC_CLIENT_ID` | OIDC client ID | — |
@@ -215,6 +216,11 @@ Confidence affects the policy engine: `closed` mode blocks when at least one **h
 | `JIRA_EMAIL` | Jira auth email | — |
 | `JIRA_TOKEN` | Jira API token | — |
 | `POSTMAN_API_KEY` | Push collections to Postman | — |
+
+> **Catalog source tokens.** A catalog source's `token_env` field may only name an
+> environment variable whose name is prefixed with `RADAR_CATALOG_TOKEN_` (e.g.
+> `RADAR_CATALOG_TOKEN_ACME`). Names outside this allowlist are rejected, so the
+> service can never be tricked into reading an arbitrary process environment variable.
 
 ## Workspace layout
 

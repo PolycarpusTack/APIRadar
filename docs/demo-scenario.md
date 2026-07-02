@@ -13,7 +13,7 @@ Without Radar, the PR would merge and both consumers would break silently in pro
 
 ## Prerequisites
 
-- Docker (for the quickest path) or Rust 1.80+ + Node 22+ for local dev
+- Docker (for the quickest path) or Rust 1.80+ + Node 20+ for local dev
 - `curl` and `jq`
 
 ## Step 1 — Start Radar
