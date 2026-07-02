@@ -286,3 +286,4 @@ GET  /v1/csv-runs/{id}/results            → per-row results (with optional res
 - `09-Git-Repo-Health-Checker` — shares the "scan many repos, roll up to a dashboard" pattern
 - `24-Dependency-Lifecycle-Dashboard` — complementary: tracks libs; this tracks API contracts
 - `05-Code-Review-Agent` — PR-comment surface is shared; both annotate diffs with context a human missed
+# APIRadar
