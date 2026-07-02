@@ -318,6 +318,36 @@ mod tests {
         assert!(constant_time_eq(b"", b""));
     }
 
+    // N-26 linchpin: confirm `$1`/`$2` positional placeholders bind correctly on
+    // SQLite via AnyPool — the prerequisite for converting the codebase's `?`
+    // placeholders to `$N` so the same queries also run on PostgreSQL (sqlx Any
+    // does not translate `?` for Postgres).
+    #[tokio::test]
+    async fn dollar_placeholders_bind_on_sqlite_via_any() {
+        sqlx::any::install_default_drivers();
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1) // one shared connection so :memory: keeps the table
+            .connect("sqlite::memory:")
+            .await
+            .expect("pool");
+        sqlx::query("CREATE TABLE t (id TEXT, n INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t (id, n) VALUES ($1, $2)")
+            .bind("a")
+            .bind(5_i64)
+            .execute(&pool)
+            .await
+            .expect("$N insert must bind on sqlite-via-Any");
+        let row: (String, i64) = sqlx::query_as("SELECT id, n FROM t WHERE id = $1")
+            .bind("a")
+            .fetch_one(&pool)
+            .await
+            .expect("$N select must bind on sqlite-via-Any");
+        assert_eq!(row, ("a".to_string(), 5));
+    }
+
     #[test]
     fn unit_sample_spans_full_range() {
         // The regression guard for the divisor bug: the old code divided by
