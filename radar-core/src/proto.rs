@@ -29,10 +29,26 @@ pub struct ProtoEnum {
     pub values: Vec<(String, i32)>,
 }
 
+/// A single `rpc` method within a service.
+#[derive(Debug, Clone)]
+pub struct ProtoRpc {
+    pub name: String,
+    pub input_type: String,
+    pub output_type: String,
+}
+
+/// A gRPC `service { rpc … }` block.
+#[derive(Debug, Clone)]
+pub struct ProtoService {
+    pub name: String,
+    pub rpcs: Vec<ProtoRpc>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProtoSchema {
     pub messages: HashMap<String, ProtoMessage>,
     pub enums: HashMap<String, ProtoEnum>,
+    pub services: HashMap<String, ProtoService>,
 }
 
 // ---------------------------------------------------------------------------
@@ -42,14 +58,22 @@ pub struct ProtoSchema {
 pub fn parse_proto(content: &str) -> Result<ProtoSchema, DriftError> {
     let stripped = strip_comments(content);
     let mut schema = ProtoSchema::default();
-    parse_body(stripped.as_bytes(), &mut schema);
+    // Messages/enums/services are keyed by their package-qualified name so that
+    // same-named types in different packages do not collide.
+    let package = find_package(&stripped).unwrap_or_default();
+    let mut pos = 0usize;
+    parse_scope(stripped.as_bytes(), &mut pos, &package, &mut schema, true);
 
     // Reject input that does not look like protobuf at all. Without this a wrong
     // format (e.g. an OpenAPI YAML passed with --format proto) or a corrupted
     // file parses to an empty schema and is silently reported as "no changes".
     // A valid-but-empty proto (`syntax = "proto3";` with no messages) is still
     // accepted because it carries a syntax declaration.
-    if schema.messages.is_empty() && schema.enums.is_empty() && !has_proto_syntax(&stripped) {
+    if schema.messages.is_empty()
+        && schema.enums.is_empty()
+        && schema.services.is_empty()
+        && !has_proto_syntax(&stripped)
+    {
         return Err(DriftError::Parse(
             "input does not appear to be a protobuf schema \
              (no syntax declaration, message, or enum found)"
@@ -58,6 +82,33 @@ pub fn parse_proto(content: &str) -> Result<ProtoSchema, DriftError> {
     }
 
     Ok(schema)
+}
+
+/// Find the `package foo.bar;` declaration (comment-stripped), if any. Statements
+/// end at ';', so scan by statement rather than by line (protos are often on one
+/// line).
+fn find_package(stripped: &str) -> Option<String> {
+    for seg in stripped.split(';') {
+        let t = seg.trim();
+        if let Some(rest) = t.strip_prefix("package") {
+            if rest.starts_with(|c: char| c.is_whitespace()) {
+                let name = rest.trim();
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Combine a package/message prefix with a local name (`""` prefix ⇒ bare name).
+fn qualify(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}.{name}")
+    }
 }
 
 /// True when the (comment-stripped) input contains a `syntax = "proto…"` line.
@@ -115,55 +166,301 @@ fn strip_comments(s: &str) -> String {
     out
 }
 
-/// Scan bytes and extract top-level message/enum blocks.
-fn parse_body(bytes: &[u8], schema: &mut ProtoSchema) {
-    let mut pos = 0;
+/// Parse a sequence of definitions. At the top level (`top_level == true`) this
+/// runs to end-of-input; inside a `{ … }` block it stops after the matching `}`.
+/// `prefix` is the package/outer-message qualifier applied to declared names.
+fn parse_scope(
+    bytes: &[u8],
+    pos: &mut usize,
+    prefix: &str,
+    schema: &mut ProtoSchema,
+    top_level: bool,
+) {
+    loop {
+        skip_ws(bytes, pos);
+        if *pos >= bytes.len() {
+            break;
+        }
+        if bytes[*pos] == b'}' {
+            *pos += 1; // end of this nested scope
+            if !top_level {
+                break;
+            }
+            continue; // stray brace at top level — ignore
+        }
 
-    while pos < bytes.len() {
-        skip_ws(bytes, &mut pos);
-        if pos >= bytes.len() {
+        if word_at(bytes, *pos, b"message") {
+            *pos += 7;
+            parse_message(bytes, pos, prefix, schema);
+        } else if word_at(bytes, *pos, b"enum") {
+            *pos += 4;
+            parse_enum(bytes, pos, prefix, schema);
+        } else if word_at(bytes, *pos, b"service") {
+            *pos += 7;
+            parse_service(bytes, pos, prefix, schema);
+        } else {
+            // Skip an unremarkable statement (syntax/package/import/option) up to
+            // its ';' or newline. If it opens a block, skip the balanced block.
+            while *pos < bytes.len()
+                && bytes[*pos] != b';'
+                && bytes[*pos] != b'\n'
+                && bytes[*pos] != b'{'
+                && bytes[*pos] != b'}'
+            {
+                *pos += 1;
+            }
+            if *pos < bytes.len() {
+                match bytes[*pos] {
+                    b'{' => skip_balanced_block(bytes, pos),
+                    b'}' => { /* handled at loop top */ }
+                    _ => *pos += 1, // consume ';' or '\n'
+                }
+            }
+        }
+    }
+}
+
+/// Parse a `message` body (pos is just after the `message` keyword). Recurses
+/// into nested messages/enums and captures `oneof` members as fields.
+fn parse_message(bytes: &[u8], pos: &mut usize, prefix: &str, schema: &mut ProtoSchema) {
+    skip_ws(bytes, pos);
+    let name = read_ident(bytes, pos);
+    skip_ws(bytes, pos);
+    if *pos >= bytes.len() || bytes[*pos] != b'{' {
+        return;
+    }
+    *pos += 1; // consume '{'
+    let full_name = qualify(prefix, &name);
+    let mut fields = Vec::new();
+
+    loop {
+        skip_ws(bytes, pos);
+        if *pos >= bytes.len() {
+            break;
+        }
+        if bytes[*pos] == b'}' {
+            *pos += 1;
             break;
         }
 
-        if word_at(bytes, pos, b"message") {
-            pos += 7;
-            skip_ws(bytes, &mut pos);
-            let name = read_ident(bytes, &mut pos);
-            skip_ws(bytes, &mut pos);
-            if pos < bytes.len() && bytes[pos] == b'{' {
-                pos += 1;
-                let (fields, end) = read_message_body(bytes, pos);
-                if !name.is_empty() {
-                    schema
-                        .messages
-                        .insert(name.clone(), ProtoMessage { name, fields });
-                }
-                pos = end;
+        if word_at(bytes, *pos, b"message") {
+            *pos += 7;
+            parse_message(bytes, pos, &full_name, schema);
+        } else if word_at(bytes, *pos, b"enum") {
+            *pos += 4;
+            parse_enum(bytes, pos, &full_name, schema);
+        } else if word_at(bytes, *pos, b"oneof") {
+            *pos += 5;
+            skip_ws(bytes, pos);
+            let _oneof_name = read_ident(bytes, pos);
+            skip_ws(bytes, pos);
+            if *pos < bytes.len() && bytes[*pos] == b'{' {
+                *pos += 1;
+                read_oneof_fields(bytes, pos, &mut fields);
             }
-        } else if word_at(bytes, pos, b"enum") {
-            pos += 4;
-            skip_ws(bytes, &mut pos);
-            let name = read_ident(bytes, &mut pos);
-            skip_ws(bytes, &mut pos);
-            if pos < bytes.len() && bytes[pos] == b'{' {
-                pos += 1;
-                let (values, end) = read_enum_body(bytes, pos);
-                if !name.is_empty() {
-                    schema
-                        .enums
-                        .insert(name.clone(), ProtoEnum { name, values });
-                }
-                pos = end;
-            }
+        } else if word_at(bytes, *pos, b"reserved") || word_at(bytes, *pos, b"option") {
+            skip_statement(bytes, pos);
         } else {
-            // Skip to end of statement (';') or end of line, whichever comes first.
-            while pos < bytes.len() && bytes[pos] != b';' && bytes[pos] != b'\n' {
-                pos += 1;
+            // Field statement up to ';' / '{' / '}'.
+            let stmt_start = *pos;
+            while *pos < bytes.len()
+                && bytes[*pos] != b';'
+                && bytes[*pos] != b'{'
+                && bytes[*pos] != b'}'
+            {
+                *pos += 1;
             }
-            if pos < bytes.len() {
-                pos += 1; // consume ';' or '\n'
+            if *pos < bytes.len() && bytes[*pos] == b'{' {
+                // An unexpected block (e.g. a group) — skip it balanced.
+                skip_balanced_block(bytes, pos);
+            } else {
+                let stmt = String::from_utf8_lossy(&bytes[stmt_start..*pos]).into_owned();
+                if *pos < bytes.len() && bytes[*pos] == b';' {
+                    *pos += 1;
+                }
+                if let Some(f) = parse_field_stmt(&stmt) {
+                    fields.push(f);
+                }
             }
         }
+    }
+
+    if !name.is_empty() {
+        schema.messages.insert(
+            full_name.clone(),
+            ProtoMessage {
+                name: full_name,
+                fields,
+            },
+        );
+    }
+}
+
+/// Parse an `enum` body (pos is just after the `enum` keyword).
+fn parse_enum(bytes: &[u8], pos: &mut usize, prefix: &str, schema: &mut ProtoSchema) {
+    skip_ws(bytes, pos);
+    let name = read_ident(bytes, pos);
+    skip_ws(bytes, pos);
+    if *pos >= bytes.len() || bytes[*pos] != b'{' {
+        return;
+    }
+    *pos += 1; // consume '{'
+    let full_name = qualify(prefix, &name);
+    let mut values = Vec::new();
+
+    loop {
+        skip_ws(bytes, pos);
+        if *pos >= bytes.len() {
+            break;
+        }
+        if bytes[*pos] == b'}' {
+            *pos += 1;
+            break;
+        }
+        if word_at(bytes, *pos, b"option") || word_at(bytes, *pos, b"reserved") {
+            skip_statement(bytes, pos);
+            continue;
+        }
+        let stmt_start = *pos;
+        while *pos < bytes.len() && bytes[*pos] != b';' && bytes[*pos] != b'}' {
+            *pos += 1;
+        }
+        let stmt = String::from_utf8_lossy(&bytes[stmt_start..*pos]).into_owned();
+        if *pos < bytes.len() && bytes[*pos] == b';' {
+            *pos += 1;
+        }
+        if let Some(v) = parse_enum_value_stmt(&stmt) {
+            values.push(v);
+        }
+    }
+
+    if !name.is_empty() {
+        schema.enums.insert(
+            full_name.clone(),
+            ProtoEnum {
+                name: full_name,
+                values,
+            },
+        );
+    }
+}
+
+/// Parse a `service` body (pos is just after the `service` keyword).
+fn parse_service(bytes: &[u8], pos: &mut usize, prefix: &str, schema: &mut ProtoSchema) {
+    skip_ws(bytes, pos);
+    let name = read_ident(bytes, pos);
+    skip_ws(bytes, pos);
+    if *pos >= bytes.len() || bytes[*pos] != b'{' {
+        return;
+    }
+    *pos += 1; // consume '{'
+    let full_name = qualify(prefix, &name);
+    let mut rpcs = Vec::new();
+
+    loop {
+        skip_ws(bytes, pos);
+        if *pos >= bytes.len() {
+            break;
+        }
+        if bytes[*pos] == b'}' {
+            *pos += 1;
+            break;
+        }
+        if word_at(bytes, *pos, b"rpc") {
+            *pos += 3;
+            skip_ws(bytes, pos);
+            let rpc_name = read_ident(bytes, pos);
+            // Read the signature up to the method's '{' (with options) or ';'.
+            let sig_start = *pos;
+            while *pos < bytes.len() && bytes[*pos] != b'{' && bytes[*pos] != b';' {
+                *pos += 1;
+            }
+            let sig = String::from_utf8_lossy(&bytes[sig_start..*pos]).into_owned();
+            if *pos < bytes.len() && bytes[*pos] == b'{' {
+                skip_balanced_block(bytes, pos);
+            } else if *pos < bytes.len() && bytes[*pos] == b';' {
+                *pos += 1;
+            }
+            let (input_type, output_type) = parse_rpc_sig(&sig);
+            if !rpc_name.is_empty() {
+                rpcs.push(ProtoRpc {
+                    name: rpc_name,
+                    input_type,
+                    output_type,
+                });
+            }
+        } else {
+            // option / other statement inside the service body.
+            skip_statement(bytes, pos);
+        }
+    }
+
+    if !name.is_empty() {
+        schema.services.insert(
+            full_name.clone(),
+            ProtoService {
+                name: full_name,
+                rpcs,
+            },
+        );
+    }
+}
+
+/// Parse an rpc signature `(stream? Input) returns (stream? Output)` into
+/// (input_type, output_type). Unparsed pieces yield empty strings.
+fn parse_rpc_sig(sig: &str) -> (String, String) {
+    fn inner(s: &str) -> String {
+        s.trim()
+            .trim_start_matches("stream")
+            .trim()
+            .trim_start_matches('.')
+            .to_string()
+    }
+    let mut input = String::new();
+    let mut output = String::new();
+    if let Some(o1) = sig.find('(') {
+        if let Some(c1_rel) = sig[o1 + 1..].find(')') {
+            let c1 = o1 + 1 + c1_rel;
+            input = inner(&sig[o1 + 1..c1]);
+            let rest = &sig[c1 + 1..];
+            if let Some(o2) = rest.find('(') {
+                if let Some(c2_rel) = rest[o2 + 1..].find(')') {
+                    let c2 = o2 + 1 + c2_rel;
+                    output = inner(&rest[o2 + 1..c2]);
+                }
+            }
+        }
+    }
+    (input, output)
+}
+
+/// Skip a statement up to (and including) its terminating ';' or newline.
+fn skip_statement(bytes: &[u8], pos: &mut usize) {
+    while *pos < bytes.len() && bytes[*pos] != b';' && bytes[*pos] != b'\n' && bytes[*pos] != b'}' {
+        *pos += 1;
+    }
+    if *pos < bytes.len() && (bytes[*pos] == b';' || bytes[*pos] == b'\n') {
+        *pos += 1;
+    }
+}
+
+/// Skip a balanced `{ … }` block. `pos` must point at the opening `{`.
+fn skip_balanced_block(bytes: &[u8], pos: &mut usize) {
+    let mut depth = 0usize;
+    while *pos < bytes.len() {
+        match bytes[*pos] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                *pos += 1;
+                if depth == 0 {
+                    break;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        *pos += 1;
     }
 }
 
@@ -198,65 +495,6 @@ fn word_at(bytes: &[u8], pos: usize, word: &[u8]) -> bool {
     )
 }
 
-/// Read message body (after opening `{`), returning (fields, pos_after_closing_brace).
-fn read_message_body(bytes: &[u8], start: usize) -> (Vec<ProtoField>, usize) {
-    let mut fields = Vec::new();
-    let mut pos = start;
-    let mut depth = 1usize;
-
-    while pos < bytes.len() && depth > 0 {
-        skip_ws(bytes, &mut pos);
-        if pos >= bytes.len() {
-            break;
-        }
-
-        match bytes[pos] {
-            b'{' => {
-                depth += 1;
-                pos += 1;
-            }
-            b'}' => {
-                depth -= 1;
-                pos += 1;
-            }
-            _ if depth == 1 => {
-                // Read statement up to ';', '{', or '}'
-                let stmt_start = pos;
-                while pos < bytes.len()
-                    && bytes[pos] != b';'
-                    && bytes[pos] != b'{'
-                    && bytes[pos] != b'}'
-                {
-                    pos += 1;
-                }
-                let stmt = String::from_utf8_lossy(&bytes[stmt_start..pos]).into_owned();
-
-                // `oneof <name> { <fields> }` — its members share the message's
-                // field-number space, so parse them as fields of this message
-                // rather than skipping the nested block.
-                if pos < bytes.len() && bytes[pos] == b'{' && stmt.trim_start().starts_with("oneof")
-                {
-                    pos += 1; // consume '{'
-                    read_oneof_fields(bytes, &mut pos, &mut fields);
-                    continue;
-                }
-
-                if pos < bytes.len() && bytes[pos] == b';' {
-                    pos += 1; // consume ';'
-                }
-                if let Some(f) = parse_field_stmt(&stmt) {
-                    fields.push(f);
-                }
-            }
-            _ => {
-                pos += 1;
-            }
-        }
-    }
-
-    (fields, pos)
-}
-
 /// Read the fields inside a `oneof { … }` block (pos is just after the `{`),
 /// pushing each into `fields` and leaving pos just after the closing `}`.
 fn read_oneof_fields(bytes: &[u8], pos: &mut usize, fields: &mut Vec<ProtoField>) {
@@ -281,53 +519,6 @@ fn read_oneof_fields(bytes: &[u8], pos: &mut usize, fields: &mut Vec<ProtoField>
             fields.push(f);
         }
     }
-}
-
-/// Read enum body (after opening `{`), returning (values, pos_after_closing_brace).
-fn read_enum_body(bytes: &[u8], start: usize) -> (Vec<(String, i32)>, usize) {
-    let mut values = Vec::new();
-    let mut pos = start;
-    let mut depth = 1usize;
-
-    while pos < bytes.len() && depth > 0 {
-        skip_ws(bytes, &mut pos);
-        if pos >= bytes.len() {
-            break;
-        }
-
-        match bytes[pos] {
-            b'{' => {
-                depth += 1;
-                pos += 1;
-            }
-            b'}' => {
-                depth -= 1;
-                pos += 1;
-            }
-            _ if depth == 1 => {
-                let stmt_start = pos;
-                while pos < bytes.len()
-                    && bytes[pos] != b';'
-                    && bytes[pos] != b'{'
-                    && bytes[pos] != b'}'
-                {
-                    pos += 1;
-                }
-                let stmt = String::from_utf8_lossy(&bytes[stmt_start..pos]).into_owned();
-                if pos < bytes.len() && bytes[pos] == b';' {
-                    pos += 1;
-                }
-                if let Some(v) = parse_enum_value_stmt(&stmt) {
-                    values.push(v);
-                }
-            }
-            _ => {
-                pos += 1;
-            }
-        }
-    }
-
-    (values, pos)
 }
 
 /// Parse a proto3 field statement like `string name = 1` (without trailing `;`).
@@ -492,7 +683,71 @@ pub fn diff_proto(base: &ProtoSchema, head: &ProtoSchema) -> Vec<DiffChange> {
         }
     }
 
+    // Services / RPCs
+    for (name, base_svc) in &base.services {
+        match head.services.get(name) {
+            None => changes.push(DiffChange {
+                path: format!("service {name}"),
+                kind: ChangeKind::OperationRemoved,
+                severity: Severity::Breaking,
+                description: Some(format!("Service '{name}' was removed")),
+            }),
+            Some(head_svc) => diff_service(base_svc, head_svc, &mut changes),
+        }
+    }
+    for name in head.services.keys() {
+        if !base.services.contains_key(name) {
+            changes.push(DiffChange {
+                path: format!("service {name}"),
+                kind: ChangeKind::OperationAdded,
+                severity: Severity::Safe,
+                description: Some(format!("Service '{name}' was added")),
+            });
+        }
+    }
+
     changes
+}
+
+fn diff_service(base: &ProtoService, head: &ProtoService, changes: &mut Vec<DiffChange>) {
+    let base_by_name: HashMap<&str, &ProtoRpc> =
+        base.rpcs.iter().map(|r| (r.name.as_str(), r)).collect();
+    let head_by_name: HashMap<&str, &ProtoRpc> =
+        head.rpcs.iter().map(|r| (r.name.as_str(), r)).collect();
+
+    for (name, brpc) in &base_by_name {
+        match head_by_name.get(name) {
+            None => changes.push(DiffChange {
+                path: format!("{}.{}", base.name, name),
+                kind: ChangeKind::OperationRemoved,
+                severity: Severity::Breaking,
+                description: Some(format!("RPC '{}.{}' was removed", base.name, name)),
+            }),
+            Some(hrpc) => {
+                if brpc.input_type != hrpc.input_type || brpc.output_type != hrpc.output_type {
+                    changes.push(DiffChange {
+                        path: format!("{}.{}", base.name, name),
+                        kind: ChangeKind::TypeChanged,
+                        severity: Severity::Breaking,
+                        description: Some(format!(
+                            "RPC '{}.{}' signature changed from ({}) returns ({}) to ({}) returns ({})",
+                            base.name, name, brpc.input_type, brpc.output_type, hrpc.input_type, hrpc.output_type
+                        )),
+                    });
+                }
+            }
+        }
+    }
+    for (name, hrpc) in &head_by_name {
+        if !base_by_name.contains_key(name) {
+            changes.push(DiffChange {
+                path: format!("{}.{}", head.name, name),
+                kind: ChangeKind::OperationAdded,
+                severity: Severity::Safe,
+                description: Some(format!("RPC '{}.{}' was added", head.name, hrpc.name)),
+            });
+        }
+    }
 }
 
 fn diff_message(base: &ProtoMessage, head: &ProtoMessage, changes: &mut Vec<DiffChange>) {
@@ -556,26 +811,42 @@ fn diff_message(base: &ProtoMessage, head: &ProtoMessage, changes: &mut Vec<Diff
 }
 
 fn diff_enum(base: &ProtoEnum, head: &ProtoEnum, changes: &mut Vec<DiffChange>) {
-    let base_names: std::collections::HashSet<&str> =
-        base.values.iter().map(|(n, _)| n.as_str()).collect();
-    let head_names: std::collections::HashSet<&str> =
-        head.values.iter().map(|(n, _)| n.as_str()).collect();
+    let base_by_name: HashMap<&str, i32> =
+        base.values.iter().map(|(n, v)| (n.as_str(), *v)).collect();
+    let head_by_name: HashMap<&str, i32> =
+        head.values.iter().map(|(n, v)| (n.as_str(), *v)).collect();
 
-    for name in base_names.difference(&head_names) {
-        changes.push(DiffChange {
-            path: format!("{}.{name}", base.name),
-            kind: ChangeKind::FieldRemoved,
-            severity: Severity::Breaking,
-            description: Some(format!("Enum value '{}.{name}' was removed", base.name)),
-        });
+    for (name, bnum) in &base_by_name {
+        match head_by_name.get(name) {
+            None => changes.push(DiffChange {
+                path: format!("{}.{name}", base.name),
+                kind: ChangeKind::FieldRemoved,
+                severity: Severity::Breaking,
+                description: Some(format!("Enum value '{}.{name}' was removed", base.name)),
+            }),
+            Some(hnum) if hnum != bnum => changes.push(DiffChange {
+                // The number is the wire identity of an enum value — a change breaks
+                // any peer that already serialized the old number.
+                path: format!("{}.{name}", base.name),
+                kind: ChangeKind::TypeChanged,
+                severity: Severity::Breaking,
+                description: Some(format!(
+                    "Enum value '{}.{name}' number changed from {bnum} to {hnum}",
+                    base.name
+                )),
+            }),
+            Some(_) => {}
+        }
     }
-    for name in head_names.difference(&base_names) {
-        changes.push(DiffChange {
-            path: format!("{}.{name}", base.name),
-            kind: ChangeKind::FieldAdded,
-            severity: Severity::Safe,
-            description: Some(format!("Enum value '{}.{name}' was added", base.name)),
-        });
+    for name in head_by_name.keys() {
+        if !base_by_name.contains_key(name) {
+            changes.push(DiffChange {
+                path: format!("{}.{name}", base.name),
+                kind: ChangeKind::FieldAdded,
+                severity: Severity::Safe,
+                description: Some(format!("Enum value '{}.{name}' was added", base.name)),
+            });
+        }
     }
 }
 
@@ -755,6 +1026,112 @@ mod tests {
             changed.len(),
             1,
             "map value type change must be detected, got: {changes:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // N-6: removing an rpc from a service → Breaking OperationRemoved
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_rpc_removed_is_breaking() {
+        let base = parse(
+            r#"syntax="proto3";
+               message Req { string q = 1; }
+               message Resp { string a = 1; }
+               service Search {
+                 rpc DoSearch(Req) returns (Resp);
+                 rpc Ping(Req) returns (Resp);
+               }"#,
+        );
+        let head = parse(
+            r#"syntax="proto3";
+               message Req { string q = 1; }
+               message Resp { string a = 1; }
+               service Search {
+                 rpc DoSearch(Req) returns (Resp);
+               }"#,
+        );
+        let changes = diff_proto(&base, &head);
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::OperationRemoved && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            removed.len(),
+            1,
+            "rpc removal must be a Breaking OperationRemoved, got: {changes:?}"
+        );
+        assert!(removed[0].path.contains("Ping"));
+    }
+
+    // -----------------------------------------------------------------------
+    // N-6: an enum value's number change is wire-breaking
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_enum_number_change_is_breaking() {
+        let base = parse(r#"syntax="proto3"; enum Status { ACTIVE = 0; INACTIVE = 1; }"#);
+        let head = parse(r#"syntax="proto3"; enum Status { ACTIVE = 0; INACTIVE = 2; }"#);
+        let changes = diff_proto(&base, &head);
+        let changed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            changed.len(),
+            1,
+            "enum value number change must be Breaking, got: {changes:?}"
+        );
+        assert!(changed[0].path.contains("INACTIVE"));
+    }
+
+    // -----------------------------------------------------------------------
+    // N-6: a field removed from a nested message is detected
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_nested_message_field_removed_is_breaking() {
+        let base = parse(
+            r#"syntax="proto3";
+               message Outer {
+                 string id = 1;
+                 message Inner { string a = 1; string b = 2; }
+               }"#,
+        );
+        let head = parse(
+            r#"syntax="proto3";
+               message Outer {
+                 string id = 1;
+                 message Inner { string a = 1; }
+               }"#,
+        );
+        let changes = diff_proto(&base, &head);
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::FieldRemoved && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            removed.len(),
+            1,
+            "nested-message field removal must be detected, got: {changes:?}"
+        );
+        assert!(removed[0].path.contains("Inner"));
+    }
+
+    // -----------------------------------------------------------------------
+    // N-6: same-named messages in different packages must not collide
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_package_qualified_message_keys() {
+        let a = parse(r#"syntax="proto3"; package foo; message User { string id = 1; }"#);
+        let b = parse(r#"syntax="proto3"; package bar; message User { string id = 1; }"#);
+        assert!(
+            a.messages.contains_key("foo.User"),
+            "keys: {:?}",
+            a.messages.keys()
+        );
+        assert!(
+            b.messages.contains_key("bar.User"),
+            "keys: {:?}",
+            b.messages.keys()
         );
     }
 }

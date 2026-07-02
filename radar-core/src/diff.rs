@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use openapiv3::{
-    OpenAPI, Parameter, PathItem, ReferenceOr, RequestBody, Response, Schema, SchemaKind,
-    StatusCode, Type,
+    AdditionalProperties, ObjectType, OpenAPI, Parameter, PathItem, ReferenceOr, RequestBody,
+    Response, Schema, SchemaKind, StatusCode, Type, VariantOrUnknownOrEmpty,
 };
 
 use crate::{
@@ -29,6 +29,15 @@ fn resolve_boxed_schema<'a>(
 ) -> Option<&'a Schema> {
     match r {
         ReferenceOr::Item(s) => Some(s.as_ref()),
+        ReferenceOr::Reference { reference } => resolve_schema(spec, reference),
+    }
+}
+
+/// Resolve a `ReferenceOr<Schema>` (used for composed-schema members) to a
+/// `&Schema`, following a single local component `$ref`.
+fn resolve_ref_or_schema<'a>(spec: &'a OpenAPI, r: &'a ReferenceOr<Schema>) -> Option<&'a Schema> {
+    match r {
+        ReferenceOr::Item(s) => Some(s),
         ReferenceOr::Reference { reference } => resolve_schema(spec, reference),
     }
 }
@@ -340,9 +349,10 @@ fn diff_parameters(
     // Param type changed → Breaking TypeChanged
     for (key, base_p) in &base_params {
         if let Some(head_p) = head_params.get(key) {
-            if let (Some(base_type), Some(head_type)) =
-                (param_type_label(base_p), param_type_label(head_p))
-            {
+            if let (Some(base_type), Some(head_type)) = (
+                param_type_label(base_p, base_spec),
+                param_type_label(head_p, head_spec),
+            ) {
                 if base_type != head_type {
                     changes.push(DiffChange {
                         path: format!("{} \u{2192} param.{}", op_path, key.name),
@@ -390,16 +400,19 @@ fn diff_parameters(
 }
 
 /// Extract a simple type label string from a parameter's schema, if possible.
-fn param_type_label(p: &Parameter) -> Option<String> {
-    let schema_ref = match p.parameter_data_ref().format.clone() {
-        openapiv3::ParameterSchemaOrContent::Schema(s) => s,
-        openapiv3::ParameterSchemaOrContent::Content(_) => return None,
-    };
-    let schema = match schema_ref {
-        ReferenceOr::Item(s) => s,
-        ReferenceOr::Reference { .. } => return None,
-    };
-    type_label_from_kind(&schema.schema_kind)
+/// N-8: a parameter schema routed through a component `$ref` is now resolved so
+/// its type participates in the diff (previously refs returned `None`).
+fn param_type_label(p: &Parameter, spec: &OpenAPI) -> Option<String> {
+    match &p.parameter_data_ref().format {
+        openapiv3::ParameterSchemaOrContent::Schema(ReferenceOr::Item(s)) => {
+            type_label_from_kind(&s.schema_kind)
+        }
+        openapiv3::ParameterSchemaOrContent::Schema(ReferenceOr::Reference { reference }) => {
+            let s = resolve_schema(spec, reference)?;
+            type_label_from_kind(&s.schema_kind)
+        }
+        openapiv3::ParameterSchemaOrContent::Content(_) => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -600,7 +613,7 @@ fn diff_responses(
             }
         };
 
-        let head_resp: &Response = match head_responses.get(status) {
+        let head_resp: &Response = match find_matching_response(head_responses, status) {
             Some(ReferenceOr::Item(r)) => r,
             Some(ReferenceOr::Reference { reference }) => {
                 match resolve_response(head_spec, reference) {
@@ -701,6 +714,31 @@ fn diff_responses(
     }
 }
 
+/// Find the head response matching a base status, treating a concrete code
+/// (`'200'`) and the range covering it (`'2XX'`) as the same slot so a
+/// representation change does not read as a false `ResponseRemoved`.
+fn find_matching_response<'a>(
+    responses: &'a IndexMap<StatusCode, ReferenceOr<Response>>,
+    status: &StatusCode,
+) -> Option<&'a ReferenceOr<Response>> {
+    if let Some(r) = responses.get(status) {
+        return Some(r);
+    }
+    match status {
+        StatusCode::Code(n) => {
+            let bucket = n / 100;
+            responses.iter().find_map(|(k, v)| match k {
+                StatusCode::Range(r) if *r == bucket => Some(v),
+                _ => None,
+            })
+        }
+        StatusCode::Range(r) => responses.iter().find_map(|(k, v)| match k {
+            StatusCode::Code(n) if n / 100 == *r => Some(v),
+            _ => None,
+        }),
+    }
+}
+
 fn is_2xx(status: &StatusCode) -> bool {
     match status {
         StatusCode::Code(n) => *n >= 200 && *n < 300,
@@ -775,6 +813,51 @@ fn diff_schema_properties(
     // Enum value changes — applies to string/integer schemas
     diff_enum_values(op_path, prefix, base_schema, head_schema, changes);
 
+    // N-5: composed schemas (allOf / oneOf / anyOf). These previously fell through
+    // to the `_ => return` arm below and were entirely undiffed.
+    match (&base_schema.schema_kind, &head_schema.schema_kind) {
+        // allOf on either side → flatten each into a merged object and diff those.
+        // (A plain object flattens to itself, so a mixed object/allOf pair works.)
+        (SchemaKind::AllOf { .. }, _) | (_, SchemaKind::AllOf { .. }) => {
+            let mut base_merged = ObjectType::default();
+            let mut head_merged = ObjectType::default();
+            merge_all_of(
+                base_spec,
+                base_schema,
+                &mut base_merged,
+                &mut std::collections::HashSet::new(),
+            );
+            merge_all_of(
+                head_spec,
+                head_schema,
+                &mut head_merged,
+                &mut std::collections::HashSet::new(),
+            );
+            diff_object_types(
+                op_path,
+                prefix,
+                &base_merged,
+                &head_merged,
+                base_spec,
+                head_spec,
+                changes,
+                visited,
+            );
+            visited.remove(&self_ptr);
+            return;
+        }
+        // oneOf / anyOf → variant-position diff with add/remove detection.
+        (SchemaKind::OneOf { one_of: bv }, SchemaKind::OneOf { one_of: hv })
+        | (SchemaKind::AnyOf { any_of: bv }, SchemaKind::AnyOf { any_of: hv }) => {
+            diff_composed_variants(
+                op_path, prefix, bv, hv, base_spec, head_spec, changes, visited,
+            );
+            visited.remove(&self_ptr);
+            return;
+        }
+        _ => {}
+    }
+
     let (base_obj, head_obj) = match (&base_schema.schema_kind, &head_schema.schema_kind) {
         (SchemaKind::Type(Type::Object(b)), SchemaKind::Type(Type::Object(h))) => (b, h),
         // N-4: array-of-objects (e.g. `GET /users -> [User]`). Recurse into the
@@ -800,6 +883,116 @@ fn diff_schema_properties(
         }
     };
 
+    diff_object_types(
+        op_path, prefix, base_obj, head_obj, base_spec, head_spec, changes, visited,
+    );
+
+    visited.remove(&self_ptr);
+}
+
+/// Flatten an `allOf` (or plain object) schema into a single merged `ObjectType`,
+/// unioning member properties and `required`. Resolves each member `$ref` and
+/// recurses into nested `allOf`. `seen` guards against a recursive `$ref` cycle.
+fn merge_all_of(
+    spec: &OpenAPI,
+    schema: &Schema,
+    acc: &mut ObjectType,
+    seen: &mut std::collections::HashSet<*const Schema>,
+) {
+    if !seen.insert(schema as *const Schema) {
+        return; // cycle — stop
+    }
+    match &schema.schema_kind {
+        SchemaKind::Type(Type::Object(o)) => {
+            for (k, v) in &o.properties {
+                acc.properties.insert(k.clone(), v.clone());
+            }
+            for r in &o.required {
+                if !acc.required.contains(r) {
+                    acc.required.push(r.clone());
+                }
+            }
+            if acc.additional_properties.is_none() {
+                acc.additional_properties = o.additional_properties.clone();
+            }
+        }
+        SchemaKind::AllOf { all_of } => {
+            for member in all_of {
+                if let Some(s) = resolve_ref_or_schema(spec, member) {
+                    merge_all_of(spec, s, acc, seen);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Diff the variants of a `oneOf`/`anyOf` pair by position. Matching-position
+/// variants are diffed recursively; a removed variant narrows the contract
+/// (Breaking) and an added variant widens it (risky, not breaking).
+#[allow(clippy::too_many_arguments)]
+fn diff_composed_variants(
+    op_path: &str,
+    prefix: &str,
+    base_variants: &[ReferenceOr<Schema>],
+    head_variants: &[ReferenceOr<Schema>],
+    base_spec: &OpenAPI,
+    head_spec: &OpenAPI,
+    changes: &mut Vec<DiffChange>,
+    visited: &mut std::collections::HashSet<*const Schema>,
+) {
+    let common = base_variants.len().min(head_variants.len());
+    for i in 0..common {
+        if let (Some(bs), Some(hs)) = (
+            resolve_ref_or_schema(base_spec, &base_variants[i]),
+            resolve_ref_or_schema(head_spec, &head_variants[i]),
+        ) {
+            let variant_prefix = format!("{prefix}[{i}]");
+            diff_schema_properties(
+                op_path,
+                &variant_prefix,
+                bs,
+                hs,
+                base_spec,
+                head_spec,
+                changes,
+                visited,
+            );
+        }
+    }
+    // Removed variant(s) — the accepted/returned set shrank → Breaking.
+    for i in head_variants.len()..base_variants.len() {
+        changes.push(DiffChange {
+            path: format!("{op_path} \u{2192} {prefix}[{i}]"),
+            kind: ChangeKind::TypeChanged,
+            severity: Severity::Breaking,
+            description: Some(format!("Variant [{i}] was removed from '{prefix}'")),
+        });
+    }
+    // Added variant(s) — a wider contract → risky but not breaking.
+    for i in base_variants.len()..head_variants.len() {
+        changes.push(DiffChange {
+            path: format!("{op_path} \u{2192} {prefix}[{i}]"),
+            kind: ChangeKind::TypeChanged,
+            severity: Severity::NonBreakingRisky,
+            description: Some(format!("Variant [{i}] was added to '{prefix}'")),
+        });
+    }
+}
+
+/// Diff two object schemas: field add/remove, per-field type/required/constraint
+/// changes, `additionalProperties`, and recursion into nested objects.
+#[allow(clippy::too_many_arguments)] // object walker; args are inherent
+fn diff_object_types(
+    op_path: &str,
+    prefix: &str,
+    base_obj: &ObjectType,
+    head_obj: &ObjectType,
+    base_spec: &OpenAPI,
+    head_spec: &OpenAPI,
+    changes: &mut Vec<DiffChange>,
+    visited: &mut std::collections::HashSet<*const Schema>,
+) {
     let field_noun = if is_request_context(prefix) {
         "Request property"
     } else {
@@ -830,7 +1023,27 @@ fn diff_schema_properties(
         }
     }
 
-    // Properties present in both: compare type and requiredness
+    // N-8: additionalProperties tightened (e.g. true → false) rejects previously
+    // accepted/returned extra keys → Breaking; loosened → risky.
+    let base_addl = additional_props_label(base_obj);
+    let head_addl = additional_props_label(head_obj);
+    if base_addl != head_addl {
+        let tightened = head_addl == "false" && base_addl != "false";
+        changes.push(DiffChange {
+            path: format!("{} \u{2192} {}", op_path, prefix),
+            kind: ChangeKind::ConstraintChanged,
+            severity: if tightened {
+                Severity::Breaking
+            } else {
+                Severity::NonBreakingRisky
+            },
+            description: Some(format!(
+                "additionalProperties changed from '{base_addl}' to '{head_addl}'"
+            )),
+        });
+    }
+
+    // Properties present in both: compare type, requiredness and constraints
     for (prop_name, base_prop_ref) in &base_obj.properties {
         let head_prop_ref = match head_obj.properties.get(prop_name) {
             Some(r) => r,
@@ -866,6 +1079,8 @@ fn diff_schema_properties(
             },
         };
 
+        let prop_label = format!("{}.{}", prefix, prop_name);
+
         // Type changed? → Breaking TypeChanged
         if let (Some(base_type), Some(head_type)) = (
             type_label_from_kind(&base_prop_schema.schema_kind),
@@ -883,6 +1098,15 @@ fn diff_schema_properties(
                 });
             }
         }
+
+        // N-8: format / numeric / string constraint drift.
+        diff_scalar_constraints(
+            op_path,
+            &prop_label,
+            base_prop_schema,
+            head_prop_schema,
+            changes,
+        );
 
         // Required status changed? Severity is direction-aware: in a REQUEST body,
         // making a field required breaks clients that omit it (Breaking) and
@@ -947,8 +1171,6 @@ fn diff_schema_properties(
             visited,
         );
     }
-
-    visited.remove(&self_ptr);
 }
 
 fn diff_enum_values(
@@ -1030,6 +1252,216 @@ fn type_label_from_kind(kind: &SchemaKind) -> Option<String> {
         }),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// N-8: format / constraint / additionalProperties helpers
+// ---------------------------------------------------------------------------
+
+/// A stable label for an object's `additionalProperties` setting.
+fn additional_props_label(o: &ObjectType) -> &'static str {
+    match &o.additional_properties {
+        None => "unset",
+        Some(AdditionalProperties::Any(true)) => "true",
+        Some(AdditionalProperties::Any(false)) => "false",
+        Some(AdditionalProperties::Schema(_)) => "schema",
+    }
+}
+
+/// Extract a comparable `format` label (e.g. "Int32", "DateTime") from a schema,
+/// or `None` when no format is set / the kind carries no format.
+fn schema_format_label(schema: &Schema) -> Option<String> {
+    match &schema.schema_kind {
+        SchemaKind::Type(Type::String(s)) => variant_label(&s.format),
+        SchemaKind::Type(Type::Integer(i)) => variant_label(&i.format),
+        SchemaKind::Type(Type::Number(n)) => variant_label(&n.format),
+        _ => None,
+    }
+}
+
+fn variant_label<T: std::fmt::Debug>(f: &VariantOrUnknownOrEmpty<T>) -> Option<String> {
+    match f {
+        VariantOrUnknownOrEmpty::Empty => None,
+        VariantOrUnknownOrEmpty::Item(x) => Some(format!("{x:?}")),
+        VariantOrUnknownOrEmpty::Unknown(s) => Some(s.clone()),
+    }
+}
+
+/// Detect `format`, numeric/length and `pattern` constraint drift on a scalar
+/// property. A tightened constraint (or a new/changed pattern) is Breaking; a
+/// loosened one is risky.
+fn diff_scalar_constraints(
+    op_path: &str,
+    label: &str,
+    base: &Schema,
+    head: &Schema,
+    changes: &mut Vec<DiffChange>,
+) {
+    // format (int32→int64, date→date-time, …)
+    let bf = schema_format_label(base);
+    let hf = schema_format_label(head);
+    if bf != hf && (bf.is_some() || hf.is_some()) {
+        changes.push(DiffChange {
+            path: format!("{op_path} \u{2192} {label}"),
+            kind: ChangeKind::ConstraintChanged,
+            severity: Severity::Breaking,
+            description: Some(format!(
+                "'{label}' format changed from {} to {}",
+                bf.as_deref().unwrap_or("none"),
+                hf.as_deref().unwrap_or("none")
+            )),
+        });
+    }
+
+    match (&base.schema_kind, &head.schema_kind) {
+        (SchemaKind::Type(Type::String(b)), SchemaKind::Type(Type::String(h))) => {
+            push_bound_change(
+                op_path,
+                label,
+                "maxLength",
+                b.max_length.map(|v| v as i128),
+                h.max_length.map(|v| v as i128),
+                true,
+                changes,
+            );
+            push_bound_change(
+                op_path,
+                label,
+                "minLength",
+                b.min_length.map(|v| v as i128),
+                h.min_length.map(|v| v as i128),
+                false,
+                changes,
+            );
+            if b.pattern != h.pattern {
+                // Any pattern change/addition can reject previously valid values.
+                changes.push(DiffChange {
+                    path: format!("{op_path} \u{2192} {label}"),
+                    kind: ChangeKind::ConstraintChanged,
+                    severity: Severity::Breaking,
+                    description: Some(format!(
+                        "'{label}' pattern changed from {:?} to {:?}",
+                        b.pattern, h.pattern
+                    )),
+                });
+            }
+        }
+        (SchemaKind::Type(Type::Integer(b)), SchemaKind::Type(Type::Integer(h))) => {
+            push_bound_change(
+                op_path,
+                label,
+                "minimum",
+                b.minimum.map(i128::from),
+                h.minimum.map(i128::from),
+                false,
+                changes,
+            );
+            push_bound_change(
+                op_path,
+                label,
+                "maximum",
+                b.maximum.map(i128::from),
+                h.maximum.map(i128::from),
+                true,
+                changes,
+            );
+        }
+        (SchemaKind::Type(Type::Number(b)), SchemaKind::Type(Type::Number(h))) => {
+            push_bound_change_f64(
+                op_path, label, "minimum", b.minimum, h.minimum, false, changes,
+            );
+            push_bound_change_f64(
+                op_path, label, "maximum", b.maximum, h.maximum, true, changes,
+            );
+        }
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_bound_change(
+    op_path: &str,
+    label: &str,
+    name: &str,
+    base: Option<i128>,
+    head: Option<i128>,
+    is_upper_bound: bool,
+    changes: &mut Vec<DiffChange>,
+) {
+    if base == head {
+        return;
+    }
+    let tightened = match (base, head) {
+        (None, Some(_)) => true,  // adding a bound restricts the accepted set
+        (Some(_), None) => false, // removing a bound relaxes it
+        (Some(b), Some(h)) => {
+            if is_upper_bound {
+                h < b
+            } else {
+                h > b
+            }
+        }
+        (None, None) => return,
+    };
+    changes.push(DiffChange {
+        path: format!("{op_path} \u{2192} {label}"),
+        kind: ChangeKind::ConstraintChanged,
+        severity: if tightened {
+            Severity::Breaking
+        } else {
+            Severity::NonBreakingRisky
+        },
+        description: Some(format!(
+            "'{label}' {name} changed from {} to {}",
+            base.map(|v| v.to_string())
+                .unwrap_or_else(|| "unset".into()),
+            head.map(|v| v.to_string())
+                .unwrap_or_else(|| "unset".into()),
+        )),
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_bound_change_f64(
+    op_path: &str,
+    label: &str,
+    name: &str,
+    base: Option<f64>,
+    head: Option<f64>,
+    is_upper_bound: bool,
+    changes: &mut Vec<DiffChange>,
+) {
+    if base == head {
+        return;
+    }
+    let tightened = match (base, head) {
+        (None, Some(_)) => true,
+        (Some(_), None) => false,
+        (Some(b), Some(h)) => {
+            if is_upper_bound {
+                h < b
+            } else {
+                h > b
+            }
+        }
+        (None, None) => return,
+    };
+    changes.push(DiffChange {
+        path: format!("{op_path} \u{2192} {label}"),
+        kind: ChangeKind::ConstraintChanged,
+        severity: if tightened {
+            Severity::Breaking
+        } else {
+            Severity::NonBreakingRisky
+        },
+        description: Some(format!(
+            "'{label}' {name} changed from {} to {}",
+            base.map(|v| v.to_string())
+                .unwrap_or_else(|| "unset".into()),
+            head.map(|v| v.to_string())
+                .unwrap_or_else(|| "unset".into()),
+        )),
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -2676,6 +3108,313 @@ components:
                 .iter()
                 .any(|c| c.kind == ChangeKind::TypeChanged && c.path.contains("id")),
             "array item type change via $ref must be detected, got: {:?}",
+            changes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // N-5: allOf-composed schema — a field removed from one member is Breaking
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_allof_member_field_removed_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Base'
+                  - type: object
+                    properties:
+                      extra: { type: string }
+components:
+  schemas:
+    Base:
+      type: object
+      properties:
+        id: { type: string }
+        phone: { type: string }
+"#;
+        let head_yaml = base_yaml.replace("        phone: { type: string }\n", "");
+        let changes = diff_openapi(&parse(base_yaml), &parse(&head_yaml));
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::FieldRemoved && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            removed.len(),
+            1,
+            "allOf member field removal must be Breaking, got: {:?}",
+            changes
+        );
+        assert!(removed[0].path.contains("phone"));
+    }
+
+    // -----------------------------------------------------------------------
+    // N-5: oneOf variant removed → Breaking
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_oneof_variant_removed_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /pets:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      a: { type: string }
+                  - type: object
+                    properties:
+                      b: { type: string }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /pets:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      a: { type: string }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        let breaking: Vec<_> = changes
+            .iter()
+            .filter(|c| c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            breaking.len(),
+            1,
+            "oneOf variant removal must be Breaking, got: {:?}",
+            changes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // N-8 helpers: build a spec with a single response property of the given
+    // schema snippet, for concise constraint tests.
+    // -----------------------------------------------------------------------
+    fn spec_with_prop(prop_schema: &str) -> String {
+        format!(
+            r#"
+openapi: "3.0.0"
+info: {{ title: Test, version: "1" }}
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  field:
+{}
+"#,
+            prop_schema
+        )
+    }
+
+    // N-8: format change int32 → int64 → Breaking ConstraintChanged
+    #[test]
+    fn test_format_change_is_breaking() {
+        let base =
+            spec_with_prop("                    type: integer\n                    format: int32");
+        let head =
+            spec_with_prop("                    type: integer\n                    format: int64");
+        let changes = diff_openapi(&parse(&base), &parse(&head));
+        let c: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::ConstraintChanged && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            c.len(),
+            1,
+            "format change must be Breaking, got: {:?}",
+            changes
+        );
+    }
+
+    // N-8: maxLength tightened → Breaking ConstraintChanged
+    #[test]
+    fn test_maxlength_tightened_is_breaking() {
+        let base =
+            spec_with_prop("                    type: string\n                    maxLength: 10");
+        let head =
+            spec_with_prop("                    type: string\n                    maxLength: 5");
+        let changes = diff_openapi(&parse(&base), &parse(&head));
+        let c: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::ConstraintChanged && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            c.len(),
+            1,
+            "maxLength tightening must be Breaking, got: {:?}",
+            changes
+        );
+    }
+
+    // N-8: minimum raised → Breaking ConstraintChanged
+    #[test]
+    fn test_minimum_raised_is_breaking() {
+        let base =
+            spec_with_prop("                    type: integer\n                    minimum: 0");
+        let head =
+            spec_with_prop("                    type: integer\n                    minimum: 18");
+        let changes = diff_openapi(&parse(&base), &parse(&head));
+        let c: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::ConstraintChanged && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            c.len(),
+            1,
+            "minimum raise must be Breaking, got: {:?}",
+            changes
+        );
+    }
+
+    // N-8: pattern added → Breaking ConstraintChanged
+    #[test]
+    fn test_pattern_added_is_breaking() {
+        let base = spec_with_prop("                    type: string");
+        let head = spec_with_prop(
+            "                    type: string\n                    pattern: '^[a-z]+$'",
+        );
+        let changes = diff_openapi(&parse(&base), &parse(&head));
+        let c: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::ConstraintChanged && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            c.len(),
+            1,
+            "pattern addition must be Breaking, got: {:?}",
+            changes
+        );
+    }
+
+    // N-8: additionalProperties true → false → Breaking ConstraintChanged
+    #[test]
+    fn test_additional_properties_restricted_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                properties:
+                  id: { type: string }
+"#;
+        let head_yaml =
+            base_yaml.replace("additionalProperties: true", "additionalProperties: false");
+        let changes = diff_openapi(&parse(base_yaml), &parse(&head_yaml));
+        let c: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::ConstraintChanged && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            c.len(),
+            1,
+            "additionalProperties true→false must be Breaking, got: {:?}",
+            changes
+        );
+    }
+
+    // N-8: a parameter whose type is routed through a $ref changes → Breaking
+    #[test]
+    fn test_param_type_change_via_ref_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      parameters:
+        - name: id
+          in: query
+          schema: { $ref: '#/components/schemas/IdType' }
+      responses:
+        '200': { description: ok }
+components:
+  schemas:
+    IdType: { type: string }
+"#;
+        let head_yaml = base_yaml.replace("IdType: { type: string }", "IdType: { type: integer }");
+        let changes = diff_openapi(&parse(base_yaml), &parse(&head_yaml));
+        let c: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            c.len(),
+            1,
+            "param type change via $ref must be Breaking, got: {:?}",
+            changes
+        );
+        assert!(c[0].path.contains("id"));
+    }
+
+    // N-8: '200' vs '2XX' must not read as a false ResponseRemoved
+    #[test]
+    fn test_status_code_200_vs_2xx_no_false_removal() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200': { description: ok }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '2XX': { description: ok }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        assert!(
+            !changes
+                .iter()
+                .any(|c| c.kind == ChangeKind::ResponseRemoved),
+            "'200' vs '2XX' must not be a ResponseRemoved, got: {:?}",
             changes
         );
     }
