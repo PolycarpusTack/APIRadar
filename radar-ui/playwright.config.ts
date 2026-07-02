@@ -9,7 +9,7 @@ export default defineConfig({
   reporter: 'html',
 
   use: {
-    baseURL: process.env.RADAR_UI_URL ?? 'http://localhost:5173',
+    baseURL: process.env.RADAR_UI_URL ?? 'http://localhost:6173',
     trace: 'on-first-retry',
   },
 
@@ -23,7 +23,7 @@ export default defineConfig({
   // Start the dev server before running tests.
   webServer: {
     command: 'pnpm dev',
-    url: 'http://localhost:5173',
+    url: 'http://localhost:6173',
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,
   },

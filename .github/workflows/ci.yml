@@ -136,14 +136,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Enable pnpm via Corepack
+        run: corepack enable && corepack prepare pnpm@10.30.3 --activate
+
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'pnpm'
-
-      - name: Enable pnpm via Corepack
-        run: corepack enable && corepack prepare pnpm@10.30.3 --activate
 
       - name: Install dependencies
         run: |

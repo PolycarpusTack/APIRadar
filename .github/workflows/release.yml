@@ -72,14 +72,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Enable pnpm via Corepack
+        run: corepack enable && corepack prepare pnpm@10.30.3 --activate
+
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'pnpm'
-
-      - name: Enable pnpm via Corepack
-        run: corepack enable && corepack prepare pnpm@10.30.3 --activate
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -104,9 +104,13 @@ jobs:
       - name: Build API sidecar
         run: cargo build --release -p radar-api
 
+      - name: Build Electron main/preload bundles
+        working-directory: radar-desktop
+        run: pnpm run build
+
       - name: Build Electron installer
         working-directory: radar-desktop
-        run: pnpm electron-builder --win
+        run: pnpm run dist -- --win
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
