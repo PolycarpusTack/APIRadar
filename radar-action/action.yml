@@ -75,7 +75,10 @@ runs:
           ~/.cargo/git/db
           ${{ github.action_path }}/target/release/radar
           ${{ github.action_path }}/target/release/radar.exe
-        key: ${{ runner.os }}-radar-cli-${{ hashFiles(format('{0}/Cargo.lock', github.action_path)) }}
+        # radar-cli is built from the surrounding workspace (the action dir has no
+        # Cargo.lock), so hash the workspace lockfile. A glob returns "" instead of
+        # erroring when absent, unlike a fixed non-existent path.
+        key: ${{ runner.os }}-radar-cli-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-radar-cli-
 
