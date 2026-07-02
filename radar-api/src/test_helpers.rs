@@ -3,6 +3,22 @@ use axum::{body::Body, http::Request, http::StatusCode, Router};
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
 
+/// Resolve the DATABASE_URL for a test pool with per-test isolation in mind.
+///
+/// Any sqlite URL is forced to an isolated in-memory database: CI sets
+/// `DATABASE_URL=sqlite:ci-test.db` (a shared FILE), which would let parallel
+/// test threads see each other's rows. `sqlite::memory:` gives each pool its own
+/// database. A Postgres URL is returned unchanged and isolated per-test via a
+/// private schema (see `isolate_postgres_schema`).
+pub(crate) fn test_db_url() -> String {
+    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite::memory:".to_string());
+    if url.starts_with("sqlite") {
+        "sqlite::memory:".to_string()
+    } else {
+        url
+    }
+}
+
 /// Isolate a Postgres-backed test pool in its own private schema.
 ///
 /// On SQLite this is a no-op: each `test_pool()` already gets an independent

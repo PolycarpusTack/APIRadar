@@ -713,7 +713,8 @@ mod tests {
         sqlx::any::install_default_drivers();
         // When DATABASE_URL points at Postgres (set in the rust-postgres CI job), run
         // the full test suite against a real Postgres instance to catch SQL dialect gaps.
-        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite::memory:".to_string());
+        // sqlite URLs are forced to an isolated in-memory DB per test.
+        let url = test_helpers::test_db_url();
         let is_sqlite = url.starts_with("sqlite");
 
         let pool = sqlx::any::AnyPoolOptions::new()

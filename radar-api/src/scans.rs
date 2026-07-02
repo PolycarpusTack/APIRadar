@@ -707,7 +707,7 @@ mod tests {
 
     async fn test_pool() -> sqlx::AnyPool {
         sqlx::any::install_default_drivers();
-        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite::memory:".to_string());
+        let url = crate::test_helpers::test_db_url();
         let pool = sqlx::any::AnyPoolOptions::new()
             .max_connections(1)
             .connect(&url)
