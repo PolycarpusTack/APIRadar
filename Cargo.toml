@@ -26,7 +26,7 @@ tower-http = { version = "0.5", features = ["cors", "fs", "trace", "timeout"] }
 openapiv3 = "2"
 serde_yml = "0.0.12"
 indexmap = { version = "2", features = ["serde"] }
-colored = "2"
+colored = "3"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tower = "0.5"
 jsonwebtoken = "9"
