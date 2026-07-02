@@ -543,6 +543,7 @@ fn diff_request_body(
                         base_spec,
                         head_spec,
                         changes,
+                        &mut std::collections::HashSet::new(),
                     );
                 }
             }
@@ -681,6 +682,7 @@ fn diff_responses(
                     base_spec,
                     head_spec,
                     changes,
+                    &mut std::collections::HashSet::new(),
                 );
             }
         }
@@ -708,6 +710,7 @@ fn status_code_str(status: &StatusCode) -> String {
 /// Recursively compare the properties of two object schemas.
 /// `prefix` is the dot-separated label used after the arrow in DiffChange.path,
 /// e.g. "response" or "response.user".
+#[allow(clippy::too_many_arguments)] // recursive schema walker; args are inherent
 fn diff_schema_properties(
     op_path: &str,
     prefix: &str,
@@ -716,7 +719,18 @@ fn diff_schema_properties(
     base_spec: &OpenAPI,
     head_spec: &OpenAPI,
     changes: &mut Vec<DiffChange>,
+    // Base-schema pointers currently on the recursion path. A recursive `$ref`
+    // (e.g. `User.manager -> #/components/schemas/User`) resolves to the same
+    // component `Schema` on every level, so a repeat pointer means we are in a
+    // cycle — stop recursing to avoid a stack overflow. Sibling reuse of the same
+    // component is fine because the pointer is removed on the way back up.
+    visited: &mut std::collections::HashSet<*const Schema>,
 ) {
+    let self_ptr = base_schema as *const Schema;
+    if !visited.insert(self_ptr) {
+        return; // already an ancestor on this path — recursive schema, stop
+    }
+
     // Nullable changes — applies to any schema kind
     let base_nullable = base_schema.schema_data.nullable;
     let head_nullable = head_schema.schema_data.nullable;
@@ -751,7 +765,10 @@ fn diff_schema_properties(
 
     let (base_obj, head_obj) = match (&base_schema.schema_kind, &head_schema.schema_kind) {
         (SchemaKind::Type(Type::Object(b)), SchemaKind::Type(Type::Object(h))) => (b, h),
-        _ => return,
+        _ => {
+            visited.remove(&self_ptr);
+            return;
+        }
     };
 
     let field_noun = if is_request_context(prefix) {
@@ -898,8 +915,11 @@ fn diff_schema_properties(
             base_spec,
             head_spec,
             changes,
+            visited,
         );
     }
+
+    visited.remove(&self_ptr);
 }
 
 fn diff_enum_values(
@@ -2492,5 +2512,51 @@ paths:
             changes
         );
         assert!(removed[0].path.contains("tenant"));
+    }
+
+    // -----------------------------------------------------------------------
+    // N-1: a recursive $ref schema must not stack-overflow
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_recursive_ref_schema_does_not_overflow() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users/{id}:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+components:
+  schemas:
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        manager: { $ref: '#/components/schemas/User' }
+"#;
+        // Head is identical except the id type changes — this forces recursion
+        // into the self-referential `manager` chain while still having a change
+        // to detect at the top level.
+        let head_yaml = base_yaml.replace("id: { type: string }", "id: { type: integer }");
+        let base = parse(base_yaml);
+        let head = parse(&head_yaml);
+
+        // Must return (not stack-overflow) and detect the id type change exactly once.
+        let changes = diff_openapi(&base, &head);
+        let type_changed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::TypeChanged && c.path.contains("id"))
+            .collect();
+        assert_eq!(
+            type_changed.len(),
+            1,
+            "recursive schema must be diffed once without overflow, got: {:?}",
+            changes
+        );
     }
 }
