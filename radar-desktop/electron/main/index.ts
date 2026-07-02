@@ -1,14 +1,24 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import { join } from 'path'
 import { spawn, spawnSync } from 'child_process'
 import type { ChildProcess } from 'child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, createWriteStream, renameSync } from 'fs'
 import type { WriteStream } from 'fs'
 import { tmpdir } from 'os'
+import { randomBytes } from 'crypto'
 
 // ── API sidecar ────────────────────────────────────────────────────────────────
 
 let apiProcess: ChildProcess | null = null
+let mainWindow: BrowserWindow | null = null
+let isQuitting = false
+let restartAttempted = false
+
+// Per-session bearer token for the loopback sidecar. The renderer fetches it
+// over IPC (`get-api-token`) and attaches it as `Authorization: Bearer …` on
+// every /v1 request. Setting RADAR_SERVICE_TOKEN puts radar-api in legacy
+// static-token auth mode. Never logged — it is a secret.
+const sessionToken = randomBytes(32).toString('hex')
 
 function userDataDir(): string {
   return app.getPath('userData')
@@ -30,19 +40,48 @@ function pidFilePath(): string {
   return join(userDataDir(), 'radar-api.pid')
 }
 
+// Kill a process and its entire tree. The sidecar — especially the `cargo run`
+// dev fallback — spawns grandchildren that a plain SIGTERM to the direct child
+// leaves alive, so on Windows we use taskkill /T to terminate the whole tree.
+function treeKill(pid: number): void {
+  if (!Number.isFinite(pid) || pid <= 0) return
+  if (process.platform === 'win32') {
+    // /F forces immediate termination; /T kills the process tree.
+    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+  } else {
+    try { process.kill(pid, 'SIGTERM') } catch { /* already dead */ }
+  }
+}
+
+// Guard against PID reuse: a PID recorded before a reboot may now belong to an
+// unrelated process. On Windows we confirm the image name still looks like our
+// sidecar before force-killing it. On other platforms we can't cheaply verify,
+// so we fall back to best-effort (killing by our own recorded PID only).
+function pidLooksLikeOurSidecar(pid: number): boolean {
+  if (process.platform !== 'win32') return true
+  try {
+    const res = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8' })
+    const out = (res.stdout ?? '').toLowerCase()
+    if (!out.trim() || out.includes('no tasks')) return false // no such process
+    // Direct binary is radar-api(.exe); the dev fallback child is cargo(.exe).
+    return out.includes('radar-api') || out.includes('cargo')
+  } catch {
+    return false
+  }
+}
+
 function killStaleSidecar(): void {
   const pidFile = pidFilePath()
   if (!existsSync(pidFile)) return
   try {
     const pid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10)
     if (Number.isFinite(pid) && pid > 0) {
-      if (process.platform === 'win32') {
-        // taskkill /F forces immediate termination; /T kills the process tree.
-        spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore' })
+      if (pidLooksLikeOurSidecar(pid)) {
+        treeKill(pid)
+        console.log(`[main] Killed stale radar-api sidecar (pid ${pid})`)
       } else {
-        try { process.kill(pid) } catch { /* already dead */ }
+        console.log(`[main] Recorded PID ${pid} is gone or not our sidecar — skipping kill (PID reuse guard)`)
       }
-      console.log(`[main] Killed stale radar-api sidecar (pid ${pid})`)
     }
   } catch {
     // Corrupt PID file or process already gone — proceed normally.
@@ -110,6 +149,9 @@ function spawnSidecar(
   const proc = spawn(cmd, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
+    // Hand the sidecar the per-session bearer token so it enforces auth on /v1.
+    // Never logged (wireProcessLogs only forwards stdout/stderr, not env).
+    env: { ...process.env, RADAR_SERVICE_TOKEN: sessionToken },
     ...(cwd !== undefined ? { cwd } : {}),
   })
   wireProcessLogs(proc, label, logStream)
@@ -477,9 +519,75 @@ function createWindow(): BrowserWindow {
   return win
 }
 
+// ── Sidecar boot + supervision ───────────────────────────────────────────────
+
+// Clean up any stale sidecar, start a fresh one, and wait for it to pass the
+// health check. Applies the migration-checksum backup + one retry, mirroring
+// the original startup path. Returns whether the sidecar became healthy.
+async function startSidecarAndAwaitHealth(splash: BrowserWindow): Promise<boolean> {
+  killStaleSidecar()
+  apiProcess = startApiSidecar()
+
+  try {
+    await waitForApi('http://127.0.0.1:17380/health', 60, apiProcess)
+    return true
+  } catch (err) {
+    console.warn('[main] radar-api health check failed:', err)
+
+    if (sidecarLogContainsMigrationChecksumError() && backupIncompatibleSqliteDb()) {
+      setSplashStatus(splash, 'Updating local database...')
+      apiProcess = startApiSidecar()
+      try {
+        await waitForApi('http://127.0.0.1:17380/health', 60, apiProcess)
+        return true
+      } catch (retryErr) {
+        console.error('[main] radar-api retry after database backup failed:', retryErr)
+        return false
+      }
+    }
+    return false
+  }
+}
+
+function notifyBackendStopped(): void {
+  void dialog.showMessageBox({
+    type: 'error',
+    title: 'API Radar',
+    message: 'The backend service stopped unexpectedly.',
+    detail: 'Some features may be unavailable. Please restart API Radar.',
+    buttons: ['OK'],
+  })
+}
+
+// Watch a healthy sidecar for an unexpected exit. Attempts exactly one restart
+// (never a tight loop); if that also fails, notifies the user.
+function attachCrashHandler(proc: ChildProcess): void {
+  proc.on('exit', (code, signal) => {
+    if (isQuitting) return           // expected teardown
+    if (proc !== apiProcess) return  // superseded by a restart
+    console.error(`[main] radar-api sidecar exited unexpectedly (code=${String(code)} signal=${String(signal)})`)
+
+    if (!restartAttempted) {
+      restartAttempted = true
+      console.log('[main] Attempting one automatic restart of radar-api…')
+      apiProcess = startApiSidecar()
+      if (apiProcess) {
+        attachCrashHandler(apiProcess)
+        void waitForApi('http://127.0.0.1:17380/health', 60, apiProcess).then(
+          () => console.log('[main] radar-api restarted successfully'),
+          () => notifyBackendStopped(),
+        )
+        return
+      }
+    }
+    notifyBackendStopped()
+  })
+}
+
 // ── IPC handlers ───────────────────────────────────────────────────────────────
 
 ipcMain.handle('get-api-url', () => 'http://127.0.0.1:17380')
+ipcMain.handle('get-api-token', () => sessionToken)
 
 // ── App lifecycle ──────────────────────────────────────────────────────────────
 
@@ -490,58 +598,80 @@ if (process.platform === 'win32') {
   app.setAppUserModelId('com.radarmonitor.desktop')
 }
 
-app.whenReady().then(async () => {
-  const splash = createSplashWindow()
+// Single-instance lock. A second launch must NOT proceed — it would otherwise
+// kill the first instance's healthy sidecar via killStaleSidecar. Bail out
+// before touching any window, sidecar, or the shared PID file.
+if (!app.requestSingleInstanceLock()) {
+  app.exit(0)
+} else {
+  app.on('second-instance', () => {
+    // Another instance tried to launch — surface the existing window instead.
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+    }
+  })
 
-  killStaleSidecar()
-  apiProcess = startApiSidecar()
+  app.whenReady().then(async () => {
+    let splash = createSplashWindow()
 
-  try {
-    await waitForApi('http://127.0.0.1:17380/health', 60, apiProcess)
-  } catch (err) {
-    console.warn('[main] radar-api health check failed:', err)
-
-    if (sidecarLogContainsMigrationChecksumError() && backupIncompatibleSqliteDb()) {
-      setSplashStatus(splash, 'Updating local database...')
-      apiProcess = startApiSidecar()
-      try {
-        await waitForApi('http://127.0.0.1:17380/health', 60, apiProcess)
-      } catch (retryErr) {
-        console.error('[main] radar-api retry after database backup failed:', retryErr)
-        setSplashStatus(splash, 'API failed to start. See radar-api.log in app data.')
+    let healthy = await startSidecarAndAwaitHealth(splash)
+    while (!healthy) {
+      // Recoverable failure: close the frozen splash and let the user choose.
+      closeSplash(splash)
+      const { response } = await dialog.showMessageBox({
+        type: 'error',
+        title: 'API Radar',
+        message: 'The backend service failed to start.',
+        detail: 'See radar-api.log in the application data folder for details.',
+        buttons: ['Retry', 'Quit'],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      if (response !== 0) {
+        app.quit()
         return
       }
-    } else {
-      setSplashStatus(splash, 'API failed to start. See radar-api.log in app data.')
-      return
+      splash = createSplashWindow()
+      healthy = await startSidecarAndAwaitHealth(splash)
     }
-  }
 
-  const win = createWindow()
+    // Sidecar is healthy — watch for an unexpected crash from here on.
+    if (apiProcess) attachCrashHandler(apiProcess)
 
-  win.once('ready-to-show', () => {
-    closeSplash(splash)
-    win.show()
+    const win = createWindow()
+    mainWindow = win
+    win.on('closed', () => { mainWindow = null })
+
+    win.once('ready-to-show', () => {
+      closeSplash(splash)
+      win.show()
+    })
+
+    app.on('activate', () => {
+      // macOS: re-create window when dock icon is clicked with no open windows
+      if (BrowserWindow.getAllWindows().length === 0) {
+        const w = createWindow()
+        mainWindow = w
+        w.on('closed', () => { mainWindow = null })
+        w.once('ready-to-show', () => w.show())
+      }
+    })
   })
 
-  app.on('activate', () => {
-    // macOS: re-create window when dock icon is clicked with no open windows
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow()
-    }
+  app.on('window-all-closed', () => {
+    // Quit on all platforms (override macOS default keep-alive behaviour)
+    app.quit()
   })
-})
 
-app.on('window-all-closed', () => {
-  // Quit on all platforms (override macOS default keep-alive behaviour)
-  app.quit()
-})
-
-app.on('before-quit', () => {
-  if (apiProcess && !apiProcess.killed) {
-    console.log('[main] Stopping radar-api sidecar…')
-    apiProcess.kill('SIGTERM')
+  app.on('before-quit', () => {
+    isQuitting = true
+    const proc = apiProcess
     apiProcess = null
-  }
-  deletePidFile()
-})
+    if (proc && !proc.killed && proc.pid != null) {
+      console.log('[main] Stopping radar-api sidecar…')
+      treeKill(proc.pid)
+    }
+    deletePidFile()
+  })
+}

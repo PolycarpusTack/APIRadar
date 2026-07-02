@@ -4,6 +4,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 const driftApi = {
   getApiUrl: (): Promise<string> => ipcRenderer.invoke('get-api-url'),
+  getApiToken: (): Promise<string> => ipcRenderer.invoke('get-api-token'),
 }
 
 contextBridge.exposeInMainWorld('drift', driftApi)
