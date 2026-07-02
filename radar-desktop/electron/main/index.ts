@@ -1,8 +1,10 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, session, crashReporter } from 'electron'
+import type { WebFrameMain } from 'electron'
+import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
 import { spawn, spawnSync } from 'child_process'
 import type { ChildProcess } from 'child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, createWriteStream, renameSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, createWriteStream, renameSync, appendFileSync } from 'fs'
 import type { WriteStream } from 'fs'
 import { tmpdir } from 'os'
 import { randomBytes } from 'crypto'
@@ -30,6 +32,18 @@ function sidecarLogPath(): string {
 
 function sidecarDbPath(): string {
   return join(userDataDir(), 'drift.db')
+}
+
+// Append a diagnostic line to the sidecar log. Used by the crash-reporting
+// handlers (render-process-gone / child-process-gone) so a renderer or GPU
+// crash leaves a durable breadcrumb next to the sidecar output.
+function logDiagnostic(msg: string): void {
+  const line = `[diagnostic] ${new Date().toISOString()} ${msg}`
+  console.error(line)
+  try {
+    mkdirSync(userDataDir(), { recursive: true })
+    appendFileSync(sidecarLogPath(), line + '\n')
+  } catch { /* best-effort — diagnostics must never crash the main process */ }
 }
 
 // ── PID file — stale-sidecar cleanup ──────────────────────────────────────────
@@ -264,14 +278,22 @@ function waitForApi(url: string, maxRetries: number, proc: ChildProcess | null):
     function attempt() {
       if (settled) return
       attempts++
+      // A bare HTTP 200 on port 17380 is not proof our sidecar answered — any
+      // process could grab the port. Require the /health JSON body to report
+      // {"status":"ok"} (see radar-api `health` handler) before declaring healthy.
       fetch(url)
         .then((res) => {
-          if (res.ok) {
-            console.log(`[main] radar-api healthy after ${attempts} attempt(s)`)
-            pass()
-          } else {
-            retry()
-          }
+          if (!res.ok) { retry(); return }
+          res.text()
+            .then((body) => {
+              if (/"status"\s*:\s*"ok"/i.test(body)) {
+                console.log(`[main] radar-api healthy after ${attempts} attempt(s)`)
+                pass()
+              } else {
+                retry()
+              }
+            })
+            .catch(() => retry())
         })
         .catch(() => retry())
     }
@@ -460,6 +482,8 @@ function createSplashWindow(): BrowserWindow {
     },
   })
 
+  hardenWindow(splash)
+
   void splash.loadFile(tmpFile)
   splash.once('ready-to-show', () => splash.show())
   return splash
@@ -477,6 +501,55 @@ function closeSplash(splash: BrowserWindow): void {
       splash.setOpacity(opacity)
     }
   }, 20)
+}
+
+// ── Window / navigation hardening (N-19) ─────────────────────────────────────
+
+// Harden a BrowserWindow's webContents against navigation-based escapes:
+//   • setWindowOpenHandler — never let a child window open with our preload;
+//     route genuine external https links to the OS browser and deny the rest.
+//   • will-navigate — pin top-level navigation to the window's own origin so a
+//     compromised or misbehaving renderer cannot replace the app with remote
+//     content in a privileged, preload-equipped window.
+function hardenWindow(win: BrowserWindow): void {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'https:') {
+        void shell.openExternal(url)
+      }
+    } catch { /* malformed URL — deny below */ }
+    return { action: 'deny' }
+  })
+
+  win.webContents.on('will-navigate', (event, navigationUrl) => {
+    const current = win.webContents.getURL()
+    try {
+      // file:// documents all report origin "null"; comparing origins keeps
+      // in-app navigation (dev http://localhost:5173, packaged file://) allowed
+      // while denying any cross-origin/remote destination.
+      if (new URL(navigationUrl).origin !== new URL(current).origin) {
+        event.preventDefault()
+        console.warn(`[main] Blocked navigation to ${navigationUrl}`)
+      }
+    } catch {
+      event.preventDefault()
+    }
+  })
+}
+
+// True when an IPC message originates from one of our own renderer frames
+// (dev Vite server, or the packaged file:// bundle) — not the sandboxed,
+// null-origin Playground iframe or any injected content.
+function isTrustedSenderFrame(frame: WebFrameMain | null): boolean {
+  if (!frame) return false
+  try {
+    const url = new URL(frame.url)
+    if (!app.isPackaged) return url.origin === 'http://localhost:5173'
+    return url.protocol === 'file:'
+  } catch {
+    return false
+  }
 }
 
 // ── Window factory ─────────────────────────────────────────────────────────────
@@ -504,6 +577,8 @@ function createWindow(): BrowserWindow {
       preload: preloadPath,
     },
   })
+
+  hardenWindow(win)
 
   if (!app.isPackaged) {
     // Development: load Vite dev server
@@ -574,7 +649,13 @@ function attachCrashHandler(proc: ChildProcess): void {
       if (apiProcess) {
         attachCrashHandler(apiProcess)
         void waitForApi('http://127.0.0.1:17380/health', 60, apiProcess).then(
-          () => console.log('[main] radar-api restarted successfully'),
+          () => {
+            console.log('[main] radar-api restarted successfully')
+            // Clear the guard so a *future* crash incident is also granted one
+            // retry — otherwise the one-shot flag would burn out for the whole
+            // process lifetime after the first successful recovery.
+            restartAttempted = false
+          },
           () => notifyBackendStopped(),
         )
         return
@@ -587,7 +668,72 @@ function attachCrashHandler(proc: ChildProcess): void {
 // ── IPC handlers ───────────────────────────────────────────────────────────────
 
 ipcMain.handle('get-api-url', () => 'http://127.0.0.1:17380')
-ipcMain.handle('get-api-token', () => sessionToken)
+ipcMain.handle('get-api-token', (event) => {
+  // Hand the per-session bearer token only to our own renderer. Reject any
+  // other frame (e.g. the sandboxed Playground iframe or injected content) so
+  // the loopback sidecar credential can't leak to untrusted origins.
+  if (!isTrustedSenderFrame(event.senderFrame)) {
+    console.warn(`[main] Denied get-api-token from untrusted frame: ${event.senderFrame?.url ?? '(unknown)'}`)
+    throw new Error('get-api-token: untrusted sender')
+  }
+  return sessionToken
+})
+
+// ── Security & diagnostics wiring (N-19 / N-21) ──────────────────────────────
+
+// Deny privileged web permissions (camera, microphone, geolocation, desktop
+// notifications, …) by default. The dashboard needs none of them; the
+// Playground iframe is sandboxed. Denying everything is the safe default.
+function registerPermissionHandler(): void {
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    console.warn(`[main] Denied permission request: ${permission}`)
+    callback(false)
+  })
+}
+
+// Crash/diagnostics breadcrumbs. render-process-gone fires when a renderer
+// (window) crashes or is killed; child-process-gone covers GPU/utility/pepper
+// child processes. Both are logged to the sidecar log for post-mortem.
+function registerCrashDiagnostics(): void {
+  crashReporter.start({ uploadToServer: false })
+
+  app.on('render-process-gone', (_event, contents, details) => {
+    let url = '(unknown)'
+    try { url = contents.getURL() } catch { /* contents may be gone */ }
+    logDiagnostic(`render-process-gone reason=${details.reason} exitCode=${String(details.exitCode)} url=${url}`)
+  })
+
+  app.on('child-process-gone', (_event, details) => {
+    logDiagnostic(`child-process-gone type=${details.type} reason=${details.reason} exitCode=${String(details.exitCode)} name=${details.name ?? ''}`)
+  })
+}
+
+// Auto-update no-op scaffold. electron-updater throws when no feed is wired, so
+// only check when packaged AND a publish feed is present — either a generic feed
+// URL in RADAR_UPDATE_FEED, or the app-update.yml that electron-builder emits
+// when build.config.json declares a publish provider. Errors are swallowed so a
+// missing/unreachable feed never blocks startup.
+function maybeCheckForUpdates(): void {
+  if (!app.isPackaged) return
+
+  const feedUrl = process.env['RADAR_UPDATE_FEED']
+  const hasBundledFeed = existsSync(join(process.resourcesPath ?? '', 'app-update.yml'))
+  if (!feedUrl && !hasBundledFeed) {
+    console.log('[main] Auto-update skipped — no publish feed configured')
+    return
+  }
+
+  try {
+    if (feedUrl) {
+      autoUpdater.setFeedURL({ provider: 'generic', url: feedUrl })
+    }
+    autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+      console.warn('[main] Auto-update check failed:', err)
+    })
+  } catch (err) {
+    console.warn('[main] Auto-update unavailable:', err)
+  }
+}
 
 // ── App lifecycle ──────────────────────────────────────────────────────────────
 
@@ -613,6 +759,9 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.whenReady().then(async () => {
+    registerPermissionHandler()
+    registerCrashDiagnostics()
+
     let splash = createSplashWindow()
 
     let healthy = await startSidecarAndAwaitHealth(splash)
@@ -646,6 +795,8 @@ if (!app.requestSingleInstanceLock()) {
     win.once('ready-to-show', () => {
       closeSplash(splash)
       win.show()
+      // Check for updates once the UI is up (no-ops without a publish feed).
+      maybeCheckForUpdates()
     })
 
     app.on('activate', () => {
