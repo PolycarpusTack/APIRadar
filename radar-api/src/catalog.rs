@@ -9,9 +9,53 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 use crate::auth::JwtClaims;
 use crate::errors::ApiError;
-use crate::utils::parse_codeowners;
+use crate::utils::{is_host_allowed, is_ssrf_blocked, parse_codeowners};
 
 const VALID_CATALOG_KINDS: &[&str] = &["backstage", "codeowners", "csv", "manual"];
+
+/// Catalog sources may only read credentials from environment variables whose
+/// name starts with this prefix. Prevents a caller from naming an arbitrary env
+/// var (e.g. `RADAR_JWT_SECRET`, `ANTHROPIC_API_KEY`, `DATABASE_URL`) as the
+/// bearer token and exfiltrating it to a client-supplied URL.
+const CATALOG_TOKEN_ENV_PREFIX: &str = "RADAR_CATALOG_TOKEN_";
+
+/// Validate that `token_env`, when set, references an allowlisted credential var.
+fn token_env_allowed(token_env: Option<&str>) -> bool {
+    match token_env {
+        Some(env) if !env.is_empty() => env.starts_with(CATALOG_TOKEN_ENV_PREFIX),
+        _ => true, // absent/empty is fine — no credential is read
+    }
+}
+
+/// Pre-flight validation for a catalog source's outbound target, run before any
+/// network call. Enforces (1) the token_env allowlist, (2) the SSRF guard
+/// (HTTPS-only, no private/loopback/link-local addresses), and (3) the
+/// `RADAR_ALLOWED_HOSTS` host allowlist. Returns Err(reason) if the target must
+/// not be fetched.
+fn validate_catalog_target(url: &str, token_env: Option<&str>) -> Result<(), String> {
+    if !token_env_allowed(token_env) {
+        return Err(format!(
+            "token_env must reference a variable named {CATALOG_TOKEN_ENV_PREFIX}*"
+        ));
+    }
+    if is_ssrf_blocked(url) {
+        return Err("url blocked by SSRF guard (must be HTTPS to a public host)".to_string());
+    }
+    if !is_host_allowed(url) {
+        return Err("url host is not in the RADAR_ALLOWED_HOSTS allowlist".to_string());
+    }
+    Ok(())
+}
+
+/// HTTP client for catalog sync: no redirect following (redirects can escape the
+/// SSRF/host checks) and a bounded timeout so a hung endpoint can't stall a task.
+fn catalog_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
 
 #[derive(serde::Deserialize)]
 pub(crate) struct CreateCatalogSourceBody {
@@ -36,6 +80,11 @@ pub(crate) async fn create_catalog_source(
     }
     if body.name.is_empty() {
         return Err(ApiError::BadRequest("name must not be empty".into()));
+    }
+    if !token_env_allowed(body.token_env.as_deref()) {
+        return Err(ApiError::BadRequest(format!(
+            "token_env must reference a variable named {CATALOG_TOKEN_ENV_PREFIX}*"
+        )));
     }
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
@@ -135,14 +184,20 @@ pub(crate) async fn sync_catalog_source(
     let url: String = row.get("url");
     let token_env: Option<String> = row.get("token_env");
 
-    let token = token_env
-        .as_deref()
-        .and_then(|env| std::env::var(env).ok());
-
-    let (upserted, error_msg) = match kind.as_str() {
-        "backstage"  => sync_backstage_source(&pool, &org_id, &url, token.as_deref()).await,
-        "codeowners" => sync_codeowners_source(&pool, &org_id, &url, token.as_deref()).await,
-        _            => (0, Some(format!("sync not implemented for kind={kind}"))),
+    // Refuse to fetch — and to read any credential — unless the target passes the
+    // token_env allowlist, SSRF guard, and host allowlist.
+    let (upserted, error_msg) = match validate_catalog_target(&url, token_env.as_deref()) {
+        Err(reason) => (0, Some(reason)),
+        Ok(()) => {
+            let token = token_env
+                .as_deref()
+                .and_then(|env| std::env::var(env).ok());
+            match kind.as_str() {
+                "backstage"  => sync_backstage_source(&pool, &org_id, &url, token.as_deref()).await,
+                "codeowners" => sync_codeowners_source(&pool, &org_id, &url, token.as_deref()).await,
+                _            => (0, Some(format!("sync not implemented for kind={kind}"))),
+            }
+        }
     };
 
     let status = if error_msg.is_none() { "ok" } else { "error" };
@@ -174,7 +229,7 @@ async fn sync_codeowners_source(
     url: &str,
     token: Option<&str>,
 ) -> (usize, Option<String>) {
-    let mut req = reqwest::Client::new().get(url);
+    let mut req = catalog_http_client().get(url);
     if let Some(t) = token {
         req = req.bearer_auth(t);
     }
@@ -248,7 +303,7 @@ async fn sync_backstage_source(
         base_url.trim_end_matches('/')
     );
 
-    let mut req = reqwest::Client::new().get(&url);
+    let mut req = catalog_http_client().get(&url);
     if let Some(t) = token {
         req = req.bearer_auth(t);
     }
@@ -322,4 +377,60 @@ async fn sync_backstage_source(
     }
 
     (upserted, None)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_env_off_allowlist_is_rejected() {
+        // Arbitrary secret var names must be refused.
+        assert!(!token_env_allowed(Some("RADAR_JWT_SECRET")));
+        assert!(!token_env_allowed(Some("ANTHROPIC_API_KEY")));
+        assert!(!token_env_allowed(Some("DATABASE_URL")));
+        assert!(!token_env_allowed(Some("GITHUB_TOKEN")));
+    }
+
+    #[test]
+    fn token_env_on_allowlist_or_absent_is_allowed() {
+        assert!(token_env_allowed(Some("RADAR_CATALOG_TOKEN_BACKSTAGE")));
+        assert!(token_env_allowed(Some("RADAR_CATALOG_TOKEN_")));
+        assert!(token_env_allowed(None));
+        assert!(token_env_allowed(Some("")));
+    }
+
+    #[test]
+    fn validate_rejects_off_allowlist_token_env() {
+        // Even a perfectly good HTTPS public URL must be refused if it would read
+        // a non-allowlisted credential var.
+        let err = validate_catalog_target("https://example.com/catalog", Some("RADAR_JWT_SECRET"));
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("token_env"));
+    }
+
+    #[test]
+    fn validate_blocks_ssrf_targets() {
+        // Private / loopback / non-HTTPS targets are blocked before any fetch.
+        assert!(validate_catalog_target("https://169.254.169.254/latest/meta-data/", None).is_err());
+        assert!(validate_catalog_target("https://127.0.0.1/catalog", None).is_err());
+        assert!(validate_catalog_target("https://10.0.0.1/catalog", None).is_err());
+        assert!(validate_catalog_target("http://example.com/catalog", None).is_err()); // non-HTTPS
+    }
+
+    #[test]
+    fn validate_allows_public_https_with_allowlisted_token() {
+        // Use a public IP literal so the check is hermetic (no DNS needed): a
+        // public, non-private address with an allowlisted token_env must pass.
+        std::env::remove_var("RADAR_ALLOWED_HOSTS");
+        assert!(validate_catalog_target(
+            "https://93.184.216.34/api/catalog",
+            Some("RADAR_CATALOG_TOKEN_BACKSTAGE"),
+        )
+        .is_ok());
+    }
 }

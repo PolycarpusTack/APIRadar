@@ -438,7 +438,7 @@ pub(crate) async fn auth_middleware(
     }
 
     let expected = format!("Bearer {service_token}");
-    if auth_header != expected {
+    if !crate::utils::constant_time_eq(auth_header.as_bytes(), expected.as_bytes()) {
         drop(pool);
         return ApiError::Unauthorized.into_response();
     }
@@ -464,5 +464,94 @@ pub(crate) fn assert_org_access(
         )))
     } else {
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M-8: Shared cross-org ownership guard for handlers that take a resource id
+// from the request path/body.
+// ---------------------------------------------------------------------------
+
+/// A fixed, allowlisted set of org-owned resource kinds. Each maps to a
+/// hard-coded SQL statement that resolves the owning `org_id` from the
+/// resource's primary-key id. Table and column names are compile-time
+/// constants here — never interpolated from user input — so `require_org_owned`
+/// cannot be coerced into reading an arbitrary table.
+#[derive(Clone, Copy)]
+pub(crate) enum OrgResource {
+    /// `diff.id` → owning org via spec_version → service.
+    Diff,
+    /// `release_note.id` → owning org via diff → spec_version → service.
+    ReleaseNote,
+    /// `service.id` → `service.org_id`.
+    Service,
+    /// `consumer.id` → `consumer.org_id`.
+    Consumer,
+}
+
+impl OrgResource {
+    fn org_lookup_sql(self) -> &'static str {
+        match self {
+            OrgResource::Diff => {
+                "SELECT s.org_id FROM diff d \
+                 JOIN spec_version sv ON sv.id = d.from_version \
+                 JOIN service s ON s.id = sv.service_id \
+                 WHERE d.id = ?"
+            }
+            OrgResource::ReleaseNote => {
+                "SELECT s.org_id FROM release_note rn \
+                 JOIN diff d ON d.id = rn.diff_id \
+                 JOIN spec_version sv ON sv.id = d.from_version \
+                 JOIN service s ON s.id = sv.service_id \
+                 WHERE rn.id = ?"
+            }
+            OrgResource::Service => "SELECT org_id FROM service WHERE id = ?",
+            OrgResource::Consumer => "SELECT org_id FROM consumer WHERE id = ?",
+        }
+    }
+
+    fn desc(self) -> &'static str {
+        match self {
+            OrgResource::Diff => "diff",
+            OrgResource::ReleaseNote => "release note",
+            OrgResource::Service => "service",
+            OrgResource::Consumer => "consumer",
+        }
+    }
+}
+
+/// Assert that the caller's org owns the resource identified by `id`.
+///
+/// Semantics (mirrors [`assert_org_access`] so the desktop/no-auth path keeps
+/// working):
+/// - Empty `caller_org_id` (desktop / single-tenant / unauthenticated) → `Ok`.
+/// - Resource does not exist → `Ok` (the handler's own existence check produces
+///   the `NotFound`; this guard never fabricates a 404).
+/// - Resource's org is empty (row created in no-auth mode) → `Ok`.
+/// - Non-empty caller org differs from non-empty resource org → `Forbidden` (403).
+pub(crate) async fn require_org_owned(
+    pool: &sqlx::AnyPool,
+    resource: OrgResource,
+    id: &str,
+    caller_org_id: &str,
+) -> Result<(), ApiError> {
+    // Fast path: single-tenant / no-auth mode never triggers isolation.
+    if caller_org_id.is_empty() {
+        return Ok(());
+    }
+    let row = sqlx::query(resource.org_lookup_sql())
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    match row {
+        Some(r) => {
+            use sqlx::Row;
+            let resource_org: String = r
+                .try_get::<Option<String>, _>(0)
+                .unwrap_or_default()
+                .unwrap_or_default();
+            assert_org_access(&resource_org, caller_org_id, resource.desc())
+        }
+        None => Ok(()),
     }
 }

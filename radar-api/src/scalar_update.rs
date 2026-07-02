@@ -128,7 +128,10 @@ pub(crate) async fn post_update(headers: axum::http::HeaderMap) -> impl IntoResp
                 .and_then(|t| crate::auth::validate_jwt(t, &jwt_secret))
                 .is_some()
         } else {
-            auth == format!("Bearer {service_token}")
+            crate::utils::constant_time_eq(
+                auth.as_bytes(),
+                format!("Bearer {service_token}").as_bytes(),
+            )
         };
         if !ok {
             return (

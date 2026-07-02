@@ -5,6 +5,37 @@ use tracing::info;
 const RETENTION_JOB_INTERVAL_SECS: u64 = 3600;
 const RETENTION_DEFAULT_DAYS: u32 = 90;
 
+/// Redact the `user:password@` portion of a database URL so the connection
+/// string can be logged without leaking credentials. Inputs without userinfo
+/// (e.g. `sqlite:drift.db`) are returned unchanged.
+fn redact_db_url(url: &str) -> String {
+    if let Some((scheme, rest)) = url.split_once("://") {
+        if let Some((_userinfo, host_part)) = rest.split_once('@') {
+            return format!("{scheme}://***@{host_part}");
+        }
+    }
+    url.to_string()
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_db_url;
+
+    #[test]
+    fn redacts_postgres_userinfo() {
+        assert_eq!(
+            redact_db_url("postgres://user:s3cret@db.host:5432/drift"),
+            "postgres://***@db.host:5432/drift"
+        );
+    }
+
+    #[test]
+    fn leaves_sqlite_unchanged() {
+        assert_eq!(redact_db_url("sqlite:drift.db"), "sqlite:drift.db");
+        assert_eq!(redact_db_url("sqlite::memory:"), "sqlite::memory:");
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "radar-api",
@@ -46,7 +77,7 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    info!(db_url = %args.db, bind = %args.bind, "starting radar-api");
+    info!(db_url = %redact_db_url(&args.db), bind = %args.bind, "starting radar-api");
 
     // Warn when auth is disabled and the server is binding to all interfaces.
     // In desktop sidecar mode, pass --bind 127.0.0.1:8080 to suppress this warning.

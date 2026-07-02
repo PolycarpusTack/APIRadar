@@ -71,15 +71,24 @@ pub(crate) async fn ingest_usage_event(
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let now = Utc::now().to_rfc3339();
-    let mut accepted = 0usize;
 
+    // Phase 1 — filtering (reads only). Done before the transaction is opened so we
+    // never hold a write connection while issuing sampling queries.
+    let mut to_insert: Vec<&UsageEventRequest> = Vec::with_capacity(events.len());
     for event in &events {
         if !event.field_path.is_empty() {
             let sampling = load_sampling(&pool, &event.service_id, &org_id).await;
             let deny_str = sampling.field_deny_list.join(",");
             if field_in_deny_list(&event.field_path, &deny_str) { continue; }
         }
+        to_insert.push(event);
+    }
 
+    // Phase 2 — atomic batch insert. A mid-batch failure rolls the whole batch back,
+    // so a client retry never leaves partial duplicates. A FK/check violation from
+    // bad input maps to 4xx (see map_ingest_db_error) rather than a 500.
+    let mut tx = pool.begin().await?;
+    for event in &to_insert {
         let id = Uuid::new_v4().to_string();
         sqlx::query(
             r#"INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at)
@@ -91,12 +100,13 @@ pub(crate) async fn ingest_usage_event(
         .bind(&event.operation)
         .bind(&event.field_path)
         .bind(&now)
-        .execute(&pool)
-        .await?;
-        accepted += 1;
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::errors::map_ingest_db_error)?;
     }
+    tx.commit().await?;
 
-    Ok((StatusCode::ACCEPTED, Json(json!({"accepted": accepted}))))
+    Ok((StatusCode::ACCEPTED, Json(json!({"accepted": to_insert.len()}))))
 }
 
 // POST /v1/call-sites
@@ -113,6 +123,10 @@ pub(crate) async fn upsert_call_sites(
     let now = Utc::now().to_rfc3339();
     let count = sites.len();
 
+    // Wrap the whole upsert batch in one transaction so a mid-batch failure rolls
+    // back rather than leaving a partial commit. The deterministic call_site_id keeps
+    // each row idempotent across retries; a FK/check violation maps to 4xx.
+    let mut tx = pool.begin().await?;
     for site in &sites {
         let id = call_site_id(
             &site.consumer_id,
@@ -128,8 +142,9 @@ pub(crate) async fn upsert_call_sites(
         .bind(&now)
         .bind(&site.operation)
         .bind(&id)
-        .execute(&pool)
-        .await?;
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::errors::map_ingest_db_error)?;
 
         if updated.rows_affected() == 0 {
             sqlx::query(
@@ -145,10 +160,12 @@ pub(crate) async fn upsert_call_sites(
             .bind(site.line_number)
             .bind(&site.field_path)
             .bind(&now)
-            .execute(&pool)
-            .await?;
+            .execute(&mut *tx)
+            .await
+            .map_err(crate::errors::map_ingest_db_error)?;
         }
     }
+    tx.commit().await?;
 
     Ok((StatusCode::ACCEPTED, Json(json!({"accepted": count}))))
 }

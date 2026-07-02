@@ -82,6 +82,15 @@ pub(crate) async fn create_scan(
     if body.service_id.is_empty() {
         return Err(ApiError::BadRequest("service_id is required".into()));
     }
+    // Org isolation (authz before any outbound processing): cannot schedule a
+    // scan for another org's service.
+    crate::auth::require_org_owned(
+        &pool,
+        crate::auth::OrgResource::Service,
+        &body.service_id,
+        &org_id,
+    )
+    .await?;
     if body.spec_url.is_empty() {
         return Err(ApiError::BadRequest("spec_url is required".into()));
     }
@@ -335,16 +344,11 @@ async fn execute_scan(
     }
 
     // Fetch previous spec text if we have a hash (means there's a stored version).
+    // The new spec has NOT been stored yet at this point, so the most recent
+    // stored version (OFFSET 0) IS the previous spec — an earlier `OFFSET 1`
+    // skipped it, diffing against an empty or two-generations-old spec.
     let base_spec = if last_spec_hash.is_some() {
-        let row = sqlx::query(
-            "SELECT spec_yaml FROM spec_version WHERE service_id = ? ORDER BY captured_at DESC LIMIT 1 OFFSET 1",
-        )
-        .bind(&service_id)
-        .fetch_optional(&pool)
-        .await
-        .ok()
-        .flatten();
-        row.and_then(|r| r.try_get::<String, _>("spec_yaml").ok()).unwrap_or_default()
+        fetch_previous_spec(&pool, &service_id).await
     } else {
         // First run — store the spec, no diff to create yet.
         let _ = sqlx::query("UPDATE scheduled_scan SET last_spec_hash = ? WHERE id = ?")
@@ -390,6 +394,23 @@ async fn execute_scan(
         set_scan_status(&pool, &scan_id, &now, "ok", None).await;
         crate::audit::record_event(&pool, &org_id, "system", "scan.run.completed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "changed": false }))).await;
     }
+}
+
+/// Return the most recently stored spec YAML for a service (the previous spec,
+/// since the current scan's spec is stored only after this is called). Ordering
+/// is `captured_at DESC, id DESC` so that identical timestamps break
+/// deterministically instead of relying on physical row order.
+async fn fetch_previous_spec(pool: &sqlx::AnyPool, service_id: &str) -> String {
+    let row = sqlx::query(
+        "SELECT spec_yaml FROM spec_version WHERE service_id = ? ORDER BY captured_at DESC, id DESC LIMIT 1",
+    )
+    .bind(service_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    row.and_then(|r| r.try_get::<String, _>("spec_yaml").ok())
+        .unwrap_or_default()
 }
 
 async fn set_scan_status(pool: &sqlx::AnyPool, scan_id: &str, run_at: &str, status: &str, error: Option<&str>) {
@@ -569,4 +590,62 @@ pub(crate) async fn run_history(
     })).collect();
 
     Ok(Json(history))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::fetch_previous_spec;
+
+    async fn test_pool() -> sqlx::AnyPool {
+        sqlx::any::install_default_drivers();
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite::memory:".to_string());
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("pool");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        if url.starts_with("sqlite") {
+            sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    async fn insert_spec(pool: &sqlx::AnyPool, id: &str, service_id: &str, captured_at: &str, yaml: &str) {
+        sqlx::query(
+            "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
+             VALUES (?, ?, 'test', ?, 'openapi', ?)",
+        )
+        .bind(id)
+        .bind(service_id)
+        .bind(captured_at)
+        .bind(yaml)
+        .execute(pool)
+        .await
+        .expect("insert spec_version");
+    }
+
+    // M-6: the previous spec is the most recently stored version (OFFSET 0),
+    // not the one before it. With two stored versions, fetch_previous_spec must
+    // return the newer one — the base a not-yet-stored 3rd scan diffs against.
+    #[tokio::test]
+    async fn fetch_previous_spec_returns_most_recent_stored() {
+        let pool = test_pool().await;
+        let svc = "svc-m6";
+        insert_spec(&pool, "v1", svc, "2026-07-01T10:00:00.000000000+00:00", "spec-v1").await;
+        insert_spec(&pool, "v2", svc, "2026-07-02T10:00:00.000000000+00:00", "spec-v2").await;
+
+        let base = fetch_previous_spec(&pool, svc).await;
+        assert_eq!(base, "spec-v2", "must diff against the immediately previous spec, not an older one");
+    }
+
+    #[tokio::test]
+    async fn fetch_previous_spec_empty_when_none_stored() {
+        let pool = test_pool().await;
+        assert_eq!(fetch_previous_spec(&pool, "nobody").await, "");
+    }
 }

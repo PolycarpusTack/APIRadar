@@ -8,9 +8,16 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
+use crate::auth::{JwtClaims, OrgResource, require_org_owned};
 use crate::errors::ApiError;
 use crate::ai_tests::load_diff_evidence;
 use crate::PaginationParams;
+
+type OrgExt = Option<axum::extract::Extension<JwtClaims>>;
+
+fn caller_org(org: &OrgExt) -> String {
+    org.as_ref().map(|e| e.org_id.clone()).unwrap_or_default()
+}
 
 #[derive(serde::Deserialize)]
 pub(crate) struct CreateReleaseNoteBody {
@@ -26,8 +33,10 @@ pub(crate) struct PatchStatusBody {
 pub(crate) async fn create_release_note(
     Path(diff_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
+    org: OrgExt,
     Json(body): Json<CreateReleaseNoteBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_org_owned(&pool, OrgResource::Diff, &diff_id, &caller_org(&org)).await?;
     if body.content.is_empty() {
         return Err(ApiError::BadRequest("content is required".into()));
     }
@@ -48,10 +57,16 @@ pub(crate) async fn create_release_note(
 // GET /v1/release-notes
 pub(crate) async fn list_release_notes(
     State(pool): State<sqlx::AnyPool>,
+    org: OrgExt,
     Query(params): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = sqlx::query(
-        r#"SELECT rn.id, rn.diff_id, rn.created_at, rn.status,
+    // Clamp: a negative LIMIT dumps the whole table on SQLite and 500s on Postgres.
+    let (limit, offset) =
+        crate::utils::clamp_pagination(Some(params.limit), Some(params.offset));
+    let org_id = caller_org(&org);
+    // Org isolation: authenticated callers only see release notes for diffs whose
+    // producer service belongs to their org. Empty org (desktop/no-auth) sees all.
+    let base = r#"SELECT rn.id, rn.diff_id, rn.created_at, rn.status,
                   d.from_version, d.to_version,
                   sv_from.git_ref AS from_git_ref,
                   sv_to.git_ref   AS to_git_ref
@@ -59,13 +74,23 @@ pub(crate) async fn list_release_notes(
            JOIN diff        d      ON d.id      = rn.diff_id
            JOIN spec_version sv_from ON sv_from.id = d.from_version
            JOIN spec_version sv_to   ON sv_to.id   = d.to_version
-           ORDER BY rn.created_at DESC
-           LIMIT ? OFFSET ?"#,
-    )
-    .bind(params.limit)
-    .bind(params.offset)
-    .fetch_all(&pool)
-    .await?;
+           JOIN service     svc    ON svc.id     = sv_from.service_id"#;
+    let rows = if org_id.is_empty() {
+        sqlx::query(&format!("{base} ORDER BY rn.created_at DESC LIMIT ? OFFSET ?"))
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&pool)
+            .await?
+    } else {
+        sqlx::query(&format!(
+            "{base} WHERE svc.org_id = ? ORDER BY rn.created_at DESC LIMIT ? OFFSET ?"
+        ))
+        .bind(&org_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&pool)
+        .await?
+    };
 
     let items: Vec<Value> = rows.iter().map(|r| {
         use sqlx::Row;
@@ -86,7 +111,9 @@ pub(crate) async fn list_release_notes(
 pub(crate) async fn get_release_note(
     Path(note_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
+    org: OrgExt,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_org_owned(&pool, OrgResource::ReleaseNote, &note_id, &caller_org(&org)).await?;
     let row = sqlx::query(
         r#"SELECT rn.id, rn.diff_id, rn.content, rn.created_at,
                   sv_from.git_ref AS from_git_ref,
@@ -122,9 +149,11 @@ pub(crate) async fn get_release_note(
 pub(crate) async fn patch_release_note_status(
     Path(note_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
+    org: OrgExt,
     Json(body): Json<PatchStatusBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
+    require_org_owned(&pool, OrgResource::ReleaseNote, &note_id, &caller_org(&org)).await?;
     const VALID_STATUSES: &[&str] = &["draft", "reviewed", "published", "superseded"];
     if !VALID_STATUSES.contains(&body.status.as_str()) {
         return Err(ApiError::BadRequest(format!(
@@ -172,8 +201,10 @@ pub(crate) async fn get_migration_guide(
     Path(diff_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     State(pool): State<sqlx::AnyPool>,
+    org: OrgExt,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
+    require_org_owned(&pool, OrgResource::Diff, &diff_id, &caller_org(&org)).await?;
     let consumer_id = params.get("consumer_id").map(String::as_str);
 
     let diff_row = sqlx::query(
@@ -301,7 +332,10 @@ pub(crate) async fn get_migration_guide(
 pub(crate) async fn generate_release_note(
     Path(diff_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
+    org: OrgExt,
 ) -> Result<impl IntoResponse, ApiError> {
+    let org_id = caller_org(&org);
+    require_org_owned(&pool, OrgResource::Diff, &diff_id, &org_id).await?;
     // Verify diff exists before queuing.
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM diff WHERE id = ?")
         .bind(&diff_id)
@@ -329,8 +363,9 @@ pub(crate) async fn generate_release_note(
         let p2 = pool.clone();
         let nid = id.clone();
         let did = diff_id.clone();
+        let oid = org_id.clone();
         tokio::spawn(async move {
-            crate::audit::record_event(&p2, "default", "system", "release_note.generate.started",
+            crate::audit::record_event(&p2, &oid, "system", "release_note.generate.started",
                 Some("release_note"), Some(&nid),
                 Some(&serde_json::json!({ "diff_id": did }))).await;
         });
@@ -341,6 +376,7 @@ pub(crate) async fn generate_release_note(
         let p2  = pool.clone();
         let nid = id.clone();
         let did = diff_id.clone();
+        let oid = org_id.clone();
         tokio::spawn(async move {
             match build_release_note_content(&p2, &did).await {
                 Ok(md) => {
@@ -351,7 +387,7 @@ pub(crate) async fn generate_release_note(
                     .bind(&nid)
                     .execute(&p2)
                     .await;
-                    crate::audit::record_event(&p2, "default", "system", "release_note.generate.completed",
+                    crate::audit::record_event(&p2, &oid, "system", "release_note.generate.completed",
                         Some("release_note"), Some(&nid), None).await;
                 }
                 Err(e) => {
@@ -363,7 +399,7 @@ pub(crate) async fn generate_release_note(
                     .bind(&nid)
                     .execute(&p2)
                     .await;
-                    crate::audit::record_event(&p2, "default", "system", "release_note.generate.failed",
+                    crate::audit::record_event(&p2, &oid, "system", "release_note.generate.failed",
                         Some("release_note"), Some(&nid),
                         Some(&serde_json::json!({ "error": msg }))).await;
                 }
@@ -389,8 +425,11 @@ pub(crate) async fn generate_release_note(
 pub(crate) async fn get_generate_status(
     axum::extract::Path(id): axum::extract::Path<String>,
     State(pool): State<sqlx::AnyPool>,
+    org: OrgExt,
 ) -> Result<axum::Json<serde_json::Value>, ApiError> {
     use sqlx::Row;
+
+    require_org_owned(&pool, OrgResource::ReleaseNote, &id, &caller_org(&org)).await?;
 
     let row = sqlx::query(
         "SELECT id, diff_id, content, generation_status, generation_error, status, created_at \

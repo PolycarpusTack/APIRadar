@@ -7,7 +7,7 @@ use axum::{
 use chrono::Utc;
 use serde_json::{json, Value};
 use uuid::Uuid;
-use crate::auth::{JwtClaims, assert_org_access};
+use crate::auth::{JwtClaims, OrgResource, assert_org_access, require_org_owned};
 use crate::errors::ApiError;
 use crate::ai::{detect_provider, build_both_formats};
 use crate::PaginationParams;
@@ -33,9 +33,22 @@ fn default_base_url() -> String {
 // POST /v1/generate-tests
 pub(crate) async fn generate_tests(
     State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
     Json(body): Json<GenerateTestsBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
+
+    // Org isolation: any referenced diff/service/consumer must belong to the caller.
+    let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    if let Some(ref diff_id) = body.diff_id {
+        require_org_owned(&pool, OrgResource::Diff, diff_id, &caller_org_id).await?;
+    }
+    if let Some(ref service_id) = body.service_id {
+        require_org_owned(&pool, OrgResource::Service, service_id, &caller_org_id).await?;
+    }
+    if let Some(ref consumer_id) = body.consumer_id {
+        require_org_owned(&pool, OrgResource::Consumer, consumer_id, &caller_org_id).await?;
+    }
 
     let has_jira = body.jira_key.is_some() || body.jira_text.is_some();
     let has_diff = body.diff_id.is_some();
@@ -227,24 +240,45 @@ pub(crate) async fn generate_tests(
 // GET /v1/generate-tests
 pub(crate) async fn list_test_suites(
     State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
     Query(page): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
     let limit = page.limit.clamp(1, 200);
     let offset = page.offset.max(0);
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let rows = sqlx::query(
-        r#"SELECT id, service_id, jira_key, jira_summary, collection_name,
-                  test_count, happy_count, negative_count, created_at
-           FROM generated_test_suite
-           ORDER BY created_at DESC
-           LIMIT ? OFFSET ?"#,
-    )
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(&pool)
-    .await?;
+    // Org isolation: authenticated callers only see suites whose service belongs
+    // to their org. Empty org (desktop/no-auth) sees all.
+    let rows = if org_id.is_empty() {
+        sqlx::query(
+            r#"SELECT id, service_id, jira_key, jira_summary, collection_name,
+                      test_count, happy_count, negative_count, created_at
+               FROM generated_test_suite
+               ORDER BY created_at DESC
+               LIMIT ? OFFSET ?"#,
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"SELECT ts.id, ts.service_id, ts.jira_key, ts.jira_summary, ts.collection_name,
+                      ts.test_count, ts.happy_count, ts.negative_count, ts.created_at
+               FROM generated_test_suite ts
+               JOIN service s ON s.id = ts.service_id
+               WHERE s.org_id = ?
+               ORDER BY ts.created_at DESC
+               LIMIT ? OFFSET ?"#,
+        )
+        .bind(&org_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&pool)
+        .await?
+    };
 
     let items: Vec<Value> = rows
         .iter()
@@ -270,8 +304,11 @@ pub(crate) async fn list_test_suites(
 pub(crate) async fn list_diff_test_suites(
     Path(diff_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
+    let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    require_org_owned(&pool, OrgResource::Diff, &diff_id, &caller_org_id).await?;
     let rows = sqlx::query(
         r#"SELECT id, collection_name, test_count, happy_count, negative_count, consumer_id, created_at
            FROM generated_test_suite

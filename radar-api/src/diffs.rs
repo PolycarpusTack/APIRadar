@@ -262,7 +262,7 @@ pub(crate) async fn create_diff(
     }
 
     let diff_id = Uuid::new_v4().to_string();
-    sqlx::query(
+    let insert_res = sqlx::query(
         r#"
         INSERT INTO diff (id, from_version, to_version, pr_url, created_at)
         VALUES (?, ?, ?, ?, ?)
@@ -274,7 +274,34 @@ pub(crate) async fn create_diff(
     .bind(&body.pr_url)
     .bind(&now)
     .execute(&pool)
-    .await?;
+    .await;
+
+    if let Err(e) = insert_res {
+        // A concurrent request may have inserted the same (from_version, to_version)
+        // transition between our SELECT above and this INSERT, tripping the unique
+        // index `idx_diff_transition`. Treat that race as "already exists" and return
+        // the existing diff as cached-200 rather than surfacing a 500.
+        let is_unique = matches!(&e, sqlx::Error::Database(db) if db.is_unique_violation());
+        if is_unique {
+            use sqlx::Row;
+            let row = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
+                .bind(&from_version_id)
+                .bind(&to_version_id)
+                .fetch_one(&pool)
+                .await?;
+            let existing_id: String = row.try_get("id").map_err(ApiError::Db)?;
+            return Ok((
+                StatusCode::OK,
+                Json(json!({
+                    "id":           existing_id,
+                    "from_version": from_version_id,
+                    "to_version":   to_version_id,
+                    "cached":       true,
+                })),
+            ));
+        }
+        return Err(ApiError::Db(e));
+    }
 
     for change in &body.changes {
         let change_id = Uuid::new_v4().to_string();
@@ -351,12 +378,14 @@ pub(crate) async fn get_diff(
     let row_org_id: String = row.try_get("service_org_id").unwrap_or_default();
     assert_org_access(&row_org_id, &caller_org_id, &format!("diff {diff_id}"))?;
 
-    // Generate share token if absent (back-fill)
+    // Mint a share token if absent, once. It must be random (not derived from the
+    // diff_id) so that knowing a diff_id does not let anyone compute the public
+    // /share/:token URL. Set only when missing, then reused.
     let share_token: Option<String> = row.try_get("share_token").ok().flatten();
     let share_token = if let Some(t) = share_token {
         t
     } else {
-        let token = Uuid::new_v5(&Uuid::NAMESPACE_URL, diff_id.as_bytes()).to_string();
+        let token = Uuid::new_v4().to_string();
         let _ = sqlx::query("UPDATE diff SET share_token = ? WHERE id = ?")
             .bind(&token)
             .bind(&diff_id)
@@ -705,26 +734,38 @@ pub(crate) async fn blast_radius(
         {
             let now_str = Utc::now().to_rfc3339();
             for item in &evidence_items {
-                let ev_id = Uuid::new_v4().to_string();
                 let source_type = if item["kind"] == "runtime_usage" {
                     "runtime_usage"
                 } else {
                     "static_call_site"
                 };
+                let op = item["operation"].as_str().unwrap_or("");
+                let fp = item["field_path"].as_str().unwrap_or("");
+                // Deterministic id keyed on the evidence's identifying fields. A repeated
+                // GET for unchanged evidence collides on the primary key and inserts no new
+                // row, keeping this append-only table (and event_count) bounded.
+                let ev_id = Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("blast_radius:{diff_id}:{service_id}:{consumer_id}:{source_type}:{op}:{fp}")
+                        .as_bytes(),
+                )
+                .to_string();
                 let observed_at = item["recorded_at"].as_str()
                     .or_else(|| item["last_seen_at"].as_str())
                     .unwrap_or(now_str.as_str());
                 let item_confidence = if source_type == "runtime_usage" {
                     if observed_at >= cutoff_7.as_str() { "high" } else { "medium" }
                 } else {
-                    let op = item["operation"].as_str().unwrap_or("").trim();
-                    if !op.is_empty() { "medium" } else { "low" }
+                    let op_t = op.trim();
+                    if !op_t.is_empty() { "medium" } else { "low" }
                 };
+                // ON CONFLICT(id) DO NOTHING is atomic on SQLite and PostgreSQL; combined
+                // with the deterministic id above this makes the GET write idempotent.
                 sqlx::query(
                     "INSERT INTO impact_evidence \
                      (id, org_id, diff_id, producer_service_id, consumer_id, source_type, \
                       operation, field_path, confidence, file_path, line_number, observed_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
                 )
                 .bind(&ev_id)
                 .bind(&svc_org_id)
@@ -732,8 +773,8 @@ pub(crate) async fn blast_radius(
                 .bind(&service_id)
                 .bind(&consumer_id)
                 .bind(source_type)
-                .bind(item["operation"].as_str().unwrap_or(""))
-                .bind(item["field_path"].as_str().unwrap_or(""))
+                .bind(op)
+                .bind(fp)
                 .bind(item_confidence)
                 .bind(item["file_path"].as_str())
                 .bind(item["line_number"].as_i64())

@@ -7,7 +7,7 @@ use axum::{
 use chrono::Utc;
 use serde_json::{json, Value};
 use uuid::Uuid;
-use crate::auth::{JwtClaims, assert_org_access};
+use crate::auth::{JwtClaims, OrgResource, assert_org_access, require_org_owned};
 use crate::errors::ApiError;
 use crate::utils::collection_evidence_id;
 
@@ -209,6 +209,10 @@ pub(crate) async fn ingest_collection_evidence(
     let now = Utc::now().to_rfc3339();
     let mut inserted = 0usize;
 
+    // Wrap the batch in a single transaction so a mid-batch failure rolls back
+    // rather than leaving a partial commit. The deterministic UUID v5 id plus
+    // ON CONFLICT(id) DO NOTHING keeps each row idempotent across re-scans/retries.
+    let mut tx = pool.begin().await?;
     for item in &items {
         let id = collection_evidence_id(
             &item.consumer_id,
@@ -242,13 +246,15 @@ pub(crate) async fn ingest_collection_evidence(
         .bind("medium")
         .bind(&uri)
         .bind(&now)
-        .execute(&pool)
-        .await?;
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::errors::map_ingest_db_error)?;
 
         if result.rows_affected() > 0 {
             inserted += 1;
         }
     }
+    tx.commit().await?;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -260,9 +266,15 @@ pub(crate) async fn ingest_collection_evidence(
 pub(crate) async fn create_subscription(
     Path(service_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
     Json(body): Json<CreateSubscriptionBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
+
+    // Org isolation: both the service and the consumer must belong to the caller's org.
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    require_org_owned(&pool, OrgResource::Service, &service_id, &org_id).await?;
+    require_org_owned(&pool, OrgResource::Consumer, &body.consumer_id, &org_id).await?;
 
     // Verify consumer exists.
     let consumer_exists = sqlx::query("SELECT id FROM consumer WHERE id = ?")

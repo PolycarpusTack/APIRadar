@@ -8,7 +8,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
-use crate::auth::JwtClaims;
+use crate::auth::{JwtClaims, OrgResource, require_org_owned};
 use crate::errors::ApiError;
 
 #[derive(serde::Deserialize)]
@@ -33,6 +33,19 @@ pub(crate) async fn create_acknowledgement(
     }
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+
+    // Org isolation: the referenced resources must belong to the caller's org
+    // before we record an acknowledgement (or post a GitHub status) for them.
+    if let Some(ref diff_id) = body.diff_id {
+        require_org_owned(&pool, OrgResource::Diff, diff_id, &org_id).await?;
+    }
+    if let Some(ref service_id) = body.service_id {
+        require_org_owned(&pool, OrgResource::Service, service_id, &org_id).await?;
+    }
+    if let Some(ref consumer_id) = body.consumer_id {
+        require_org_owned(&pool, OrgResource::Consumer, consumer_id, &org_id).await?;
+    }
+
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 

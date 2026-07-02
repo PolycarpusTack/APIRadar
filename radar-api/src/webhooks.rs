@@ -355,29 +355,46 @@ fn build_slack_block_kit(diff_payload: &serde_json::Value) -> serde_json::Value 
     let total = diff_payload.get("changes_count").and_then(|v| v.as_i64()).unwrap_or(0);
     let diff_id = diff_payload.get("diff_id").and_then(|v| v.as_str()).unwrap_or("");
 
-    json!({
-        "blocks": [
-            {
-                "type": "header",
-                "text": { "type": "plain_text", "text": format!("⚡ API Drift Detected — {service_name}") }
-            },
-            {
-                "type": "section",
-                "fields": [
-                    { "type": "mrkdwn", "text": format!("*Breaking Changes*\n{breaking}") },
-                    { "type": "mrkdwn", "text": format!("*Total Changes*\n{total}") }
-                ]
-            },
-            {
-                "type": "actions",
-                "elements": [{
-                    "type": "button",
-                    "text": { "type": "plain_text", "text": "View Diff" },
-                    "url": format!("/diffs/{diff_id}")
-                }]
-            }
-        ]
-    })
+    let mut blocks = vec![
+        json!({
+            "type": "header",
+            "text": { "type": "plain_text", "text": format!("⚡ API Drift Detected — {service_name}") }
+        }),
+        json!({
+            "type": "section",
+            "fields": [
+                { "type": "mrkdwn", "text": format!("*Breaking Changes*\n{breaking}") },
+                { "type": "mrkdwn", "text": format!("*Total Changes*\n{total}") }
+            ]
+        }),
+    ];
+
+    // Slack Block Kit buttons require an absolute URL; a relative "/diffs/{id}" is
+    // rejected. Build the link from RADAR_PUBLIC_BASE_URL. If unset, omit the button
+    // entirely rather than sending an invalid payload (no hardcoded domain).
+    if let Some(base) = slack_diff_url(diff_id) {
+        blocks.push(json!({
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": { "type": "plain_text", "text": "View Diff" },
+                "url": base
+            }]
+        }));
+    }
+
+    json!({ "blocks": blocks })
+}
+
+/// Build an absolute "View Diff" URL from RADAR_PUBLIC_BASE_URL, or None when the
+/// base URL is unset/empty so the caller can omit the (invalid-if-relative) button.
+fn slack_diff_url(diff_id: &str) -> Option<String> {
+    let base = std::env::var("RADAR_PUBLIC_BASE_URL").ok()?;
+    let base = base.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    Some(format!("{base}/diffs/{diff_id}"))
 }
 
 struct DeliveryTask {
@@ -399,12 +416,13 @@ async fn deliver_webhook_event(t: DeliveryTask) {
 
     // Insert pending delivery record
     let _ = sqlx::query(
-        "INSERT INTO webhook_delivery (id, webhook_id, event, payload, status, attempt, error, delivered_at) VALUES (?, ?, ?, ?, 'pending', 0, NULL, NULL)",
+        "INSERT INTO webhook_delivery (id, webhook_id, event, payload, status, attempt, error, delivered_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, NULL, NULL, ?)",
     )
     .bind(&delivery_id)
     .bind(&webhook_id)
     .bind(&event)
     .bind(&body)
+    .bind(&now)
     .execute(&pool)
     .await;
 
@@ -478,68 +496,6 @@ async fn deliver_webhook_event(t: DeliveryTask) {
     crate::audit::record_event(&pool, &org_id, "system", "webhook.failed", Some("webhook"), Some(&webhook_id), Some(&serde_json::json!({ "event": event, "error": last_error }))).await;
 }
 
-// ---------------------------------------------------------------------------
-// GET /v1/webhooks/:id/deliveries — delivery audit log
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sign_payload_starts_with_sha256_prefix() {
-        let sig = sign_payload("secret", b"hello world");
-        assert!(sig.starts_with("sha256="), "expected sha256= prefix, got: {sig}");
-        assert_eq!(sig.len(), 7 + 64, "expected sha256= + 64 hex chars");
-    }
-
-    #[test]
-    fn sign_payload_is_deterministic() {
-        assert_eq!(sign_payload("key", b"body"), sign_payload("key", b"body"));
-    }
-
-    #[test]
-    fn sign_payload_changes_with_different_secret() {
-        assert_ne!(sign_payload("secret1", b"body"), sign_payload("secret2", b"body"));
-    }
-
-    #[test]
-    fn sign_payload_changes_with_different_body() {
-        assert_ne!(sign_payload("key", b"body-a"), sign_payload("key", b"body-b"));
-    }
-
-    #[test]
-    fn mask_secret_shows_first_4_ascii_chars() {
-        let (_, hint) = mask_secret("abcdefgh", false);
-        assert_eq!(hint, "abcd****");
-    }
-
-    #[test]
-    fn mask_secret_handles_short_secret() {
-        let (_, hint) = mask_secret("ab", false);
-        assert_eq!(hint, "ab****");
-    }
-
-    #[test]
-    fn mask_secret_handles_multibyte_utf8_without_panic() {
-        // "€" is 3 bytes; slicing at byte 4 would panic without char_indices
-        let (_, hint) = mask_secret("€€€€€", false);
-        assert!(hint.ends_with("****"));
-    }
-
-    #[test]
-    fn mask_secret_reveals_full_when_requested() {
-        let (full, _) = mask_secret("my-secret", true);
-        assert_eq!(full, Some("my-secret".to_string()));
-    }
-
-    #[test]
-    fn mask_secret_hides_full_when_not_requested() {
-        let (full, _) = mask_secret("my-secret", false);
-        assert_eq!(full, None);
-    }
-}
-
 pub(crate) async fn list_deliveries(
     State(pool): State<sqlx::AnyPool>,
     org: Option<axum::extract::Extension<JwtClaims>>,
@@ -558,7 +514,7 @@ pub(crate) async fn list_deliveries(
     }
 
     let rows = sqlx::query(
-        "SELECT id, webhook_id, event, status, attempt, error, delivered_at FROM webhook_delivery WHERE webhook_id = ? ORDER BY rowid DESC LIMIT 50",
+        "SELECT id, webhook_id, event, status, attempt, error, delivered_at FROM webhook_delivery WHERE webhook_id = ? ORDER BY created_at DESC, id DESC LIMIT 50",
     )
     .bind(&id)
     .fetch_all(&pool)
@@ -717,4 +673,94 @@ async fn retry_pending_delivery(
         "outbox: delivery {delivery_id} permanently failed: {:?}",
         last_error
     );
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/webhooks/:id/deliveries — delivery audit log
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sign_payload_starts_with_sha256_prefix() {
+        let sig = sign_payload("secret", b"hello world");
+        assert!(sig.starts_with("sha256="), "expected sha256= prefix, got: {sig}");
+        assert_eq!(sig.len(), 7 + 64, "expected sha256= + 64 hex chars");
+    }
+
+    #[test]
+    fn sign_payload_is_deterministic() {
+        assert_eq!(sign_payload("key", b"body"), sign_payload("key", b"body"));
+    }
+
+    #[test]
+    fn sign_payload_changes_with_different_secret() {
+        assert_ne!(sign_payload("secret1", b"body"), sign_payload("secret2", b"body"));
+    }
+
+    #[test]
+    fn sign_payload_changes_with_different_body() {
+        assert_ne!(sign_payload("key", b"body-a"), sign_payload("key", b"body-b"));
+    }
+
+    #[test]
+    fn mask_secret_shows_first_4_ascii_chars() {
+        let (_, hint) = mask_secret("abcdefgh", false);
+        assert_eq!(hint, "abcd****");
+    }
+
+    #[test]
+    fn mask_secret_handles_short_secret() {
+        let (_, hint) = mask_secret("ab", false);
+        assert_eq!(hint, "ab****");
+    }
+
+    #[test]
+    fn mask_secret_handles_multibyte_utf8_without_panic() {
+        // "€" is 3 bytes; slicing at byte 4 would panic without char_indices
+        let (_, hint) = mask_secret("€€€€€", false);
+        assert!(hint.ends_with("****"));
+    }
+
+    #[test]
+    fn mask_secret_reveals_full_when_requested() {
+        let (full, _) = mask_secret("my-secret", true);
+        assert_eq!(full, Some("my-secret".to_string()));
+    }
+
+    #[test]
+    fn mask_secret_hides_full_when_not_requested() {
+        let (full, _) = mask_secret("my-secret", false);
+        assert_eq!(full, None);
+    }
+
+    #[test]
+    fn slack_diff_url_absolute_when_base_set() {
+        std::env::set_var("RADAR_PUBLIC_BASE_URL", "https://radar.example.com/");
+        assert_eq!(
+            slack_diff_url("abc-123"),
+            Some("https://radar.example.com/diffs/abc-123".to_string()),
+        );
+        std::env::remove_var("RADAR_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    fn slack_diff_url_none_when_base_unset() {
+        std::env::remove_var("RADAR_PUBLIC_BASE_URL");
+        assert_eq!(slack_diff_url("abc-123"), None);
+    }
+
+    #[test]
+    fn slack_block_kit_omits_button_without_base_url() {
+        std::env::remove_var("RADAR_PUBLIC_BASE_URL");
+        let payload = json!({
+            "service_name": "svc", "breaking_count": 1, "changes_count": 2, "diff_id": "d1",
+        });
+        let block_kit = build_slack_block_kit(&payload);
+        let blocks = block_kit["blocks"].as_array().unwrap();
+        // header + section only; the actions/button block is omitted (would be a relative URL).
+        assert!(blocks.iter().all(|b| b["type"] != "actions"));
+    }
 }

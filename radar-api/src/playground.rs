@@ -22,10 +22,18 @@ pub(crate) struct SandboxEnvBody {
 }
 
 fn mask_token(t: &str) -> String {
-    if t.len() <= 4 {
+    // Count characters (not bytes) and slice on a char boundary so a multi-byte
+    // UTF-8 token (e.g. "€€€€€") never panics. Mirrors webhooks::mask_secret.
+    let char_count = t.chars().count();
+    if char_count <= 4 {
         "***".into()
     } else {
-        format!("***{}", &t[t.len() - 4..])
+        let start = t
+            .char_indices()
+            .nth(char_count - 4)
+            .map(|(i, _)| i)
+            .unwrap_or(t.len());
+        format!("***{}", &t[start..])
     }
 }
 
@@ -196,17 +204,24 @@ pub(crate) async fn delete_sandbox_env(
 // GET /v1/spec-versions
 pub(crate) async fn list_spec_versions(
     State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<JwtClaims>>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
+    // Org isolation: mirror get_spec_version_raw — authenticated callers only see
+    // spec versions for their own services. Empty org (desktop/no-auth) sees all.
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let rows = sqlx::query(
         r#"SELECT sv.id, sv.service_id, s.name AS service_name, sv.git_ref,
                   sv.spec_format, sv.captured_at
            FROM spec_version sv
            JOIN service s ON s.id = sv.service_id
            WHERE sv.spec_yaml IS NOT NULL
+             AND (? = '' OR s.org_id = ?)
            ORDER BY sv.captured_at DESC
            LIMIT 100"#,
     )
+    .bind(&org_id)
+    .bind(&org_id)
     .fetch_all(&pool)
     .await?;
 
@@ -265,4 +280,27 @@ pub(crate) async fn get_spec_version_raw(
         [(axum::http::header::CONTENT_TYPE, content_type)],
         content,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mask_token;
+
+    #[test]
+    fn mask_token_reveals_last_4_ascii() {
+        assert_eq!(mask_token("abcdefgh"), "***efgh");
+    }
+
+    #[test]
+    fn mask_token_short_token_fully_masked() {
+        assert_eq!(mask_token("abcd"), "***");
+        assert_eq!(mask_token("ab"), "***");
+    }
+
+    #[test]
+    fn mask_token_multibyte_utf8_does_not_panic() {
+        // "€" is 3 bytes; a naive byte slice `&t[len-4..]` would land mid-char and panic.
+        let masked = mask_token("€€€€€");
+        assert_eq!(masked, "***€€€€");
+    }
 }

@@ -2,10 +2,11 @@
 // POST /v1/audit-events lets external callers (CLI, integrations) record events too.
 
 use axum::{
-    extract::{Query, State},
+    extract::{Extension, Query, State},
     http::StatusCode,
     Json,
 };
+use crate::auth::JwtClaims;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::AnyPool;
@@ -124,9 +125,15 @@ fn row_to_json(
 
 pub(crate) async fn list_audit_events(
     State(pool): State<AnyPool>,
+    org: Option<Extension<JwtClaims>>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    let org_id = "default";
+    // Org isolation: read events scoped to the caller's org. Empty org
+    // (desktop/no-auth) reads only the events written in that same empty-org
+    // mode — consistent with create_audit_event / record_event, which now bind
+    // the caller's org rather than a hardcoded "default".
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = org_id.as_str();
 
     let base = "SELECT id, org_id, actor, action, entity_type, entity_id, meta, created_at \
                 FROM audit_event WHERE org_id = ?";
@@ -168,11 +175,13 @@ pub(crate) async fn list_audit_events(
 
 pub(crate) async fn create_audit_event(
     State(pool): State<AnyPool>,
+    org: Option<Extension<JwtClaims>>,
     Json(body): Json<CreateBody>,
 ) -> (StatusCode, Json<Value>) {
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     record_event(
         &pool,
-        "default",
+        &org_id,
         &body.actor,
         &body.action,
         body.entity_type.as_deref(),

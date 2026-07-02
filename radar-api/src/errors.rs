@@ -30,6 +30,22 @@ impl From<sqlx::Error> for ApiError {
     }
 }
 
+/// Map a database error from a batch ingest to an `ApiError`, translating
+/// user-caused constraint violations (foreign-key / check) into a 4xx
+/// `BadRequest` instead of a 500. A FK violation here means the client sent a
+/// row referencing an unknown `consumer_id`/`service_id` — client error, not a
+/// server fault. Other database errors remain 500s.
+pub(crate) fn map_ingest_db_error(e: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(db) = &e {
+        if db.is_foreign_key_violation() || db.is_check_violation() {
+            return ApiError::BadRequest(
+                "batch references an unknown consumer_id or service_id".to_string(),
+            );
+        }
+    }
+    ApiError::Db(e)
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {

@@ -28,6 +28,40 @@ pub(crate) fn is_host_allowed(url_str: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Secret handling — constant-time compare + credential redaction
+// ---------------------------------------------------------------------------
+
+/// Compare two byte strings in constant time (w.r.t. content) to avoid leaking
+/// how many leading bytes matched via timing. The length check short-circuits,
+/// which only reveals length equality — acceptable for fixed-format tokens.
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+// ---------------------------------------------------------------------------
+// Pagination clamping — identical behaviour on SQLite and PostgreSQL
+// ---------------------------------------------------------------------------
+
+/// Clamp user-supplied pagination to safe bounds. A negative `LIMIT` means
+/// "return everything" on SQLite (a potential data dump / DoS) but raises an
+/// error on PostgreSQL — so this floors both values and caps the limit,
+/// yielding identical behaviour on both backends.
+pub(crate) fn clamp_pagination(limit: Option<i64>, offset: Option<i64>) -> (i64, i64) {
+    const DEFAULT_LIMIT: i64 = 50;
+    const MAX_LIMIT: i64 = 200;
+    let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let offset = offset.unwrap_or(0).max(0);
+    (limit, offset)
+}
+
+// ---------------------------------------------------------------------------
 // SSRF protection — shared guard for webhooks and scheduled scans
 // ---------------------------------------------------------------------------
 
@@ -209,9 +243,47 @@ pub(crate) fn apply_evolution_rules(
         .collect()
 }
 
+pub(crate) fn parse_codeowners(content: &str) -> Vec<String> {
+    let mut owners: Vec<String> = content
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('#')
+        })
+        .flat_map(|l| {
+            let mut parts = l.split_whitespace();
+            let _pattern = parts.next();
+            parts
+                .filter(|s| s.starts_with('@'))
+                .map(|s| s.trim_start_matches('@').to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    owners.sort();
+    owners.dedup();
+    owners
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constant_time_eq_matches_semantics() {
+        assert!(constant_time_eq(b"Bearer abc", b"Bearer abc"));
+        assert!(!constant_time_eq(b"Bearer abc", b"Bearer abd"));
+        assert!(!constant_time_eq(b"short", b"longer-value"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn clamp_pagination_bounds() {
+        // Negative limit → floored to 1 (not "everything"); huge → capped at 200.
+        assert_eq!(clamp_pagination(Some(-1), Some(-5)), (1, 0));
+        assert_eq!(clamp_pagination(Some(10_000), Some(30)), (200, 30));
+        assert_eq!(clamp_pagination(Some(25), Some(0)), (25, 0));
+        assert_eq!(clamp_pagination(None, None), (50, 0));
+    }
 
     // is_rfc1918_or_loopback — covers every blocked range and a public address
     #[test]
@@ -328,25 +400,4 @@ mod tests {
         assert!(!is_host_allowed("https://evil.internal.attacker.com/hook"));
         std::env::remove_var("RADAR_ALLOWED_HOSTS");
     }
-}
-
-pub(crate) fn parse_codeowners(content: &str) -> Vec<String> {
-    let mut owners: Vec<String> = content
-        .lines()
-        .filter(|l| {
-            let t = l.trim();
-            !t.is_empty() && !t.starts_with('#')
-        })
-        .flat_map(|l| {
-            let mut parts = l.split_whitespace();
-            let _pattern = parts.next();
-            parts
-                .filter(|s| s.starts_with('@'))
-                .map(|s| s.trim_start_matches('@').to_string())
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    owners.sort();
-    owners.dedup();
-    owners
 }

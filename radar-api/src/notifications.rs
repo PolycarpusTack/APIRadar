@@ -57,21 +57,36 @@ pub(crate) struct DigestData {
     pub(crate) top_services: Vec<(String, i64)>,
 }
 
-async fn aggregate_digest(pool: &sqlx::AnyPool) -> anyhow::Result<DigestData> {
+/// Aggregate the weekly digest. Pass an empty `org_id` for the global digest
+/// (scheduled send); a non-empty `org_id` scopes every count to that org via the
+/// `(? = '' OR ...)` no-op guard. The org value is bound twice because sqlx
+/// `Any` uses positional `?` placeholders.
+async fn aggregate_digest(pool: &sqlx::AnyPool, org_id: &str) -> anyhow::Result<DigestData> {
     let window_start = (Utc::now() - chrono::Duration::days(7)).to_rfc3339();
 
     let total_row = sqlx::query(
-        "SELECT COUNT(*) as cnt FROM diff WHERE created_at >= ?",
+        "SELECT COUNT(*) as cnt FROM diff d \
+         JOIN spec_version sv ON sv.id = d.to_version \
+         JOIN service s ON s.id = sv.service_id \
+         WHERE d.created_at >= ? AND (? = '' OR s.org_id = ?)",
     )
     .bind(&window_start)
+    .bind(org_id)
+    .bind(org_id)
     .fetch_one(pool)
     .await?;
     let total_diffs: i64 = total_row.try_get("cnt").unwrap_or(0);
 
     let breaking_row = sqlx::query(
-        "SELECT COUNT(DISTINCT d.id) as cnt FROM diff d JOIN change c ON c.diff_id = d.id WHERE c.severity = 'breaking' AND d.created_at >= ?",
+        "SELECT COUNT(DISTINCT d.id) as cnt FROM diff d \
+         JOIN change c ON c.diff_id = d.id \
+         JOIN spec_version sv ON sv.id = d.to_version \
+         JOIN service s ON s.id = sv.service_id \
+         WHERE c.severity = 'breaking' AND d.created_at >= ? AND (? = '' OR s.org_id = ?)",
     )
     .bind(&window_start)
+    .bind(org_id)
+    .bind(org_id)
     .fetch_one(pool)
     .await?;
     let breaking_diffs: i64 = breaking_row.try_get("cnt").unwrap_or(0);
@@ -81,12 +96,14 @@ async fn aggregate_digest(pool: &sqlx::AnyPool) -> anyhow::Result<DigestData> {
          FROM diff d \
          JOIN spec_version sv ON sv.id = d.to_version \
          JOIN service s ON s.id = sv.service_id \
-         WHERE d.created_at >= ? \
+         WHERE d.created_at >= ? AND (? = '' OR s.org_id = ?) \
          GROUP BY s.id, s.name \
          ORDER BY diff_count DESC \
          LIMIT 3",
     )
     .bind(&window_start)
+    .bind(org_id)
+    .bind(org_id)
     .fetch_all(pool)
     .await?;
 
@@ -164,8 +181,10 @@ pub(crate) fn render_digest_html(data: &DigestData) -> String {
 
 pub(crate) async fn preview_digest(
     State(pool): State<sqlx::AnyPool>,
+    org: Option<axum::extract::Extension<crate::auth::JwtClaims>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let data = aggregate_digest(&pool).await.map_err(|_| {
+    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let data = aggregate_digest(&pool, &org_id).await.map_err(|_| {
         ApiError::BadRequest("failed to aggregate digest data".into())
     })?;
 
@@ -230,7 +249,8 @@ async fn send_digest(pool: &sqlx::AnyPool) {
         }
     };
 
-    let data = match aggregate_digest(pool).await {
+    // Scheduled global send: empty org_id aggregates across all orgs.
+    let data = match aggregate_digest(pool, "").await {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!("digest: aggregation failed: {e}");
@@ -282,66 +302,6 @@ async fn send_digest(pool: &sqlx::AnyPool) {
         } else {
             tracing::info!("digest: sent to {recipient}");
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// K-6: GitHub status check on acknowledgement
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_data(services: Vec<(&str, i64)>) -> DigestData {
-        DigestData {
-            total_diffs: 42,
-            breaking_diffs: 7,
-            top_services: services.into_iter().map(|(n, c)| (n.to_string(), c)).collect(),
-        }
-    }
-
-    #[test]
-    fn render_digest_html_is_valid_html_document() {
-        let html = render_digest_html(&sample_data(vec![]));
-        assert!(html.starts_with("<!DOCTYPE html>"));
-        assert!(html.contains("</html>"));
-    }
-
-    #[test]
-    fn render_digest_html_contains_total_diffs() {
-        let html = render_digest_html(&sample_data(vec![]));
-        assert!(html.contains("42"), "total_diffs 42 must appear in output");
-    }
-
-    #[test]
-    fn render_digest_html_contains_breaking_diffs() {
-        let html = render_digest_html(&sample_data(vec![]));
-        assert!(html.contains("7"), "breaking_diffs 7 must appear in output");
-    }
-
-    #[test]
-    fn render_digest_html_contains_service_names_when_present() {
-        let data = sample_data(vec![("payments-api", 5), ("billing-svc", 3)]);
-        let html = render_digest_html(&data);
-        assert!(html.contains("payments-api"));
-        assert!(html.contains("billing-svc"));
-        assert!(html.contains("5"));
-        assert!(html.contains("3"));
-    }
-
-    #[test]
-    fn render_digest_html_omits_table_when_no_services() {
-        let data = sample_data(vec![]);
-        let html = render_digest_html(&data);
-        assert!(!html.contains("Top services"));
-    }
-
-    #[test]
-    fn render_digest_html_contains_branding() {
-        let html = render_digest_html(&sample_data(vec![]));
-        assert!(html.contains("API Radar"));
-        assert!(html.contains("Weekly Digest"));
     }
 }
 
@@ -416,5 +376,65 @@ pub(crate) async fn post_github_status_acknowledged(pr_url: &str) {
         }
         Ok(r) => tracing::warn!("github_status: POST failed with HTTP {}", r.status()),
         Err(e) => tracing::warn!("github_status: request error: {e}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// K-6: GitHub status check on acknowledgement
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_data(services: Vec<(&str, i64)>) -> DigestData {
+        DigestData {
+            total_diffs: 42,
+            breaking_diffs: 7,
+            top_services: services.into_iter().map(|(n, c)| (n.to_string(), c)).collect(),
+        }
+    }
+
+    #[test]
+    fn render_digest_html_is_valid_html_document() {
+        let html = render_digest_html(&sample_data(vec![]));
+        assert!(html.starts_with("<!DOCTYPE html>"));
+        assert!(html.contains("</html>"));
+    }
+
+    #[test]
+    fn render_digest_html_contains_total_diffs() {
+        let html = render_digest_html(&sample_data(vec![]));
+        assert!(html.contains("42"), "total_diffs 42 must appear in output");
+    }
+
+    #[test]
+    fn render_digest_html_contains_breaking_diffs() {
+        let html = render_digest_html(&sample_data(vec![]));
+        assert!(html.contains("7"), "breaking_diffs 7 must appear in output");
+    }
+
+    #[test]
+    fn render_digest_html_contains_service_names_when_present() {
+        let data = sample_data(vec![("payments-api", 5), ("billing-svc", 3)]);
+        let html = render_digest_html(&data);
+        assert!(html.contains("payments-api"));
+        assert!(html.contains("billing-svc"));
+        assert!(html.contains("5"));
+        assert!(html.contains("3"));
+    }
+
+    #[test]
+    fn render_digest_html_omits_table_when_no_services() {
+        let data = sample_data(vec![]);
+        let html = render_digest_html(&data);
+        assert!(!html.contains("Top services"));
+    }
+
+    #[test]
+    fn render_digest_html_contains_branding() {
+        let html = render_digest_html(&sample_data(vec![]));
+        assert!(html.contains("API Radar"));
+        assert!(html.contains("Weekly Digest"));
     }
 }

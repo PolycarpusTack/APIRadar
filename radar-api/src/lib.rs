@@ -114,28 +114,35 @@ impl RateLimiter {
     }
 }
 
-fn client_key(req: &Request) -> String {
-    // Prefer the Bearer token so each authenticated org/consumer gets an
-    // independent rate-limit bucket regardless of NAT/shared IP.
-    if let Some(auth) = req.headers().get("authorization") {
-        if let Ok(v) = auth.to_str() {
-            let token = v
-                .strip_prefix("Bearer ")
-                .or_else(|| v.strip_prefix("bearer "))
-                .unwrap_or_default();
-            if !token.is_empty() {
-                let hashed = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, token.as_bytes());
-                return format!("token:{hashed}");
-            }
+fn client_key(req: &Request, trust_proxy: bool) -> String {
+    // Key on the client's NETWORK identity, never on the Authorization header.
+    // Keying on an unvalidated Bearer token let an anonymous attacker send a
+    // fresh random token per request to get a brand-new bucket (rate-limit
+    // bypass) and grow the limiter map until pruned (memory exhaustion).
+    //
+    // X-Forwarded-For / X-Real-IP are client-supplied and spoofable, so they are
+    // honoured only when RADAR_TRUST_PROXY asserts that a trusted reverse proxy
+    // sets them. Otherwise the real socket peer address is used.
+    if trust_proxy {
+        if let Some(ip) = req
+            .headers()
+            .get("x-forwarded-for")
+            .or_else(|| req.headers().get("x-real-ip"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return format!("ip:{ip}");
         }
     }
-    // Fall back to IP for unauthenticated requests.
-    req.headers()
-        .get("x-forwarded-for")
-        .or_else(|| req.headers().get("x-real-ip"))
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').last().unwrap_or(s).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+    // Real socket peer, populated by into_make_service_with_connect_info below.
+    if let Some(ci) = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+    {
+        return format!("ip:{}", ci.0.ip());
+    }
+    "unknown".to_string()
 }
 
 
@@ -286,11 +293,17 @@ pub async fn run(
 
     let app = build_router(pool, static_dir, max_body_bytes, require_auth, jwt_secret);
 
+    // X-Forwarded-For is honoured for rate-limit keying only behind a trusted
+    // proxy; read once here rather than per-request.
+    let trust_proxy = std::env::var("RADAR_TRUST_PROXY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     // D-7: Add rate limiting as the outermost layer so it wraps the entire app.
     let app = app.layer(middleware::from_fn(move |req: Request, next: Next| {
         let lim = limiter.clone();
         async move {
-            let key = client_key(&req);
+            let key = client_key(&req, trust_proxy);
             if !lim.check_and_record(&key) {
                 metrics::counter!("radar_rate_limit_rejections_total").increment(1);
                 return (
@@ -310,7 +323,13 @@ pub async fn run(
         "radar-api listening"
     );
 
-    axum::serve(listener, app).await?;
+    // Attach the socket peer address so the rate limiter can key on the real
+    // client IP rather than a spoofable header or unvalidated token.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -540,7 +559,10 @@ async fn metrics_handler(headers: axum::http::HeaderMap) -> impl IntoResponse {
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "));
-        if provided != Some(expected.as_str()) {
+        let ok = provided
+            .map(|p| crate::utils::constant_time_eq(p.as_bytes(), expected.as_bytes()))
+            .unwrap_or(false);
+        if !ok {
             return (StatusCode::UNAUTHORIZED, "").into_response();
         }
     }
@@ -1865,6 +1887,103 @@ mod tests {
         assert!(count > 0, "impact_evidence must have rows after blast_radius call");
     }
 
+    // M-17-T1: a GET must be idempotent — repeat calls for unchanged evidence must
+    // NOT append new impact_evidence rows (deterministic id + ON CONFLICT DO NOTHING).
+    #[tokio::test]
+    async fn test_blast_radius_evidence_write_is_idempotent() {
+        let pool = test_pool().await;
+        let now = Utc::now().to_rfc3339();
+
+        let service_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&service_id).bind("idem-svc").bind("").bind("team").bind("openapi")
+        .execute(&pool).await.unwrap();
+
+        let consumer_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&consumer_id).bind("idem-consumer").bind("").bind("team").bind("e@t.com")
+        .execute(&pool).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO subscription (id, service_id, consumer_id, opted_in_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string()).bind(&service_id).bind(&consumer_id).bind(&now)
+        .execute(&pool).await.unwrap();
+
+        let from_sv = Uuid::new_v4().to_string();
+        let to_sv = Uuid::new_v4().to_string();
+        for (id, git_ref) in [(&from_sv, "v1"), (&to_sv, "v2")] {
+            sqlx::query(
+                "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(id).bind(&service_id).bind(git_ref).bind(&now).bind("openapi")
+            .execute(&pool).await.unwrap();
+        }
+
+        let diff_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&diff_id).bind(&from_sv).bind(&to_sv).bind::<Option<String>>(None).bind(&now)
+        .execute(&pool).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string()).bind(&diff_id)
+        .bind("GET /widgets \u{2192} response.price")
+        .bind("field_removed").bind("breaking").bind::<Option<String>>(None)
+        .execute(&pool).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string()).bind(&consumer_id).bind(&service_id)
+        .bind("GET /widgets").bind("price").bind(&now)
+        .execute(&pool).await.unwrap();
+
+        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None);
+
+        let call = |app: axum::Router, diff_id: String| async move {
+            let req = HttpRequest::builder()
+                .method("GET")
+                .uri(format!("/v1/diffs/{diff_id}/blast-radius"))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        };
+
+        // First GET seeds evidence.
+        call(app.clone(), diff_id.clone()).await;
+        let count_after_first: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?",
+        )
+        .bind(&diff_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(count_after_first > 0, "first GET must write evidence");
+
+        // Second GET must NOT grow the append-only table.
+        call(app.clone(), diff_id.clone()).await;
+        let count_after_second: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?",
+        )
+        .bind(&diff_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            count_after_first, count_after_second,
+            "repeat blast-radius GET must be idempotent (no new impact_evidence rows)"
+        );
+    }
+
     #[tokio::test]
     async fn test_blast_radius_max_age_days_excludes_old_evidence() {
         let pool = test_pool().await;
@@ -2162,6 +2281,194 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org GET /v1/services/:id/consumers must return 403");
+    }
+
+    // ── M-8: Org isolation sweep — cross-org 403 matrix for the handlers that
+    //         previously performed no org check. Each resource is owned by
+    //         "org-beta"; the caller presents an "org-alpha" JWT and must get 403.
+
+    /// Insert a release_note for the beta diff. Returns the note id.
+    async fn insert_beta_release_note(pool: &sqlx::AnyPool, diff_id: &str) -> String {
+        let note_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO release_note (id, diff_id, content, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&note_id).bind(diff_id).bind("beta content").bind(&now)
+        .execute(pool).await.unwrap();
+        note_id
+    }
+
+    /// Insert a consumer owned by org-beta. Returns the consumer id.
+    async fn insert_beta_consumer(pool: &sqlx::AnyPool) -> String {
+        let cid = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO consumer (id, name, repo_url, owner_team, contact, org_id) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&cid).bind("beta-consumer").bind("").bind("").bind("").bind("org-beta")
+        .execute(pool).await.unwrap();
+        cid
+    }
+
+    fn alpha_app(pool: sqlx::AnyPool) -> Router {
+        build_router(pool, None, 4 * 1024 * 1024, false, Some(E2_SECRET.to_string()))
+    }
+
+    fn alpha_req(method: &str, uri: String, body: Option<serde_json::Value>) -> HttpRequest<Body> {
+        let token = make_org_jwt("org-alpha");
+        let mut b = HttpRequest::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"));
+        match body {
+            Some(v) => {
+                b = b.header("content-type", "application/json");
+                b.body(Body::from(v.to_string())).unwrap()
+            }
+            None => b.body(Body::empty()).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_m8_get_release_note_cross_org_returns_403() {
+        let pool = test_pool().await;
+        let (_, _, _, diff_id) = setup_beta_service(&pool).await;
+        let note_id = insert_beta_release_note(&pool, &diff_id).await;
+        let resp = alpha_app(pool)
+            .oneshot(alpha_req("GET", format!("/v1/release-notes/{note_id}"), None))
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org GET /v1/release-notes/:id must return 403");
+    }
+
+    #[tokio::test]
+    async fn test_m8_patch_release_note_status_cross_org_returns_403() {
+        let pool = test_pool().await;
+        let (_, _, _, diff_id) = setup_beta_service(&pool).await;
+        let note_id = insert_beta_release_note(&pool, &diff_id).await;
+        let resp = alpha_app(pool)
+            .oneshot(alpha_req("PATCH", format!("/v1/release-notes/{note_id}/status"),
+                Some(serde_json::json!({"status": "reviewed"}))))
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org PATCH release-note status must return 403");
+    }
+
+    #[tokio::test]
+    async fn test_m8_generate_status_cross_org_returns_403() {
+        let pool = test_pool().await;
+        let (_, _, _, diff_id) = setup_beta_service(&pool).await;
+        let note_id = insert_beta_release_note(&pool, &diff_id).await;
+        let resp = alpha_app(pool)
+            .oneshot(alpha_req("GET", format!("/v1/release-notes/{note_id}/generate-status"), None))
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org GET generate-status must return 403");
+    }
+
+    #[tokio::test]
+    async fn test_m8_create_release_note_cross_org_returns_403() {
+        let pool = test_pool().await;
+        let (_, _, _, diff_id) = setup_beta_service(&pool).await;
+        let resp = alpha_app(pool)
+            .oneshot(alpha_req("POST", format!("/v1/diffs/{diff_id}/release-notes"),
+                Some(serde_json::json!({"content": "x"}))))
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org POST release-notes must return 403");
+    }
+
+    #[tokio::test]
+    async fn test_m8_generate_release_note_cross_org_returns_403() {
+        let pool = test_pool().await;
+        let (_, _, _, diff_id) = setup_beta_service(&pool).await;
+        let resp = alpha_app(pool)
+            .oneshot(alpha_req("POST", format!("/v1/diffs/{diff_id}/release-notes/generate"),
+                Some(serde_json::json!({}))))
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org generate release-note must return 403");
+    }
+
+    #[tokio::test]
+    async fn test_m8_migration_guide_cross_org_returns_403() {
+        let pool = test_pool().await;
+        let (_, _, _, diff_id) = setup_beta_service(&pool).await;
+        let resp = alpha_app(pool)
+            .oneshot(alpha_req("GET", format!("/v1/diffs/{diff_id}/migration-guide"), None))
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org migration-guide must return 403");
+    }
+
+    #[tokio::test]
+    async fn test_m8_create_acknowledgement_cross_org_returns_403() {
+        let pool = test_pool().await;
+        let (_, _, _, diff_id) = setup_beta_service(&pool).await;
+        let resp = alpha_app(pool)
+            .oneshot(alpha_req("POST", "/v1/acknowledgements".into(),
+                Some(serde_json::json!({"diff_id": diff_id, "acknowledged_by": "mallory"}))))
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org acknowledgement must return 403");
+    }
+
+    #[tokio::test]
+    async fn test_m8_create_scan_cross_org_returns_403() {
+        let pool = test_pool().await;
+        let (service_id, _, _, _) = setup_beta_service(&pool).await;
+        let resp = alpha_app(pool)
+            .oneshot(alpha_req("POST", "/v1/scheduled-scans".into(),
+                Some(serde_json::json!({
+                    "service_id": service_id,
+                    "spec_url": "https://example.com/openapi.yaml",
+                    "interval_minutes": 60
+                }))))
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org create scan must return 403");
+    }
+
+    #[tokio::test]
+    async fn test_m8_create_subscription_cross_org_returns_403() {
+        let pool = test_pool().await;
+        let (service_id, _, _, _) = setup_beta_service(&pool).await;
+        let consumer_id = insert_beta_consumer(&pool).await;
+        let resp = alpha_app(pool)
+            .oneshot(alpha_req("POST", format!("/v1/services/{service_id}/subscriptions"),
+                Some(serde_json::json!({"consumer_id": consumer_id}))))
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org create subscription must return 403");
+    }
+
+    #[tokio::test]
+    async fn test_m8_generate_tests_cross_org_returns_403() {
+        let pool = test_pool().await;
+        let (_, _, _, diff_id) = setup_beta_service(&pool).await;
+        let resp = alpha_app(pool)
+            .oneshot(alpha_req("POST", "/v1/generate-tests".into(),
+                Some(serde_json::json!({"diff_id": diff_id}))))
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org generate-tests must return 403");
+    }
+
+    #[tokio::test]
+    async fn test_m8_list_diff_test_suites_cross_org_returns_403() {
+        let pool = test_pool().await;
+        let (_, _, _, diff_id) = setup_beta_service(&pool).await;
+        let resp = alpha_app(pool)
+            .oneshot(alpha_req("GET", format!("/v1/diffs/{diff_id}/test-suites"), None))
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org list diff test-suites must return 403");
+    }
+
+    // Desktop / no-auth single-tenant path: empty caller org must NOT trigger a
+    // 403 even against a resource whose row carries a non-empty org_id.
+    #[tokio::test]
+    async fn test_m8_no_auth_desktop_path_not_forbidden() {
+        let pool = test_pool().await;
+        let (_, _, _, diff_id) = setup_beta_service(&pool).await;
+        let note_id = insert_beta_release_note(&pool, &diff_id).await;
+        // No JWT secret, no auth required → org resolves to "" → guard bypassed.
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("/v1/release-notes/{note_id}"))
+            .body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "desktop/no-auth must still read the note (single-tenant)");
     }
 
     #[tokio::test]
@@ -3469,57 +3776,67 @@ mod tests {
     // TD-4: token-based rate-limit key tests
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn client_key_uses_bearer_token_when_present() {
-        let req = axum::http::Request::builder()
-            .header("authorization", "Bearer abc123token")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let key = client_key(&req);
-        // Token is hashed — assert prefix and that the raw token is not stored.
-        assert!(key.starts_with("token:"), "key={key}");
-        assert!(!key.contains("abc123token"), "raw token must not appear in key");
+    fn with_peer(req: &mut Request, addr: &str) {
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            addr.parse::<std::net::SocketAddr>().unwrap(),
+        ));
     }
 
     #[test]
-    fn client_key_bearer_case_insensitive() {
-        let req = axum::http::Request::builder()
-            .header("authorization", "bearer mytoken99")
+    fn client_key_ignores_bearer_token_no_bypass() {
+        // A random Bearer token must NOT create its own bucket — otherwise an
+        // attacker mints a fresh token per request to bypass the limiter.
+        let mut a = axum::http::Request::builder()
+            .header("authorization", "Bearer randomtoken-AAAA")
             .body(axum::body::Body::empty())
             .unwrap();
-        let key = client_key(&req);
-        assert!(key.starts_with("token:"), "key={key}");
-        assert!(!key.contains("mytoken99"), "raw token must not appear in key");
+        let mut b = axum::http::Request::builder()
+            .header("authorization", "Bearer randomtoken-BBBB")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        with_peer(&mut a, "203.0.113.7:40000");
+        with_peer(&mut b, "203.0.113.7:40001");
+        // Same peer IP, different tokens → same bucket.
+        assert_eq!(client_key(&a, false), "ip:203.0.113.7");
+        assert_eq!(client_key(&a, false), client_key(&b, false));
     }
 
     #[test]
-    fn client_key_falls_back_to_ip_when_no_auth() {
-        let req = axum::http::Request::builder()
+    fn client_key_uses_peer_addr() {
+        let mut req = axum::http::Request::builder()
+            .body(axum::body::Body::empty())
+            .unwrap();
+        with_peer(&mut req, "198.51.100.9:1234");
+        assert_eq!(client_key(&req, false), "ip:198.51.100.9");
+    }
+
+    #[test]
+    fn client_key_ignores_xff_when_proxy_untrusted() {
+        // Spoofed XFF must be ignored without RADAR_TRUST_PROXY; the real peer wins.
+        let mut req = axum::http::Request::builder()
             .header("x-forwarded-for", "10.0.0.42")
             .body(axum::body::Body::empty())
             .unwrap();
-        let key = client_key(&req);
-        assert_eq!(key, "10.0.0.42");
+        with_peer(&mut req, "198.51.100.9:1234");
+        assert_eq!(client_key(&req, false), "ip:198.51.100.9");
     }
 
     #[test]
-    fn client_key_falls_back_to_unknown_when_no_headers() {
+    fn client_key_uses_xff_when_proxy_trusted() {
         let req = axum::http::Request::builder()
+            .header("x-forwarded-for", "10.0.0.42, 172.16.0.1")
             .body(axum::body::Body::empty())
             .unwrap();
-        let key = client_key(&req);
-        assert_eq!(key, "unknown");
+        // Leftmost entry is the originating client behind a trusted proxy chain.
+        assert_eq!(client_key(&req, true), "ip:10.0.0.42");
     }
 
     #[test]
-    fn client_key_empty_bearer_falls_back_to_ip() {
+    fn client_key_unknown_when_no_peer_or_headers() {
         let req = axum::http::Request::builder()
-            .header("authorization", "Bearer ")
-            .header("x-real-ip", "192.168.1.1")
             .body(axum::body::Body::empty())
             .unwrap();
-        let key = client_key(&req);
-        assert_eq!(key, "192.168.1.1");
+        assert_eq!(client_key(&req, false), "unknown");
     }
 
     // J-6 / Phase-3: POST generate returns pending job; GET generate-status returns completed content
@@ -3558,20 +3875,23 @@ mod tests {
         // Background task completes almost instantly (template, no I/O).
         // Poll up to 1 s to be safe.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
-        let mut gen_status = String::new(); // initialised by loop body; Rust requires definite assignment
+        let gen_status: String;
         let mut final_content = String::new();
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
             let status_resp = client.get(&format!("/v1/release-notes/{note_id}/generate-status")).await;
             assert_eq!(status_resp.status(), StatusCode::OK);
             let status_body = status_resp.json();
-            gen_status = status_body["generation_status"].as_str().unwrap_or("").to_owned();
-            if gen_status == "completed" {
+            let status = status_body["generation_status"].as_str().unwrap_or("").to_owned();
+            if status == "completed" {
                 final_content = status_body["content"].as_str().unwrap_or("").to_owned();
+                gen_status = status;
                 break;
             }
-            if gen_status == "failed" { break; }
-            if std::time::Instant::now() >= deadline { break; }
+            if status == "failed" || std::time::Instant::now() >= deadline {
+                gen_status = status;
+                break;
+            }
         }
         assert_eq!(gen_status, "completed", "generation did not complete in time");
         assert!(final_content.contains("field_removed"),
@@ -4259,7 +4579,7 @@ mod tests {
         let client = test_helpers::TestClient::new(pool);
         let resp = client.get("/v1/readiness").await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body: Value = serde_json::from_str(&resp.text()).unwrap();
+        let body: Value = serde_json::from_str(resp.text()).unwrap();
         assert_eq!(body["overall"], "setup_required");
         let items = body["items"].as_array().unwrap();
         // db_connected is always ok
@@ -4281,7 +4601,7 @@ mod tests {
             &serde_json::json!({ "name": "svc-a", "repo_url": "https://github.com/x/y", "owner_team": "eng", "spec_format": "openapi" }),
         ).await;
         assert_eq!(svc.status(), StatusCode::CREATED);
-        let svc_body: Value = serde_json::from_str(&svc.text()).unwrap();
+        let svc_body: Value = serde_json::from_str(svc.text()).unwrap();
         let svc_id = svc_body["id"].as_str().unwrap();
 
         let diff = client.post_json(
@@ -4299,7 +4619,7 @@ mod tests {
 
         let resp = client.get("/v1/readiness").await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body: Value = serde_json::from_str(&resp.text()).unwrap();
+        let body: Value = serde_json::from_str(resp.text()).unwrap();
         assert_eq!(body["overall"], "ready");
     }
 
@@ -4316,7 +4636,7 @@ mod tests {
             "/v1/services",
             &serde_json::json!({ "name": "pag-svc", "repo_url": "", "owner_team": "", "spec_format": "openapi" }),
         ).await;
-        let svc_id = serde_json::from_str::<Value>(&svc.text()).unwrap()["id"]
+        let svc_id = serde_json::from_str::<Value>(svc.text()).unwrap()["id"]
             .as_str().unwrap().to_string();
 
         for i in 0..3u32 {
@@ -4328,7 +4648,7 @@ mod tests {
 
         let resp = client.get("/v1/diffs?limit=2").await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body: Value = serde_json::from_str(&resp.text()).unwrap();
+        let body: Value = serde_json::from_str(resp.text()).unwrap();
         assert!(body.as_array().unwrap().len() <= 2, "limit=2 must return at most 2 diffs");
     }
 
@@ -4348,7 +4668,7 @@ mod tests {
             &serde_json::json!({ "name": "iso-svc", "repo_url": "", "owner_team": "", "spec_format": "openapi" }),
         ).await;
         assert_eq!(svc.status(), StatusCode::CREATED);
-        let svc_id = serde_json::from_str::<Value>(&svc.text()).unwrap()["id"]
+        let svc_id = serde_json::from_str::<Value>(svc.text()).unwrap()["id"]
             .as_str().unwrap().to_string();
 
         client_a.post_json(
@@ -4359,7 +4679,7 @@ mod tests {
         // org-beta must not see org-alpha's diffs in the global list
         let resp = client_b.get("/v1/diffs").await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let diffs: Vec<Value> = serde_json::from_str(&resp.text()).unwrap();
+        let diffs: Vec<Value> = serde_json::from_str(resp.text()).unwrap();
         let found = diffs.iter().any(|d| d["service_id"].as_str() == Some(&svc_id));
         assert!(!found, "org-beta must not see org-alpha's diffs");
     }
@@ -4378,7 +4698,7 @@ mod tests {
             &serde_json::json!({ "name": "upsert-consumer", "catalog_source": "test" }),
         ).await;
         assert_eq!(first.status(), StatusCode::CREATED);
-        let id1 = serde_json::from_str::<Value>(&first.text()).unwrap()["id"]
+        let id1 = serde_json::from_str::<Value>(first.text()).unwrap()["id"]
             .as_str().unwrap().to_string();
 
         let second = client.post_json(
@@ -4386,7 +4706,7 @@ mod tests {
             &serde_json::json!({ "name": "upsert-consumer", "catalog_source": "test" }),
         ).await;
         assert_eq!(second.status(), StatusCode::OK);
-        let id2 = serde_json::from_str::<Value>(&second.text()).unwrap()["id"]
+        let id2 = serde_json::from_str::<Value>(second.text()).unwrap()["id"]
             .as_str().unwrap().to_string();
 
         assert_eq!(id1, id2, "upsert with same name must return the same consumer id");
@@ -4404,13 +4724,13 @@ mod tests {
         let body = serde_json::json!({ "name": "dup-svc", "repo_url": "", "owner_team": "", "spec_format": "openapi" });
         let first = client.post_json("/v1/services", &body).await;
         assert_eq!(first.status(), StatusCode::CREATED);
-        let id1 = serde_json::from_str::<Value>(&first.text()).unwrap()["id"]
+        let id1 = serde_json::from_str::<Value>(first.text()).unwrap()["id"]
             .as_str().unwrap().to_string();
 
         let second = client.post_json("/v1/services", &body).await;
         assert_eq!(second.status(), StatusCode::CREATED,
             "same-name services are allowed; uniqueness is enforced on id only");
-        let id2 = serde_json::from_str::<Value>(&second.text()).unwrap()["id"]
+        let id2 = serde_json::from_str::<Value>(second.text()).unwrap()["id"]
             .as_str().unwrap().to_string();
 
         assert_ne!(id1, id2, "two services with the same name must get distinct ids");
@@ -4438,7 +4758,7 @@ mod tests {
         // POST returns {"ok": true}; retrieve the stored event via the list endpoint.
         let list = client.get("/v1/audit-events?action=secret.redact.test").await;
         assert_eq!(list.status(), StatusCode::OK);
-        let body: Value = serde_json::from_str(&list.text()).unwrap();
+        let body: Value = serde_json::from_str(list.text()).unwrap();
         let entry = &body["entries"][0];
         let meta = &entry["meta"];
         assert_ne!(meta["api_key"], "super-secret-key",
@@ -4457,7 +4777,7 @@ mod tests {
 
         let resp = client.get("/v1/evidence/coverage").await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body: Value = serde_json::from_str(&resp.text()).unwrap();
+        let body: Value = serde_json::from_str(resp.text()).unwrap();
         assert!(body.is_array(), "evidence/coverage must return a JSON array");
     }
 }
