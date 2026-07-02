@@ -3,6 +3,7 @@ import { CheckCircle, XCircle, Webhook, Trash2, Send, ChevronDown, ChevronUp, Sc
 import PageHeader from '../components/PageHeader'
 import TermTooltip, { TERM_DEFINITIONS } from '../components/TermTooltip'
 import { api, ApiError } from '../lib/apiClient'
+import { useFetch, errorMessage } from '../lib/useFetch'
 
 interface AppSettings {
   policy_block_on: string
@@ -43,14 +44,14 @@ function SectionCard({ title, description, children }: { title: string; descript
   )
 }
 
-function FieldRow({ label, hint, tooltip, children }: { label: string; hint?: string; tooltip?: keyof typeof TERM_DEFINITIONS; children: React.ReactNode }) {
+function FieldRow({ label, hint, tooltip, htmlFor, children }: { label: string; hint?: string; tooltip?: keyof typeof TERM_DEFINITIONS; htmlFor?: string; children: React.ReactNode }) {
   return (
     <div className="grid grid-cols-[200px_1fr] items-start gap-6">
       <div>
-        <p className="flex items-center gap-1 text-[11.5px] font-medium" style={{ color: 'var(--text-2)' }}>
+        <label htmlFor={htmlFor} className="flex items-center gap-1 text-[11.5px] font-medium" style={{ color: 'var(--text-2)' }}>
           {label}
           {tooltip && <TermTooltip term={tooltip} placement="bottom" />}
-        </p>
+        </label>
         {hint && <p className="text-[11px] mt-0.5 leading-snug" style={{ color: 'var(--text-dim)' }}>{hint}</p>}
       </div>
       <div>{children}</div>
@@ -105,8 +106,10 @@ interface DeliveryEntry {
 const ALL_EVENTS = ['diff.created']
 
 function WebhooksSection() {
-  const [webhooks, setWebhooks] = useState<WebhookEntry[]>([])
-  const [loading, setLoading] = useState(true)
+  const { data: webhooks = [], loading, error: loadError, reload } = useFetch<WebhookEntry[]>(
+    (signal) => api.get('/v1/webhooks', { signal }),
+    [],
+  )
   const [newUrl, setNewUrl] = useState('')
   const [newEvents, setNewEvents] = useState(['diff.created'])
   const [creating, setCreating] = useState(false)
@@ -114,16 +117,8 @@ function WebhooksSection() {
   const [newSecret, setNewSecret] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [deliveries, setDeliveries] = useState<Record<string, DeliveryEntry[]>>({})
-
-  const reload = () => {
-    setLoading(true)
-    api.get<WebhookEntry[]>('/v1/webhooks')
-      .then(setWebhooks)
-      .catch(() => {})
-      .finally(() => setLoading(false))
-  }
-
-  useEffect(reload, [])
+  // Destructive/side-effecting actions surface their failures here.
+  const [actionError, setActionError] = useState<string | null>(null)
 
   async function createWebhook(e: React.FormEvent) {
     e.preventDefault()
@@ -135,20 +130,31 @@ function WebhooksSection() {
       setNewUrl('')
       reload()
     } catch (err) {
-      setCreateError(err instanceof ApiError ? (err.body as { error?: string })?.error ?? err.message : (err as Error).message)
+      setCreateError(errorMessage(err))
     } finally {
       setCreating(false)
     }
   }
 
   async function deleteWebhook(id: string) {
-    await api.del(`/v1/webhooks/${id}`)
-    setWebhooks(prev => prev.filter(w => w.id !== id))
-    if (expandedId === id) setExpandedId(null)
+    if (!confirm('Delete this webhook? Delivery history for it will be lost.')) return
+    setActionError(null)
+    try {
+      await api.del(`/v1/webhooks/${id}`)
+      if (expandedId === id) setExpandedId(null)
+      reload()
+    } catch (err) {
+      setActionError(`Failed to delete webhook: ${errorMessage(err)}`)
+    }
   }
 
   async function testWebhook(id: string) {
-    await api.post(`/v1/webhooks/${id}/test`)
+    setActionError(null)
+    try {
+      await api.post(`/v1/webhooks/${id}/test`)
+    } catch (err) {
+      setActionError(`Failed to send test ping: ${errorMessage(err)}`)
+    }
   }
 
   async function toggleExpand(id: string) {
@@ -170,8 +176,13 @@ function WebhooksSection() {
     <SectionCard title="Webhooks" description="Register HTTP callbacks to receive push notifications when diffs are created.">
       {loading ? (
         <p className="text-[12px]" style={{ color: 'var(--text-dim)' }}>Loading…</p>
+      ) : loadError ? (
+        <p className="text-[12px]" style={{ color: 'var(--red)' }}>Failed to load webhooks: {loadError}</p>
       ) : (
         <div className="space-y-3">
+          {actionError && (
+            <p className="text-[12px]" style={{ color: 'var(--red)' }}>{actionError}</p>
+          )}
           {webhooks.length === 0 && (
             <p className="text-[12px]" style={{ color: 'var(--text-dim)' }}>No webhooks registered yet.</p>
           )}
@@ -188,6 +199,7 @@ function WebhooksSection() {
                   type="button"
                   onClick={() => testWebhook(wh.id)}
                   title="Send test ping"
+                  aria-label={`Send test ping to ${wh.url}`}
                   className="rounded p-1 transition-colors hover:opacity-70"
                   style={{ color: 'var(--cobalt-mid)' }}
                 >
@@ -197,6 +209,7 @@ function WebhooksSection() {
                   type="button"
                   onClick={() => deleteWebhook(wh.id)}
                   title="Delete webhook"
+                  aria-label={`Delete webhook ${wh.url}`}
                   className="rounded p-1 transition-colors hover:opacity-70"
                   style={{ color: 'var(--red)' }}
                 >
@@ -205,6 +218,8 @@ function WebhooksSection() {
                 <button
                   type="button"
                   onClick={() => toggleExpand(wh.id)}
+                  aria-label={expandedId === wh.id ? 'Collapse delivery history' : 'Expand delivery history'}
+                  aria-expanded={expandedId === wh.id}
                   className="rounded p-1 transition-colors hover:opacity-70"
                   style={{ color: 'var(--text-dim)' }}
                 >
@@ -238,8 +253,9 @@ function WebhooksSection() {
 
           <form onSubmit={createWebhook} className="flex items-end gap-2 pt-1">
             <div className="flex-1">
-              <label className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>HTTPS endpoint URL</label>
+              <label htmlFor="webhook-url" className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>HTTPS endpoint URL</label>
               <input
+                id="webhook-url"
                 type="url"
                 value={newUrl}
                 onChange={e => setNewUrl(e.target.value)}
@@ -250,8 +266,9 @@ function WebhooksSection() {
               />
             </div>
             <div>
-              <label className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Events</label>
+              <label htmlFor="webhook-events" className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Events</label>
               <select
+                id="webhook-events"
                 value={newEvents[0]}
                 onChange={e => setNewEvents([e.target.value])}
                 className="rounded border px-2 py-1.5 text-[12px] outline-none"
@@ -440,8 +457,10 @@ function ScanStatusBadge({ status, error }: { status: string | null; error: stri
 }
 
 function ScheduledScansSection() {
-  const [scans, setScans] = useState<ScanEntry[]>([])
-  const [loading, setLoading] = useState(true)
+  const { data: scans = [], loading, error: loadError, reload } = useFetch<ScanEntry[]>(
+    (signal) => api.get('/v1/scheduled-scans', { signal }),
+    [],
+  )
   const [showForm, setShowForm] = useState(false)
   const [serviceId, setServiceId] = useState('')
   const [specUrl, setSpecUrl] = useState('')
@@ -449,16 +468,7 @@ function ScheduledScansSection() {
   const [intervalMinutes, setIntervalMinutes] = useState(60)
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
-
-  const reload = () => {
-    setLoading(true)
-    api.get<ScanEntry[]>('/v1/scheduled-scans')
-      .then(setScans)
-      .catch(() => {})
-      .finally(() => setLoading(false))
-  }
-
-  useEffect(reload, [])
+  const [actionError, setActionError] = useState<string | null>(null)
 
   async function createScan(e: React.FormEvent) {
     e.preventDefault()
@@ -468,15 +478,21 @@ function ScheduledScansSection() {
       setShowForm(false); setServiceId(''); setSpecUrl('')
       reload()
     } catch (err) {
-      setCreateError(err instanceof ApiError ? err.message : String(err))
+      setCreateError(errorMessage(err))
     } finally {
       setCreating(false)
     }
   }
 
   async function deleteScan(id: string) {
-    await api.del(`/v1/scheduled-scans/${id}`)
-    setScans(prev => prev.filter(s => s.id !== id))
+    if (!confirm('Delete this scheduled scan? It will stop running.')) return
+    setActionError(null)
+    try {
+      await api.del(`/v1/scheduled-scans/${id}`)
+      reload()
+    } catch (err) {
+      setActionError(`Failed to delete scan: ${errorMessage(err)}`)
+    }
   }
 
   const inputCls = 'w-full rounded border px-2.5 py-1.5 text-[12.5px] outline-none focus:ring-1'
@@ -486,8 +502,13 @@ function ScheduledScansSection() {
     <SectionCard title="Scheduled Scans" description="Automatically fetch and diff a spec URL on a recurring schedule. Requires an HTTPS endpoint that returns the raw spec.">
       {loading ? (
         <p className="text-[12px]" style={{ color: 'var(--text-dim)' }}>Loading…</p>
+      ) : loadError ? (
+        <p className="text-[12px]" style={{ color: 'var(--red)' }}>Failed to load scheduled scans: {loadError}</p>
       ) : (
         <div className="space-y-3">
+          {actionError && (
+            <p className="text-[12px]" style={{ color: 'var(--red)' }}>{actionError}</p>
+          )}
           {scans.length === 0 && !showForm && (
             <p className="text-[12px]" style={{ color: 'var(--text-dim)' }}>No scheduled scans configured.</p>
           )}
@@ -508,7 +529,7 @@ function ScheduledScansSection() {
                   <p className="text-[10.5px] mt-0.5 truncate" style={{ color: 'var(--red)' }}>{s.last_run_error}</p>
                 )}
               </div>
-              <button type="button" onClick={() => deleteScan(s.id)} title="Delete scan" className="rounded p-1 transition-colors hover:opacity-70 flex-shrink-0" style={{ color: 'var(--red)' }}>
+              <button type="button" onClick={() => deleteScan(s.id)} title="Delete scan" aria-label={`Delete scheduled scan for ${s.spec_url}`} className="rounded p-1 transition-colors hover:opacity-70 flex-shrink-0" style={{ color: 'var(--red)' }}>
                 <Trash2 className="h-3 w-3" />
               </button>
             </div>
@@ -518,24 +539,24 @@ function ScheduledScansSection() {
             <form onSubmit={createScan} className="rounded border p-3 space-y-2" style={{ border: '1px solid var(--border)', background: 'var(--bg-raised)' }}>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Service ID</label>
-                  <input value={serviceId} onChange={e => setServiceId(e.target.value)} placeholder="uuid" className={inputCls} style={inputStyle} required />
+                  <label htmlFor="scan-service-id" className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Service ID</label>
+                  <input id="scan-service-id" value={serviceId} onChange={e => setServiceId(e.target.value)} placeholder="uuid" className={inputCls} style={inputStyle} required />
                 </div>
                 <div>
-                  <label className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Spec URL (HTTPS)</label>
-                  <input type="url" value={specUrl} onChange={e => setSpecUrl(e.target.value)} placeholder="https://api.example.com/openapi.json" className={inputCls} style={inputStyle} required />
+                  <label htmlFor="scan-spec-url" className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Spec URL (HTTPS)</label>
+                  <input id="scan-spec-url" type="url" value={specUrl} onChange={e => setSpecUrl(e.target.value)} placeholder="https://api.example.com/openapi.json" className={inputCls} style={inputStyle} required />
                 </div>
                 <div>
-                  <label className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Format</label>
-                  <select value={format} onChange={e => setFormat(e.target.value)} className={inputCls} style={inputStyle}>
+                  <label htmlFor="scan-format" className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Format</label>
+                  <select id="scan-format" value={format} onChange={e => setFormat(e.target.value)} className={inputCls} style={inputStyle}>
                     <option value="openapi">OpenAPI</option>
                     <option value="graphql">GraphQL</option>
                     <option value="protobuf">Protobuf</option>
                   </select>
                 </div>
                 <div>
-                  <label className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Interval (minutes, ≥15)</label>
-                  <input type="number" min={15} value={intervalMinutes} onChange={e => setIntervalMinutes(Number(e.target.value))} className={inputCls} style={inputStyle} />
+                  <label htmlFor="scan-interval" className="text-[11px] font-medium block mb-1" style={{ color: 'var(--text-2)' }}>Interval (minutes, ≥15)</label>
+                  <input id="scan-interval" type="number" min={15} value={intervalMinutes} onChange={e => setIntervalMinutes(Number(e.target.value))} className={inputCls} style={inputStyle} />
                 </div>
               </div>
               {createError && <p className="text-[11.5px]" style={{ color: 'var(--red)' }}>{createError}</p>}
@@ -568,22 +589,32 @@ function ScheduledScansSection() {
 // ---------------------------------------------------------------------------
 
 export default function SettingsPage() {
+  const load = useFetch<{ settings: AppSettings; integrations: Integrations }>(
+    async (signal) => {
+      const [settings, integrations] = await Promise.all([
+        api.get<AppSettings>('/v1/settings', { signal }),
+        api.get<Integrations>('/v1/settings/integrations', { signal }),
+      ])
+      return { settings, integrations }
+    },
+    [],
+  )
+  const loading = load.loading
+  const loadError = load.error
+
   const [form, setForm] = useState<AppSettings>(DEFAULTS)
   const [integrations, setIntegrations] = useState<Integrations | null>(null)
-  const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  // Save failures are surfaced separately from load failures.
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   useEffect(() => {
-    Promise.all([
-      api.get<AppSettings>('/v1/settings'),
-      api.get<Integrations>('/v1/settings/integrations'),
-    ])
-      .then(([s, i]) => { setForm(s); setIntegrations(i) })
-      .catch((e: unknown) => setError(String(e)))
-      .finally(() => setLoading(false))
-  }, [])
+    if (load.data) {
+      setForm(load.data.settings)
+      setIntegrations(load.data.integrations)
+    }
+  }, [load.data])
 
   function set<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
     setForm(prev => ({ ...prev, [key]: value }))
@@ -591,12 +622,12 @@ export default function SettingsPage() {
   }
 
   async function save() {
-    setSaving(true); setError(null); setSaved(false)
+    setSaving(true); setSaveError(null); setSaved(false)
     try {
       await api.put('/v1/settings', form)
       setSaved(true)
     } catch (e) {
-      setError(e instanceof ApiError ? (e.body as { error?: string })?.error ?? e.message : (e as Error).message)
+      setSaveError(errorMessage(e))
     } finally {
       setSaving(false)
     }
@@ -618,6 +649,14 @@ export default function SettingsPage() {
           <p className="text-[12.5px]" style={{ color: 'var(--text-3)' }}>Loading…</p>
         ) : (
           <div>
+            {loadError && (
+              <div
+                className="mb-6 rounded-lg px-4 py-3 text-[12.5px]"
+                style={{ background: 'var(--red-bg)', border: '1px solid var(--red-dim)', color: 'var(--red)' }}
+              >
+                Failed to load settings: {loadError}
+              </div>
+            )}
             <SectionCard
               title="Default Policy"
               description="Controls when a diff blocks CI and how long consumer activity is considered active."
@@ -625,8 +664,10 @@ export default function SettingsPage() {
               <FieldRow
                 label="Block on"
                 hint="When to fail the CI check for a diff."
+                htmlFor="policy-block-on"
               >
                 <select
+                  id="policy-block-on"
                   value={form.policy_block_on}
                   onChange={e => set('policy_block_on', e.target.value)}
                   className={inputCls}
@@ -642,9 +683,11 @@ export default function SettingsPage() {
                 label="Lookback window"
                 hint="Days of usage history used to determine if a consumer is active."
                 tooltip="lookback_window"
+                htmlFor="policy-lookback-days"
               >
                 <div className="flex items-center gap-2">
                   <input
+                    id="policy-lookback-days"
                     type="number"
                     min={1}
                     max={365}
@@ -660,8 +703,10 @@ export default function SettingsPage() {
               <FieldRow
                 label="Override label"
                 hint="GitHub PR label that allows a diff to bypass blocking (leave blank to disable)."
+                htmlFor="policy-override-label"
               >
                 <input
+                  id="policy-override-label"
                   type="text"
                   value={form.policy_allow_override_with ?? ''}
                   onChange={e => set('policy_allow_override_with', e.target.value || null)}
@@ -676,9 +721,10 @@ export default function SettingsPage() {
               title="Data Retention"
               description="Usage events older than this threshold are purged automatically once per hour."
             >
-              <FieldRow label="Retain usage events for">
+              <FieldRow label="Retain usage events for" htmlFor="retention-days">
                 <div className="flex items-center gap-2">
                   <input
+                    id="retention-days"
                     type="number"
                     min={1}
                     max={3650}
@@ -725,8 +771,8 @@ export default function SettingsPage() {
             <ScheduledScansSection />
             <WebhooksSection />
 
-            {error && (
-              <p className="mb-4 text-[12.5px]" style={{ color: 'var(--red)' }}>{error}</p>
+            {saveError && (
+              <p className="mb-4 text-[12.5px]" style={{ color: 'var(--red)' }}>{saveError}</p>
             )}
 
             <div className="flex items-center gap-3">

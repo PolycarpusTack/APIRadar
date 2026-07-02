@@ -461,16 +461,17 @@ export default function DiffDetailPage() {
             <div className="mb-3 rounded-lg p-4" style={{ border: '1px solid rgba(56,5,227,0.3)', background: 'var(--bg-surface)' }}>
               <div className="flex items-center justify-between mb-3">
                 <p className="text-[12px] font-semibold" style={{ color: 'var(--text-1)' }}>Create Acknowledgement</p>
-                <button onClick={() => { setShowAckForm(false); setAckError(null) }}>
+                <button type="button" aria-label="Close acknowledgement form" onClick={() => { setShowAckForm(false); setAckError(null) }}>
                   <X className="h-4 w-4" style={{ color: 'var(--text-3)' }} />
                 </button>
               </div>
               <form onSubmit={handleAckSubmit} className="space-y-3">
                 <div>
-                  <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                  <label htmlFor="ack-by" className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
                     Acknowledged by
                   </label>
                   <input
+                    id="ack-by"
                     required
                     value={ackForm.acknowledged_by}
                     onChange={(e) => setAckForm((f) => ({ ...f, acknowledged_by: e.target.value }))}
@@ -480,10 +481,11 @@ export default function DiffDetailPage() {
                   />
                 </div>
                 <div>
-                  <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                  <label htmlFor="ack-reason" className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
                     Reason
                   </label>
                   <input
+                    id="ack-reason"
                     value={ackForm.reason}
                     onChange={(e) => setAckForm((f) => ({ ...f, reason: e.target.value }))}
                     placeholder="All consumers have migrated to v2"
@@ -492,10 +494,11 @@ export default function DiffDetailPage() {
                   />
                 </div>
                 <div>
-                  <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                  <label htmlFor="ack-expires" className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
                     Expires at (optional ISO 8601)
                   </label>
                   <input
+                    id="ack-expires"
                     value={ackForm.expires_at}
                     onChange={(e) => setAckForm((f) => ({ ...f, expires_at: e.target.value }))}
                     placeholder="2026-12-31T00:00:00Z"

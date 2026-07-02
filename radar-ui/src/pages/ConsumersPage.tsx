@@ -1,11 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Users, Plus } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
 import RegisterConsumerForm from '../components/RegisterConsumerForm'
-import { api, ApiError } from '../lib/apiClient'
+import { api } from '../lib/apiClient'
+import { useFetch } from '../lib/useFetch'
+import { activateOnKey } from '../lib/a11y'
 
 interface ConsumerRow {
   id: string
@@ -46,7 +48,7 @@ function ConsumerTable({
           <button
             onClick={onRegister}
             className="flex items-center gap-1.5 rounded-md px-4 py-2 text-[12.5px] font-medium transition-opacity hover:opacity-90"
-            style={{ background: 'var(--cobalt-mid)', color: '#fff' }}
+            style={{ background: 'var(--cobalt-mid)', color: 'var(--text-inverse)' }}
           >
             <Plus className="h-3.5 w-3.5" />
             Register Consumer
@@ -79,6 +81,10 @@ function ConsumerTable({
               className="group cursor-pointer transition-colors"
               style={{ borderBottom: '1px solid var(--border)' }}
               onClick={() => onSelect(row.id)}
+              role="button"
+              tabIndex={0}
+              aria-label={`View consumer ${row.name}`}
+              onKeyDown={activateOnKey(() => onSelect(row.id))}
             >
               <td className="px-3 py-2.5 font-medium group-hover:bg-[var(--bg-hover)]" style={{ fontSize: '12.5px', color: 'var(--text-1)' }}>
                 <div>{row.name}</div>
@@ -117,24 +123,15 @@ function ConsumerTable({
 
 export default function ConsumersPage() {
   const navigate = useNavigate()
-  const [rows, setRows] = useState<ConsumerRow[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [showForm, setShowForm] = useState(false)
-
-  function loadConsumers() {
-    setLoading(true)
-    api.get<ConsumerRow[]>('/v1/consumers')
-      .then(setRows)
-      .catch((e: unknown) => setError(e instanceof ApiError ? e.message : String(e)))
-      .finally(() => setLoading(false))
-  }
-
-  useEffect(loadConsumers, [])
+  const { data: rows = [], loading, error, reload } = useFetch<ConsumerRow[]>(
+    (signal) => api.get('/v1/consumers', { signal }),
+    [],
+  )
 
   function handleCreated() {
     setShowForm(false)
-    loadConsumers()
+    reload()
   }
 
   return (

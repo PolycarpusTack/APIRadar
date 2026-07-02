@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import PageHeader from '../components/PageHeader'
 import KpiCard from '../components/KpiCard'
 import { api } from '../lib/apiClient'
+import { useFetch } from '../lib/useFetch'
 import { buildDiffBuckets } from '../lib/diffTimeline'
 
 // ---------------------------------------------------------------------------
@@ -334,15 +335,15 @@ function QuickStart() {
 // ---------------------------------------------------------------------------
 
 export default function HomePage() {
-  const [summary, setSummary] = useState<Summary | null>(null)
-  const [readiness, setReadiness] = useState<Readiness | null>(null)
-  const [diffs, setDiffs] = useState<DiffEntry[]>([])
+  const summaryReq = useFetch<Summary>((signal) => api.get('/v1/summary', { signal }), [])
+  const readinessReq = useFetch<Readiness>((signal) => api.get('/v1/readiness', { signal }), [])
+  const diffsReq = useFetch<DiffEntry[]>((signal) => api.get('/v1/diffs?limit=200', { signal }), [])
 
-  useEffect(() => {
-    api.get<Summary>('/v1/summary').then(setSummary).catch(() => {})
-    api.get<Readiness>('/v1/readiness').then(setReadiness).catch(() => {})
-    api.get<DiffEntry[]>('/v1/diffs?limit=200').then(setDiffs).catch(() => {})
-  }, [])
+  const summary = summaryReq.data ?? null
+  const readiness = readinessReq.data ?? null
+  const diffs = diffsReq.data ?? []
+  // A failed request must read differently from an empty dashboard.
+  const loadError = summaryReq.error ?? readinessReq.error ?? diffsReq.error
 
   const fmt = (n: number | undefined) => n === undefined ? '—' : String(n)
   const setupRequired = readiness?.overall === 'setup_required'
@@ -358,6 +359,16 @@ export default function HomePage() {
 
       <div className="px-14 py-10 space-y-10">
         <ApiStatusBadge />
+
+        {/* Honest load-failure state — distinct from an empty dashboard. */}
+        {loadError && (
+          <div
+            className="rounded-lg px-4 py-3 text-[12.5px]"
+            style={{ background: 'var(--red-bg)', border: '1px solid var(--red-dim)', color: 'var(--red)' }}
+          >
+            Failed to load dashboard data: {loadError}
+          </div>
+        )}
 
         {/* Setup checklist — visible until all critical items are green */}
         {readiness && setupRequired && (

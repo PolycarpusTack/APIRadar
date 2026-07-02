@@ -3,7 +3,9 @@ import { useNavigate, Link } from 'react-router-dom'
 import { Server, Plus, X, ArrowRight, HelpCircle } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
-import { api, ApiError } from '../lib/apiClient'
+import { api } from '../lib/apiClient'
+import { useFetch, errorMessage } from '../lib/useFetch'
+import { activateOnKey } from '../lib/a11y'
 
 interface ServiceRow {
   id: string
@@ -37,7 +39,7 @@ function RegisterForm({ onCreated }: { onCreated: (svc: ServiceRow) => void }) {
       onCreated(svc)
       reset()
     } catch (e: unknown) {
-      setErr(e instanceof ApiError ? e.message : String(e))
+      setErr(errorMessage(e))
     } finally {
       setSaving(false)
     }
@@ -63,12 +65,13 @@ function RegisterForm({ onCreated }: { onCreated: (svc: ServiceRow) => void }) {
     >
       <div className="flex items-center justify-between mb-4">
         <p className="text-[12.5px] font-semibold" style={{ color: 'var(--text-1)' }}>Register a new service</p>
-        <button onClick={reset} style={{ color: 'var(--text-3)' }}><X className="h-4 w-4" /></button>
+        <button type="button" onClick={reset} aria-label="Cancel service registration" style={{ color: 'var(--text-3)' }}><X className="h-4 w-4" /></button>
       </div>
       <form onSubmit={submit} className="grid grid-cols-2 gap-3">
         <div className="col-span-2 sm:col-span-1">
-          <label className="block text-[10.5px] font-medium uppercase tracking-[0.8px] mb-1" style={{ color: 'var(--text-3)' }}>Name *</label>
+          <label htmlFor="service-name" className="block text-[10.5px] font-medium uppercase tracking-[0.8px] mb-1" style={{ color: 'var(--text-3)' }}>Name *</label>
           <input
+            id="service-name"
             required
             value={name}
             onChange={e => setName(e.target.value)}
@@ -78,8 +81,9 @@ function RegisterForm({ onCreated }: { onCreated: (svc: ServiceRow) => void }) {
           />
         </div>
         <div className="col-span-2 sm:col-span-1">
-          <label className="block text-[10.5px] font-medium uppercase tracking-[0.8px] mb-1" style={{ color: 'var(--text-3)' }}>Owner Team</label>
+          <label htmlFor="service-owner-team" className="block text-[10.5px] font-medium uppercase tracking-[0.8px] mb-1" style={{ color: 'var(--text-3)' }}>Owner Team</label>
           <input
+            id="service-owner-team"
             value={ownerTeam}
             onChange={e => setOwnerTeam(e.target.value)}
             className="w-full rounded border px-2.5 py-1.5 text-[12.5px] outline-none focus:ring-1"
@@ -88,8 +92,9 @@ function RegisterForm({ onCreated }: { onCreated: (svc: ServiceRow) => void }) {
           />
         </div>
         <div className="col-span-2 sm:col-span-1">
-          <label className="block text-[10.5px] font-medium uppercase tracking-[0.8px] mb-1" style={{ color: 'var(--text-3)' }}>Repo URL</label>
+          <label htmlFor="service-repo-url" className="block text-[10.5px] font-medium uppercase tracking-[0.8px] mb-1" style={{ color: 'var(--text-3)' }}>Repo URL</label>
           <input
+            id="service-repo-url"
             value={repoUrl}
             onChange={e => setRepoUrl(e.target.value)}
             className="w-full rounded border px-2.5 py-1.5 text-[12.5px] outline-none focus:ring-1"
@@ -98,8 +103,9 @@ function RegisterForm({ onCreated }: { onCreated: (svc: ServiceRow) => void }) {
           />
         </div>
         <div className="col-span-2 sm:col-span-1">
-          <label className="block text-[10.5px] font-medium uppercase tracking-[0.8px] mb-1" style={{ color: 'var(--text-3)' }}>Spec Format</label>
+          <label htmlFor="service-spec-format" className="block text-[10.5px] font-medium uppercase tracking-[0.8px] mb-1" style={{ color: 'var(--text-3)' }}>Spec Format</label>
           <select
+            id="service-spec-format"
             value={specFormat}
             onChange={e => setSpecFormat(e.target.value)}
             className="w-full rounded border px-2.5 py-1.5 text-[12.5px] outline-none"
@@ -180,6 +186,10 @@ function ServiceTable({ rows, onSelect }: { rows: ServiceRow[]; onSelect: (id: s
               className="group cursor-pointer transition-colors"
               style={{ borderBottom: '1px solid var(--border)' }}
               onClick={() => onSelect(row.id)}
+              role="button"
+              tabIndex={0}
+              aria-label={`View diffs for ${row.name}`}
+              onKeyDown={activateOnKey(() => onSelect(row.id))}
             >
               <td className="px-3 py-2.5 font-medium group-hover:bg-[var(--bg-hover)]" style={{ fontSize: '12.5px', color: 'var(--text-1)' }}>
                 <div>{row.name}</div>
@@ -215,17 +225,18 @@ function ServiceTable({ rows, onSelect }: { rows: ServiceRow[]; onSelect: (id: s
 
 export default function ServicesPage() {
   const navigate = useNavigate()
+  const { data: fetchedRows, loading, error } = useFetch<ServiceRow[]>(
+    (signal) => api.get('/v1/services', { signal }),
+    [],
+  )
+  // Local copy so a freshly-registered service can be shown optimistically
+  // without a refetch; re-synced whenever the fetch resolves.
   const [rows, setRows] = useState<ServiceRow[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [nudgeServiceId, setNudgeServiceId] = useState<string | null>(null)
 
   useEffect(() => {
-    api.get<ServiceRow[]>('/v1/services')
-      .then(setRows)
-      .catch((e: unknown) => setError(e instanceof ApiError ? e.message : String(e)))
-      .finally(() => setLoading(false))
-  }, [])
+    if (fetchedRows) setRows(fetchedRows)
+  }, [fetchedRows])
 
   function handleCreated(svc: ServiceRow) {
     setRows((prev) => {
@@ -259,7 +270,7 @@ export default function ServicesPage() {
                 Compare Specs
                 <ArrowRight className="h-3.5 w-3.5" />
               </button>
-              <button onClick={() => setNudgeServiceId(null)} style={{ color: 'var(--text-dim)' }}>
+              <button type="button" onClick={() => setNudgeServiceId(null)} aria-label="Dismiss" style={{ color: 'var(--text-dim)' }}>
                 <X className="h-3.5 w-3.5" />
               </button>
             </div>

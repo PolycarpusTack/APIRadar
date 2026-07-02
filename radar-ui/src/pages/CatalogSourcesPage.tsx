@@ -264,7 +264,7 @@ export default function CatalogSourcesPage() {
                 <button
                   onClick={() => setShowCreate(true)}
                   className="inline-flex items-center gap-1.5 rounded-md px-4 py-2 text-[12.5px] font-medium transition-opacity hover:opacity-90"
-                  style={{ background: 'var(--cobalt-mid)', color: '#fff' }}
+                  style={{ background: 'var(--cobalt-mid)', color: 'var(--text-inverse)' }}
                 >
                   <Plus className="h-3.5 w-3.5" />
                   Add catalog source

@@ -240,7 +240,7 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
                     style={{
                       background: selected ? 'var(--cobalt-mid)' : 'var(--bg-raised)',
                       border: `1px solid ${selected ? 'var(--cobalt-mid)' : 'var(--border)'}`,
-                      color: selected ? '#fff' : 'var(--text-2)',
+                      color: selected ? 'var(--text-inverse)' : 'var(--text-2)',
                     }}
                   >
                     {svc.name}

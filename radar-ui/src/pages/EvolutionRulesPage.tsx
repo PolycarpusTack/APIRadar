@@ -25,9 +25,9 @@ function PlatformEngineerCallout() {
   return (
     <div
       className="flex items-start gap-3 rounded-lg p-4 text-[12.5px]"
-      style={{ background: 'var(--blue-bg, rgba(56,120,227,0.08))', border: '1px solid var(--blue-dim, rgba(56,120,227,0.25))', color: 'var(--text-2)' }}
+      style={{ background: 'var(--blue-bg)', border: '1px solid var(--blue-dim)', color: 'var(--text-2)' }}
     >
-      <Info className="h-4 w-4 mt-0.5 flex-shrink-0" style={{ color: 'var(--blue, #3878e3)' }} />
+      <Info className="h-4 w-4 mt-0.5 flex-shrink-0" style={{ color: 'var(--blue)' }} />
       <p className="flex-1 leading-relaxed">
         <span className="font-semibold" style={{ color: 'var(--text-1)' }}>Evolution rules are for platform engineers.</span>
         {' '}They let you relax the default severity of specific change kinds across your organisation.
@@ -35,7 +35,7 @@ function PlatformEngineerCallout() {
         <button
           onClick={() => navigate('/help')}
           className="underline decoration-dotted hover:no-underline"
-          style={{ color: 'var(--blue, #3878e3)' }}
+          style={{ color: 'var(--blue)' }}
         >
           Learn more
         </button>
