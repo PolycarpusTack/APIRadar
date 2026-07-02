@@ -273,7 +273,7 @@ pub(crate) async fn get_migration_guide(
     let scope_label = consumer_name
         .as_deref()
         .or(consumer_id)
-        .map(|n| format!(" ��� scoped to **{n}**"))
+        .map(|n| format!(" \u{2014} scoped to **{n}**"))
         .unwrap_or_default();
 
     md.push_str(&format!(
