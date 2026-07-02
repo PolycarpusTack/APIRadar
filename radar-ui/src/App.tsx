@@ -2,6 +2,7 @@ import { NavLink, Routes, Route, Navigate } from 'react-router-dom'
 import logoUrl from './assets/logo.png'
 import { useEffect, useState } from 'react'
 import { api, ApiError } from './lib/apiClient'
+import { isSharePath } from './lib/sharePath'
 import { LayoutDashboard, GitCompare, Users, FileText, Telescope, FlaskConical, HelpCircle, Settings, Server, LogOut, Database, Shield, Sliders, Activity } from 'lucide-react'
 import HomePage from './pages/HomePage'
 import DiffsPage from './pages/DiffsPage'
@@ -216,9 +217,10 @@ export default function App() {
   // session === null   → still loading or OIDC not configured (allow through)
   // session === object → authenticated
 
-  // Public share pages — render without sidebar and bypass auth gate
-  const path = window.location.pathname
-  if (path.startsWith('/share/')) {
+  // Public share pages — render without sidebar and bypass auth gate.
+  // Basename-aware so /app/share/<token> works in production (base '/app/').
+  const basename = (import.meta.env.BASE_URL ?? '/').replace(/\/$/, '')
+  if (isSharePath(window.location.pathname, basename)) {
     return (
       <Routes>
         <Route path="/share/:token" element={<ShareDiffPage />} />

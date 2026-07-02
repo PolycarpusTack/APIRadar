@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import PageHeader from '../components/PageHeader'
 import KpiCard from '../components/KpiCard'
 import { api } from '../lib/apiClient'
+import { buildDiffBuckets } from '../lib/diffTimeline'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -215,26 +216,13 @@ function ReadinessPanel({ items }: { items: ReadinessItem[] }) {
 
 function DiffTimeline({ diffs }: { diffs: DiffEntry[] }) {
   const DAYS = 30
-  const today = new Date()
-  today.setHours(23, 59, 59, 999)
+  // Bucket by *local* calendar day so a diff lands on the same day the diffs
+  // table (which formats in local time) shows it under.
+  const dayBuckets = buildDiffBuckets(diffs, new Date(), DAYS)
+  const buckets: Record<string, { breaking: number; risky: number; safe: number }> =
+    Object.fromEntries(dayBuckets.map(b => [b.key, { breaking: b.breaking, risky: b.risky, safe: b.safe }]))
 
-  const buckets: Record<string, { breaking: number; risky: number; safe: number }> = {}
-  for (let i = DAYS - 1; i >= 0; i--) {
-    const d = new Date(today)
-    d.setDate(d.getDate() - i)
-    const key = d.toISOString().slice(0, 10)
-    buckets[key] = { breaking: 0, risky: 0, safe: 0 }
-  }
-  for (const diff of diffs) {
-    const day = diff.created_at.slice(0, 10)
-    if (buckets[day]) {
-      buckets[day].breaking += diff.breaking_count
-      buckets[day].risky += diff.risky_count
-      buckets[day].safe += diff.safe_count
-    }
-  }
-
-  const keys = Object.keys(buckets)
+  const keys = dayBuckets.map(b => b.key)
   const maxTotal = Math.max(1, ...keys.map(k => buckets[k].breaking + buckets[k].risky + buckets[k].safe))
   const W = 600; const H = 72
   const barW = (W / DAYS) * 0.6

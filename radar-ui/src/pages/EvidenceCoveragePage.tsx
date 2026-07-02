@@ -23,15 +23,15 @@ function SourceBadge({ type }: { type: string }) {
   const label = SOURCE_LABELS[type] ?? type
   const colours: Record<string, string> = {
     runtime_usage: 'var(--cobalt)',
-    static_call_site: '#7c3aed',
-    collection_file: '#0891b2',
+    static_call_site: 'var(--purple)',
+    collection_file: 'var(--teal)',
   }
   return (
     <span
       className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold"
       style={{
-        background: colours[type] ?? '#6b7280',
-        color: '#fff',
+        background: colours[type] ?? 'var(--text-dim)',
+        color: 'var(--text-inverse)',
         fontFamily: 'var(--font-mono)',
       }}
     >
@@ -53,7 +53,7 @@ function StaleIndicator({ isStale, lastSeen }: { isStale: boolean; lastSeen: str
   const label = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
   if (isStale) {
     return (
-      <span className="inline-flex items-center gap-1 text-[11px]" style={{ color: '#f59e0b' }}>
+      <span className="inline-flex items-center gap-1 text-[11px]" style={{ color: 'var(--amber)' }}>
         <AlertTriangle className="h-3 w-3" />
         {label}
       </span>
@@ -61,7 +61,7 @@ function StaleIndicator({ isStale, lastSeen }: { isStale: boolean; lastSeen: str
   }
   return (
     <span className="inline-flex items-center gap-1 text-[11px]" style={{ color: 'var(--text-2)' }}>
-      <CheckCircle className="h-3 w-3" style={{ color: '#22c55e' }} />
+      <CheckCircle className="h-3 w-3" style={{ color: 'var(--green)' }} />
       {label}
     </span>
   )
@@ -111,18 +111,18 @@ export default function EvidenceCoveragePage() {
             className="flex flex-col rounded-lg px-4 py-3 min-w-[120px]"
             style={{
               background: 'var(--bg-surface)',
-              border: `1px solid ${warn ? '#f59e0b40' : 'var(--border)'}`,
+              border: `1px solid ${warn ? 'color-mix(in srgb, var(--amber) 25%, transparent)' : 'var(--border)'}`,
             }}
           >
             <span
               className="text-[10px] font-semibold uppercase tracking-[1px]"
-              style={{ color: warn ? '#f59e0b' : 'var(--text-dim)' }}
+              style={{ color: warn ? 'var(--amber)' : 'var(--text-dim)' }}
             >
               {label}
             </span>
             <span
               className="text-2xl font-bold"
-              style={{ fontFamily: 'var(--font-head)', color: warn ? '#f59e0b' : 'var(--text-1)' }}
+              style={{ fontFamily: 'var(--font-head)', color: warn ? 'var(--amber)' : 'var(--text-1)' }}
             >
               {value}
             </span>
@@ -134,11 +134,11 @@ export default function EvidenceCoveragePage() {
       {staleCount > 0 && (
         <div
           className="mb-5 flex items-start gap-3 rounded-lg px-4 py-3"
-          style={{ background: '#78350f18', border: '1px solid #f59e0b40' }}
+          style={{ background: 'color-mix(in srgb, var(--amber) 10%, transparent)', border: '1px solid color-mix(in srgb, var(--amber) 25%, transparent)' }}
         >
-          <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" style={{ color: '#f59e0b' }} />
+          <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" style={{ color: 'var(--amber)' }} />
           <div>
-            <p className="text-[12.5px] font-semibold" style={{ color: '#f59e0b' }}>
+            <p className="text-[12.5px] font-semibold" style={{ color: 'var(--amber)' }}>
               {staleCount} stale coverage row{staleCount > 1 ? 's' : ''}
             </p>
             <p className="text-[11.5px] mt-0.5" style={{ color: 'var(--text-2)' }}>
@@ -160,7 +160,7 @@ export default function EvidenceCoveragePage() {
           </div>
         ) : error ? (
           <div className="flex items-center justify-center h-48">
-            <p className="text-[13px]" style={{ color: '#ef4444' }}>
+            <p className="text-[13px]" style={{ color: 'var(--red)' }}>
               {error}
             </p>
           </div>
@@ -192,7 +192,7 @@ export default function EvidenceCoveragePage() {
                   key={`${row.consumer_id}-${row.service_id}-${row.source_type}`}
                   style={{
                     borderBottom: i < rows.length - 1 ? '1px solid var(--border)' : undefined,
-                    background: row.is_stale ? '#78350f08' : undefined,
+                    background: row.is_stale ? 'color-mix(in srgb, var(--amber) 6%, transparent)' : undefined,
                   }}
                 >
                   <td className="px-4 py-3">

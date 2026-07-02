@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, ExternalLink, CheckCircle, Plus, X, Sparkles } from 'lucide-react'
+import { ArrowLeft, ExternalLink, CheckCircle, Plus, X, Sparkles, Loader2 } from 'lucide-react'
 import Badge from '../components/Badge'
 import TermTooltip from '../components/TermTooltip'
 import { api } from '../lib/apiClient'
@@ -123,6 +123,28 @@ export default function DiffDetailPage() {
   const [generatedNote, setGeneratedNote] = useState<string | null>(null)
   const [noteError, setNoteError] = useState<string | null>(null)
 
+  // Release-note generation is async: POST returns 201 { generation_status:
+  // "pending" }, then we poll GET /v1/release-notes/:id/generate-status until it
+  // is "completed" or "failed". This ref holds the pending poll timer and a
+  // cancelled flag so late responses/timers are ignored after unmount or when
+  // the diff id changes (navigating away).
+  const pollRef = useRef<{ timer: ReturnType<typeof setTimeout> | null; cancelled: boolean }>({
+    timer: null,
+    cancelled: false,
+  })
+
+  useEffect(() => {
+    const state = pollRef.current
+    state.cancelled = false
+    return () => {
+      state.cancelled = true
+      if (state.timer) {
+        clearTimeout(state.timer)
+        state.timer = null
+      }
+    }
+  }, [id])
+
   function loadAcks() {
     if (!id) return
     api.get<{ entries: Acknowledgement[] }>(`/v1/diffs/${id}/acknowledgements`)
@@ -165,16 +187,58 @@ export default function DiffDetailPage() {
       .finally(() => setSubmittingAck(false))
   }
 
+  const POLL_INTERVAL_MS = 1500
+
+  function pollGenerateStatus(noteId: string) {
+    api.get<{ generation_status?: string; content?: string; generation_error?: string }>(
+      `/v1/release-notes/${noteId}/generate-status`,
+    )
+      .then((data) => {
+        if (pollRef.current.cancelled) return
+        const status = data.generation_status
+        if (status === 'completed') {
+          setGeneratedNote(data.content ?? '')
+          setGeneratingNote(false)
+        } else if (status === 'failed') {
+          setNoteError(data.generation_error ?? 'Release note generation failed.')
+          setGeneratingNote(false)
+        } else {
+          // still pending — poll again
+          pollRef.current.timer = setTimeout(() => pollGenerateStatus(noteId), POLL_INTERVAL_MS)
+        }
+      })
+      .catch((e) => {
+        if (pollRef.current.cancelled) return
+        setNoteError((e as Error).message)
+        setGeneratingNote(false)
+      })
+  }
+
   async function generateReleaseNote() {
     if (!id) return
+    // Reset any prior poll/result.
+    if (pollRef.current.timer) {
+      clearTimeout(pollRef.current.timer)
+      pollRef.current.timer = null
+    }
     setGeneratingNote(true)
     setNoteError(null)
+    setGeneratedNote(null)
     try {
-      const data = await api.post<{ content: string }>(`/v1/diffs/${id}/release-notes/generate`)
-      setGeneratedNote(data.content)
+      const started = await api.post<{ id: string; generation_status?: string; content?: string }>(
+        `/v1/diffs/${id}/release-notes/generate`,
+      )
+      if (pollRef.current.cancelled) return
+      if (started.generation_status === 'completed') {
+        // Unlikely (generation is async) but handle a synchronous completion.
+        setGeneratedNote(started.content ?? '')
+        setGeneratingNote(false)
+        return
+      }
+      pollGenerateStatus(started.id)
     } catch (e) {
+      if (pollRef.current.cancelled) return
       setNoteError((e as Error).message)
-    } finally {
       setGeneratingNote(false)
     }
   }
@@ -513,11 +577,22 @@ export default function DiffDetailPage() {
         </section>
 
         {/* Generated release note */}
-        {(generatedNote || noteError) && (
+        {(generatingNote || generatedNote || noteError) && (
           <section>
             <p className="mb-3 text-[9.5px] font-semibold uppercase tracking-[1.2px]" style={{ color: 'var(--text-dim)' }}>
               Generated Release Notes
             </p>
+            {generatingNote && !generatedNote && !noteError && (
+              <div
+                className="flex items-center gap-2.5 rounded-lg px-4 py-3"
+                style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}
+              >
+                <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--cobalt-mid)' }} />
+                <p className="text-[12.5px]" style={{ color: 'var(--text-3)' }}>
+                  Generating release notes… this can take a few seconds.
+                </p>
+              </div>
+            )}
             {noteError && (
               <p className="text-[12.5px]" style={{ color: 'var(--red)' }}>{noteError}</p>
             )}

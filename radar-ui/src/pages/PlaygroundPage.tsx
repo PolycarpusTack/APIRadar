@@ -6,6 +6,7 @@ import {
 import PageHeader from '../components/PageHeader'
 import CsvRunnerPanel from '../components/CsvRunnerPanel'
 import { api, ApiError } from '../lib/apiClient'
+import { escapeHtmlAttr, escapeJsonForHtml } from '../lib/htmlEscape'
 
 const DEFAULT_SPEC = 'https://cdn.jsdelivr.net/npm/@scalar/galaxy/dist/latest.yaml'
 const LOCAL_STORAGE_KEY = 'drift-playground-envs-local'
@@ -86,7 +87,7 @@ function buildScalarHtml(specUrl: string, env?: SandboxEnv | null) {
   <style>* { box-sizing: border-box; margin: 0; padding: 0; } body { background: ${BG_BASE_DARK}; }</style>
 </head>
 <body>
-  <script id="api-reference" data-url="${specUrl}" data-configuration='${JSON.stringify(config)}'></script>
+  <script id="api-reference" data-url="${escapeHtmlAttr(specUrl)}" data-configuration='${escapeJsonForHtml(config)}'></script>
   <script src="${SCALAR_SRC}"></script>
 </body>
 </html>`

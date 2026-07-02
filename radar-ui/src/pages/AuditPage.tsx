@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
@@ -176,9 +177,9 @@ export default function AuditPage() {
                           style={{ fontSize: '11.5px', color: 'var(--cobalt-mid)', fontFamily: 'var(--font-mono)' }}
                         >
                           {d.diff_id ? (
-                            <a href={`/diffs/${d.diff_id}`} className="hover:underline">
+                            <Link to={`/diffs/${d.diff_id}`} className="hover:underline">
                               {d.diff_id.slice(0, 8)}…
-                            </a>
+                            </Link>
                           ) : (
                             <span style={{ color: 'var(--text-dim)' }}>—</span>
                           )}
@@ -251,9 +252,9 @@ export default function AuditPage() {
                           style={{ fontSize: '11.5px', color: 'var(--cobalt-mid)', fontFamily: 'var(--font-mono)' }}
                         >
                           {a.diff_id ? (
-                            <a href={`/diffs/${a.diff_id}`} className="hover:underline">
+                            <Link to={`/diffs/${a.diff_id}`} className="hover:underline">
                               {a.diff_id.slice(0, 8)}…
-                            </a>
+                            </Link>
                           ) : (
                             <span style={{ color: 'var(--text-dim)' }}>—</span>
                           )}

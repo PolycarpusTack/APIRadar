@@ -18,10 +18,10 @@ interface NoteDetail extends NoteRow {
 }
 
 const STATUS_COLOURS: Record<string, { bg: string; text: string }> = {
-  draft:       { bg: '#f3f4f6', text: '#6b7280' },
-  reviewed:    { bg: '#eff6ff', text: '#2563eb' },
-  published:   { bg: '#f0fdf4', text: '#16a34a' },
-  superseded:  { bg: '#fafafa', text: '#9ca3af' },
+  draft:       { bg: 'var(--bg-raised)',                                     text: 'var(--text-3)' },
+  reviewed:    { bg: 'color-mix(in srgb, var(--cobalt) 12%, transparent)',   text: 'var(--cobalt-mid)' },
+  published:   { bg: 'color-mix(in srgb, var(--green) 14%, transparent)',    text: 'var(--green)' },
+  superseded:  { bg: 'var(--bg-raised)',                                     text: 'var(--text-dim)' },
 }
 
 // State-machine: which transitions are allowed from each status?
@@ -113,8 +113,8 @@ function NoteCard({ row, onStatusChange }: { row: NoteRow; onStatusChange: (id: 
                   onClick={() => transition(ns)}
                   className="inline-flex items-center gap-1 rounded-full px-3 py-1 text-[11px] font-semibold transition-opacity disabled:opacity-50"
                   style={{
-                    background: STATUS_COLOURS[ns]?.bg ?? '#f3f4f6',
-                    color: STATUS_COLOURS[ns]?.text ?? '#6b7280',
+                    background: STATUS_COLOURS[ns]?.bg ?? 'var(--bg-raised)',
+                    color: STATUS_COLOURS[ns]?.text ?? 'var(--text-3)',
                     border: '1px solid currentColor',
                     cursor: 'pointer',
                   }}

@@ -185,6 +185,7 @@ function WebhooksSection() {
                 </span>
                 <span className="text-[10.5px]" style={{ color: 'var(--text-dim)' }}>secret: {wh.secret_hint}</span>
                 <button
+                  type="button"
                   onClick={() => testWebhook(wh.id)}
                   title="Send test ping"
                   className="rounded p-1 transition-colors hover:opacity-70"
@@ -193,6 +194,7 @@ function WebhooksSection() {
                   <Send className="h-3 w-3" />
                 </button>
                 <button
+                  type="button"
                   onClick={() => deleteWebhook(wh.id)}
                   title="Delete webhook"
                   className="rounded p-1 transition-colors hover:opacity-70"
@@ -201,6 +203,7 @@ function WebhooksSection() {
                   <Trash2 className="h-3 w-3" />
                 </button>
                 <button
+                  type="button"
                   onClick={() => toggleExpand(wh.id)}
                   className="rounded p-1 transition-colors hover:opacity-70"
                   style={{ color: 'var(--text-dim)' }}
@@ -229,7 +232,7 @@ function WebhooksSection() {
           {newSecret && (
             <div className="rounded border px-3 py-2 text-[12px]" style={{ border: '1px solid var(--green)', background: 'var(--bg-raised)', color: 'var(--green)' }}>
               Webhook created. Secret (shown once): <span className="font-mono">{newSecret}</span>
-              <button className="ml-3 underline text-[11px]" onClick={() => setNewSecret(null)}>dismiss</button>
+              <button type="button" className="ml-3 underline text-[11px]" onClick={() => setNewSecret(null)}>dismiss</button>
             </div>
           )}
 
@@ -505,7 +508,7 @@ function ScheduledScansSection() {
                   <p className="text-[10.5px] mt-0.5 truncate" style={{ color: 'var(--red)' }}>{s.last_run_error}</p>
                 )}
               </div>
-              <button onClick={() => deleteScan(s.id)} title="Delete scan" className="rounded p-1 transition-colors hover:opacity-70 flex-shrink-0" style={{ color: 'var(--red)' }}>
+              <button type="button" onClick={() => deleteScan(s.id)} title="Delete scan" className="rounded p-1 transition-colors hover:opacity-70 flex-shrink-0" style={{ color: 'var(--red)' }}>
                 <Trash2 className="h-3 w-3" />
               </button>
             </div>
@@ -547,6 +550,7 @@ function ScheduledScansSection() {
             </form>
           ) : (
             <button
+              type="button"
               onClick={() => setShowForm(true)}
               className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
               style={{ borderColor: 'var(--border-mid)', color: 'var(--text-2)' }}
@@ -586,8 +590,7 @@ export default function SettingsPage() {
     setSaved(false)
   }
 
-  async function save(e: React.FormEvent) {
-    e.preventDefault()
+  async function save() {
     setSaving(true); setError(null); setSaved(false)
     try {
       await api.put('/v1/settings', form)
@@ -614,7 +617,7 @@ export default function SettingsPage() {
         {loading ? (
           <p className="text-[12.5px]" style={{ color: 'var(--text-3)' }}>Loading…</p>
         ) : (
-          <form onSubmit={save}>
+          <div>
             <SectionCard
               title="Default Policy"
               description="Controls when a diff blocks CI and how long consumer activity is considered active."
@@ -728,7 +731,8 @@ export default function SettingsPage() {
 
             <div className="flex items-center gap-3">
               <button
-                type="submit"
+                type="button"
+                onClick={() => void save()}
                 disabled={saving}
                 className="rounded-md px-4 py-2 text-[12.5px] font-semibold transition-colors"
                 style={{ background: 'var(--cobalt)', color: 'var(--text-inverse)', opacity: saving ? 0.7 : 1 }}
@@ -742,7 +746,7 @@ export default function SettingsPage() {
                 </span>
               )}
             </div>
-          </form>
+          </div>
         )}
       </div>
     </div>

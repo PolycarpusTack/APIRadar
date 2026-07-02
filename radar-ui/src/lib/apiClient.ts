@@ -17,19 +17,38 @@ let _base = (
   (import.meta as { env?: { VITE_API_URL?: string } }).env?.VITE_API_URL ?? ''
 ).replace(/\/$/, '')
 
+// Desktop-only per-session bearer token for the loopback sidecar. Resolved once
+// via IPC in initApiClient() and attached to every request. Stays null in the
+// plain web build (no window.drift), so web behavior is unchanged.
+let _token: string | null = null
+
 /**
  * Call once before the app renders.  In Electron production the renderer loads
  * from file://, so relative URLs fail.  window.drift.getApiUrl() returns the
  * sidecar's absolute URL via IPC; in web mode it is not defined and we keep the
  * VITE_API_URL / empty-string (same-origin) fallback.
+ *
+ * In desktop mode the sidecar requires an Authorization bearer on every /v1
+ * request; window.drift.getApiToken() returns that per-session token via IPC.
+ * In web mode it is not defined and no Authorization header is added.
  */
 export async function initApiClient(): Promise<void> {
-  const w = window as { drift?: { getApiUrl?: () => Promise<string> } }
+  const w = window as {
+    drift?: {
+      getApiUrl?: () => Promise<string>
+      getApiToken?: () => Promise<string>
+    }
+  }
   if (w.drift?.getApiUrl) {
     try {
       const url = await w.drift.getApiUrl()
       _base = url.replace(/\/$/, '')
     } catch { /* keep env fallback */ }
+  }
+  if (w.drift?.getApiToken) {
+    try {
+      _token = await w.drift.getApiToken()
+    } catch { /* no token — web build behavior */ }
   }
 }
 
@@ -53,6 +72,8 @@ async function request<T>(
 ): Promise<T> {
   const headers: Record<string, string> = {}
   if (body !== undefined) headers['Content-Type'] = 'application/json'
+  // Desktop sidecar session token, unless a per-call bearer overrides it.
+  if (_token) headers['Authorization'] = `Bearer ${_token}`
   if (opts.bearer) headers['Authorization'] = `Bearer ${opts.bearer}`
 
   const res = await fetch(`${_base}${path}`, {
