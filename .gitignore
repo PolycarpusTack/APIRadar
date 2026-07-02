@@ -86,3 +86,7 @@ __pycache__/
 # =============================================================================
 .claude/
 Tempoasv_env/
+
+# generated test artifacts
+radar-ui/playwright-report/
+radar-ui/test-results/
