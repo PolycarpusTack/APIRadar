@@ -10,16 +10,23 @@ use tree_sitter::Parser;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Lang {
+    /// TypeScript / plain JavaScript (non-JSX) — parsed with the TypeScript grammar.
     TypeScript,
+    /// TSX / JSX — parsed with the dedicated TSX grammar so JSX does not yield ERROR nodes.
+    Tsx,
     Python,
     Go,
 }
 
 impl Lang {
     /// Infer language from a file extension. Returns `None` for unsupported types.
+    ///
+    /// JSX-bearing extensions (`tsx`, `jsx`) use the TSX grammar; the remaining
+    /// TS/JS extensions use the TypeScript grammar (which also parses plain JS).
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext.to_lowercase().as_str() {
-            "ts" | "tsx" => Some(Lang::TypeScript),
+            "tsx" | "jsx" => Some(Lang::Tsx),
+            "ts" | "js" | "mjs" | "cjs" | "mts" | "cts" => Some(Lang::TypeScript),
             "py" => Some(Lang::Python),
             "go" => Some(Lang::Go),
             _ => None,
@@ -29,6 +36,7 @@ impl Lang {
     fn ts_language(&self) -> tree_sitter::Language {
         match self {
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
         }
@@ -37,7 +45,7 @@ impl Lang {
     /// AST node kind that represents a property access expression.
     fn member_kind(&self) -> &'static str {
         match self {
-            Lang::TypeScript => "member_expression",
+            Lang::TypeScript | Lang::Tsx => "member_expression",
             Lang::Python => "attribute",
             Lang::Go => "selector_expression",
         }
@@ -46,7 +54,7 @@ impl Lang {
     /// Grammar field name that holds the property/attribute name within the member node.
     fn property_field(&self) -> &'static str {
         match self {
-            Lang::TypeScript => "property",
+            Lang::TypeScript | Lang::Tsx => "property",
             Lang::Python => "attribute",
             Lang::Go => "field",
         }
@@ -55,7 +63,7 @@ impl Lang {
     /// AST node kind for a function-call expression.
     fn call_node_kind(&self) -> &'static str {
         match self {
-            Lang::TypeScript | Lang::Go => "call_expression",
+            Lang::TypeScript | Lang::Tsx | Lang::Go => "call_expression",
             Lang::Python => "call",
         }
     }
@@ -63,9 +71,29 @@ impl Lang {
     /// Field name for the object/receiver within a method-call's function part.
     fn call_object_field(&self) -> &'static str {
         match self {
-            Lang::TypeScript | Lang::Python => "object",
+            Lang::TypeScript | Lang::Tsx | Lang::Python => "object",
             Lang::Go => "operand",
         }
+    }
+
+    /// AST node kinds that introduce a new function scope. Operation attribution
+    /// is confined to the nearest enclosing scope of these kinds.
+    fn function_scope_kinds(&self) -> &'static [&'static str] {
+        match self {
+            Lang::TypeScript | Lang::Tsx => &[
+                "function_declaration",
+                "function_expression",
+                "arrow_function",
+                "method_definition",
+                "generator_function_declaration",
+            ],
+            Lang::Python => &["function_definition"],
+            Lang::Go => &["function_declaration", "method_declaration", "func_literal"],
+        }
+    }
+
+    fn is_function_scope(&self, kind: &str) -> bool {
+        self.function_scope_kinds().contains(&kind)
     }
 
     /// Returns true when `name` looks like an API/HTTP client variable.
@@ -249,6 +277,9 @@ fn normalise_method_name(s: &str) -> String {
 
 /// Unified API-call collector for TypeScript, Python, and Go ASTs.
 /// Detects `obj.method(...)` where `obj` looks like an API/HTTP client.
+/// Retained for direct-detection unit tests; production scanning uses the
+/// scope-aware `collect_scoped_api_ops`.
+#[cfg(test)]
 fn collect_api_calls_s2(
     node: &tree_sitter::Node<'_>,
     source: &[u8],
@@ -281,9 +312,87 @@ fn collect_api_calls_s2(
     }
 }
 
+/// Walk up from `node` to the nearest enclosing function scope. If no function
+/// scope is found, returns the topmost (root) node, so module-level API calls
+/// attribute to module-level field accesses.
+fn enclosing_scope<'a>(node: tree_sitter::Node<'a>, lang: &Lang) -> tree_sitter::Node<'a> {
+    let mut cur = node;
+    while let Some(parent) = cur.parent() {
+        if lang.is_function_scope(parent.kind()) {
+            return parent;
+        }
+        cur = parent;
+    }
+    cur
+}
+
+/// Map each function scope (by node id) to the operation of the FIRST API call it
+/// directly encloses, so field accesses can be attributed to their own scope's call.
+fn collect_scoped_api_ops(
+    node: &tree_sitter::Node<'_>,
+    source: &[u8],
+    lang: &Lang,
+    out: &mut std::collections::HashMap<usize, String>,
+) {
+    if node.kind() == lang.call_node_kind() {
+        if let Some(func) = node.child_by_field_name("function") {
+            if func.kind() == lang.member_kind() {
+                let obj_name = func
+                    .child_by_field_name(lang.call_object_field())
+                    .and_then(|n| n.utf8_text(source).ok())
+                    .unwrap_or("");
+                let method_name = func
+                    .child_by_field_name(lang.property_field())
+                    .and_then(|n| n.utf8_text(source).ok())
+                    .unwrap_or("");
+                if lang.is_api_object(obj_name) {
+                    if let Some(op) = method_name_to_operation(&normalise_method_name(method_name)) {
+                        let scope_id = enclosing_scope(*node, lang).id();
+                        out.entry(scope_id).or_insert(op);
+                    }
+                }
+            }
+        }
+    }
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            collect_scoped_api_ops(&child, source, lang, out);
+        }
+    }
+}
+
+/// Collect leaf property accesses, attributing each to the operation of its
+/// enclosing function scope (if any).
+fn collect_leaves_scoped(
+    node: &tree_sitter::Node<'_>,
+    source: &[u8],
+    lang: &Lang,
+    scope_ops: &std::collections::HashMap<usize, String>,
+    out: &mut Vec<CallSiteRecord>,
+) {
+    if node.kind() == lang.member_kind() {
+        if let Some(prop) = node.child_by_field_name(lang.property_field()) {
+            if let Ok(name) = prop.utf8_text(source) {
+                let scope_id = enclosing_scope(*node, lang).id();
+                out.push(CallSiteRecord {
+                    file_path: String::new(),
+                    line_number: prop.start_position().row + 1,
+                    field_path: name.to_string(),
+                    operation: scope_ops.get(&scope_id).cloned(),
+                });
+            }
+        }
+    }
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            collect_leaves_scoped(&child, source, lang, scope_ops, out);
+        }
+    }
+}
+
 /// S2 scanner for any supported language: pairs leaf property accesses with the
-/// HTTP operation inferred from an API client method call in the same file.
-/// Falls back to S1 (operation = None) when no API call is detected.
+/// HTTP operation inferred from an API client method call in the SAME function scope.
+/// Falls back to S1 (operation = None) when no API call is detected in that scope.
 /// The `file_path` field is left empty and filled in by `walk()`.
 pub fn scan_s2(content: &[u8], lang: &Lang) -> Vec<CallSiteRecord> {
     let mut parser = Parser::new();
@@ -295,21 +404,12 @@ pub fn scan_s2(content: &[u8], lang: &Lang) -> Vec<CallSiteRecord> {
     };
     let root = tree.root_node();
 
-    let mut api_ops: Vec<String> = Vec::new();
-    collect_api_calls_s2(&root, content, lang, &mut api_ops);
-    let primary_op: Option<String> = api_ops.into_iter().next();
+    let mut scope_ops: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    collect_scoped_api_ops(&root, content, lang, &mut scope_ops);
 
-    let leaf_accesses = scan_file(content, lang);
-
-    leaf_accesses
-        .into_iter()
-        .map(|(field_path, line_number)| CallSiteRecord {
-            file_path: String::new(),
-            line_number,
-            field_path,
-            operation: primary_op.clone(),
-        })
-        .collect()
+    let mut records = Vec::new();
+    collect_leaves_scoped(&root, content, lang, &scope_ops, &mut records);
+    records
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +499,9 @@ pub fn parse_collection(path: &std::path::Path) -> anyhow::Result<(String, Vec<C
 
 /// Inner parser that works on a string slice (for unit-testability).
 pub fn parse_collection_str(content: &str) -> anyhow::Result<(String, Vec<CollectionRequest>)> {
+    // Strip a leading UTF-8 BOM so a BOM-prefixed collection isn't rejected.
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+
     let root: serde_json::Value = serde_json::from_str(content)
         .map_err(|e| anyhow::anyhow!("JSON parse error: {e}"))?;
 
@@ -413,12 +516,23 @@ pub fn parse_collection_str(content: &str) -> anyhow::Result<(String, Vec<Collec
         .and_then(|v| v.as_array())
         .ok_or_else(|| anyhow::anyhow!("missing top-level 'item' array"))?;
 
-    let requests = items
-        .iter()
-        .filter_map(extract_request)
-        .collect();
+    let mut requests = Vec::new();
+    collect_requests(items, &mut requests);
 
     Ok((name, requests))
+}
+
+/// Recursively collect requests from a Postman `item` array, descending into
+/// folder items (items with a child `item` array and no `request`).
+fn collect_requests(items: &[serde_json::Value], out: &mut Vec<CollectionRequest>) {
+    for item in items {
+        if let Some(child_items) = item.get("item").and_then(|v| v.as_array()) {
+            // Folder: recurse into its children.
+            collect_requests(child_items, out);
+        } else if let Some(req) = extract_request(item) {
+            out.push(req);
+        }
+    }
 }
 
 fn extract_request(item: &serde_json::Value) -> Option<CollectionRequest> {
@@ -454,11 +568,15 @@ fn extract_operation(req: &serde_json::Value) -> Option<String> {
     // url can be a string or an object
     let raw_url = match req.get("url") {
         Some(serde_json::Value::String(s)) => s.clone(),
-        Some(obj) => obj
-            .get("raw")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        Some(obj) => {
+            let raw = obj.get("raw").and_then(|v| v.as_str()).unwrap_or("");
+            if raw.is_empty() {
+                // Fall back to host/path arrays when there is no `raw` key.
+                build_raw_from_host_path(obj)
+            } else {
+                raw.to_string()
+            }
+        }
         None => return None,
     };
 
@@ -469,18 +587,74 @@ fn extract_operation(req: &serde_json::Value) -> Option<String> {
     // Strip protocol+host prefix. Keep only the path portion.
     // Handles: "http://host/path", "{{base_url}}/path", "{{a}}{{b}}/path"
     let path_part = strip_url_prefix(&raw_url);
-    if path_part.is_empty() {
-        return None;
-    }
+
+    // Drop query string / fragment (everything from the first '?' or '#').
+    let path_part = path_part
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(path_part);
+
+    // Trim a trailing slash (but never reduce below "/").
+    let path_part = {
+        let trimmed = path_part.trim_end_matches('/');
+        if trimmed.is_empty() { "/" } else { trimmed }
+    };
 
     // Ensure it starts with /
-    let normalised = if path_part.starts_with('/') {
+    let with_leading_slash = if path_part.starts_with('/') {
         path_part.to_string()
     } else {
         format!("/{path_part}")
     };
 
-    Some(normalised)
+    // Normalise Postman `:var` path segments to brace-style `{var}`.
+    let normalised = normalise_colon_params(&with_leading_slash);
+
+    if normalised.is_empty() {
+        None
+    } else {
+        Some(normalised)
+    }
+}
+
+/// Build a raw-URL-like string from a URL object's `host` and `path` arrays.
+/// e.g. host=["{{base_url}}"], path=["users","{id}"] → "{{base_url}}/users/{id}".
+fn build_raw_from_host_path(url_obj: &serde_json::Value) -> String {
+    let join = |key: &str, sep: &str| -> String {
+        url_obj
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(sep)
+            })
+            .unwrap_or_default()
+    };
+    let host = join("host", ".");
+    let path = join("path", "/");
+    match (host.is_empty(), path.is_empty()) {
+        (_, true) => host,
+        (true, false) => format!("/{path}"),
+        (false, false) => format!("{host}/{path}"),
+    }
+}
+
+/// Normalise Postman `:var` path segments to brace-style `{var}`.
+/// e.g. "/users/:userId/orders/:orderId" → "/users/{userId}/orders/{orderId}".
+fn normalise_colon_params(path: &str) -> String {
+    path.split('/')
+        .map(|seg| {
+            if let Some(var) = seg.strip_prefix(':') {
+                if !var.is_empty() {
+                    return format!("{{{var}}}");
+                }
+            }
+            seg.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Strip any scheme://host or leading `{{variable}}` segments, returning the path only.
@@ -621,18 +795,29 @@ fn extract_dotted_path(text: &str) -> Option<String> {
 /// Matches: `json.<field>`, `data.<field>`, `response.<field>` etc.
 fn extract_variable_field_accesses(line: &str) -> Vec<String> {
     let mut results = Vec::new();
-    // Look for known response-variable prefixes
+    // Look for known response-variable prefixes.
     for prefix in &["json.", "data.", "response.body.", "response."] {
-        let mut search = line;
-        while let Some(pos) = search.find(prefix) {
-            let after = &search[pos + prefix.len()..];
+        for (pos, _) in line.match_indices(prefix) {
+            // Word-boundary check: the prefix must begin a standalone variable, not
+            // be the tail of a larger identifier or member chain. This rejects
+            // `pm.response.json()` (preceded by `.`) and `metadata.total`
+            // (the `data.` prefix preceded by `a`).
+            let boundary_ok = pos == 0
+                || line[..pos]
+                    .chars()
+                    .next_back()
+                    .map(|c| !(c.is_alphanumeric() || c == '_' || c == '.'))
+                    .unwrap_or(true);
+            if !boundary_ok {
+                continue;
+            }
+            let after = &line[pos + prefix.len()..];
             if let Some(fp) = extract_identifier(after) {
                 // Avoid re-adding paths already captured via .json() pattern
                 if !results.contains(&fp) {
                     results.push(fp);
                 }
             }
-            search = &search[pos + 1..];
         }
     }
     results
@@ -708,7 +893,8 @@ mod tests {
     #[test]
     fn known_extensions_recognized() {
         assert_eq!(Lang::from_extension("ts"), Some(Lang::TypeScript));
-        assert_eq!(Lang::from_extension("tsx"), Some(Lang::TypeScript));
+        // M-11: .tsx now uses the dedicated TSX (JSX) grammar → distinct Lang variant.
+        assert_eq!(Lang::from_extension("tsx"), Some(Lang::Tsx));
         assert_eq!(Lang::from_extension("py"), Some(Lang::Python));
         assert_eq!(Lang::from_extension("go"), Some(Lang::Go));
     }
@@ -1053,5 +1239,118 @@ func process(svc *Service, id string) string {
         let json = r#"{"info": {}, "item": []}"#;
         let result = parse_collection_str(json);
         assert!(result.is_err(), "missing info.name should return error");
+    }
+
+    // --- M-10: Postman parser accuracy ---
+
+    #[test]
+    fn parse_collection_recurses_nested_folders() {
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"name":"Users","item":[
+                {"name":"Get","request":{"method":"GET","url":{"raw":"{{base_url}}/users/:userId"}}}
+            ]}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        assert_eq!(reqs.len(), 1, "request inside folder should be extracted; got {reqs:?}");
+        assert_eq!(reqs[0].name, "Get");
+        // also exercises :var normalization
+        assert_eq!(reqs[0].operation.as_deref(), Some("/users/{userId}"));
+    }
+
+    #[test]
+    fn parse_collection_normalizes_colon_path_variables() {
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"name":"R","request":{"method":"GET","url":{"raw":"{{base_url}}/users/:userId/orders/:orderId"}}}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        assert_eq!(reqs[0].operation.as_deref(), Some("/users/{userId}/orders/{orderId}"));
+    }
+
+    #[test]
+    fn parse_collection_strips_query_fragment_trailing_slash() {
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"name":"Q","request":{"method":"GET","url":{"raw":"{{base_url}}/users?active=true"}}},
+            {"name":"T","request":{"method":"GET","url":{"raw":"{{base_url}}/users/"}}},
+            {"name":"F","request":{"method":"GET","url":{"raw":"{{base_url}}/users#frag"}}}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        for r in &reqs {
+            assert_eq!(r.operation.as_deref(), Some("/users"), "{}: {:?}", r.name, r.operation);
+        }
+    }
+
+    #[test]
+    fn parse_collection_no_false_field_paths_from_pm_response() {
+        let json = r#"{"info":{"name":"C"},"item":[{"name":"R",
+            "request":{"method":"GET","url":{"raw":"{{base_url}}/users/{id}"}},
+            "event":[{"listen":"test","script":{"exec":[
+                "var json = pm.response.json();",
+                "pm.response.to.have.status(200);",
+                "pm.expect(json.phone).to.exist;",
+                "pm.expect(metadata.total).to.eql(1);"
+            ]}}]}]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        let fp = &reqs[0].field_paths;
+        assert!(fp.iter().any(|f| f == "phone"), "phone expected; got {fp:?}");
+        for bad in ["json", "to", "code", "status", "total"] {
+            assert!(!fp.iter().any(|f| f == bad), "'{bad}' must not be a field path; got {fp:?}");
+        }
+    }
+
+    #[test]
+    fn parse_collection_strips_bom() {
+        let json = "\u{feff}{\"info\":{\"name\":\"C\"},\"item\":[]}";
+        let (name, _) = parse_collection_str(json).expect("BOM should be stripped");
+        assert_eq!(name, "C");
+    }
+
+    #[test]
+    fn parse_collection_url_object_without_raw_uses_path() {
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"name":"R","request":{"method":"GET","url":{"host":["{{base_url}}"],"path":["users","{id}"]}}}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        assert_eq!(reqs[0].operation.as_deref(), Some("/users/{id}"));
+    }
+
+    // --- M-11: TypeScript/TSX scanner accuracy ---
+
+    #[test]
+    fn tsx_jsx_member_access_parses() {
+        let src = b"function C(user){ return <span>{user.phone}</span>; }";
+        let hits = scan_file(src, &Lang::Tsx);
+        assert!(hits.iter().any(|(n, _)| n == "phone"), "expected phone in {hits:?}");
+    }
+
+    #[test]
+    fn js_family_extensions_recognized() {
+        for ext in ["js", "jsx", "mjs", "cjs", "mts", "cts"] {
+            assert!(Lang::from_extension(ext).is_some(), "{ext} should be supported");
+        }
+        assert_eq!(Lang::from_extension("tsx"), Some(Lang::Tsx));
+        assert_eq!(Lang::from_extension("jsx"), Some(Lang::Tsx));
+        assert_eq!(Lang::from_extension("js"), Some(Lang::TypeScript));
+        assert_eq!(Lang::from_extension("mjs"), Some(Lang::TypeScript));
+    }
+
+    #[test]
+    fn s2_scopes_operation_to_enclosing_function() {
+        let src = b"
+async function getUser(usersApi, id) {
+    const u = await usersApi.getUserById(id);
+    return u.phone;
+}
+async function getOrders(ordersApi) {
+    const o = await ordersApi.listOrders();
+    return o.total;
+}
+";
+        let records = scan_typescript_s2(src);
+        let phone = records.iter().find(|r| r.field_path == "phone").expect("phone record");
+        assert_eq!(phone.operation.as_deref(), Some("GET /users/{id}"),
+            "phone should be attributed to its enclosing function's call");
+        let total = records.iter().find(|r| r.field_path == "total").expect("total record");
+        assert_eq!(total.operation.as_deref(), Some("GET /orders"),
+            "total should be attributed to its own function's call, not the first call");
     }
 }
