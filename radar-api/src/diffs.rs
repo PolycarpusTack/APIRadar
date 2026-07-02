@@ -43,6 +43,119 @@ pub(crate) struct ChangeInput {
     pub(crate) description: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Atomic diff persistence (N-3)
+//
+// A diff row and its change rows were previously inserted in a loop WITHOUT a
+// transaction across four call sites. A mid-loop failure left a truncated diff,
+// which the `idx_diff_transition` dedup path then made permanent (every retry
+// returned cached=true). This helper writes the diff and all changes in one
+// transaction — all-or-nothing — and is the single source of truth for the four
+// callers (create_diff, compare_specs, run_batch_item, create_scan_diff).
+// ---------------------------------------------------------------------------
+
+/// A change row ready for insertion, independent of the source format.
+pub(crate) struct ChangeInsert {
+    pub(crate) path: String,
+    pub(crate) kind: String,
+    pub(crate) severity: String,
+    pub(crate) description: Option<String>,
+}
+
+impl ChangeInsert {
+    /// Build from a request `ChangeInput` (kind/severity already stringified).
+    pub(crate) fn from_input(c: &ChangeInput) -> Self {
+        ChangeInsert {
+            path: c.path.clone(),
+            kind: c.kind.clone(),
+            severity: c.severity.clone(),
+            description: c.description.clone(),
+        }
+    }
+
+    /// Build from a computed `radar_core` DiffChange.
+    pub(crate) fn from_diff(c: &radar_core::diff::DiffChange) -> Self {
+        let severity = match c.severity {
+            radar_core::models::Severity::Breaking => "breaking",
+            radar_core::models::Severity::NonBreakingRisky => "non_breaking_risky",
+            radar_core::models::Severity::Safe => "safe",
+        };
+        ChangeInsert {
+            path: c.path.clone(),
+            kind: c.kind.as_str().to_string(),
+            severity: severity.to_string(),
+            description: c.description.clone(),
+        }
+    }
+}
+
+pub(crate) enum DiffWriteOutcome {
+    /// The diff and its changes were inserted.
+    Created,
+    /// A concurrent identical (from_version, to_version) diff already exists;
+    /// nothing was written. Carries the existing diff id.
+    AlreadyExists(String),
+}
+
+/// Insert a diff row and all its change rows in a single transaction. On a
+/// unique-violation of `idx_diff_transition` (a concurrent identical diff),
+/// rolls back and returns the existing diff id. Never leaves a partial diff.
+pub(crate) async fn persist_diff_atomic(
+    pool: &sqlx::AnyPool,
+    diff_id: &str,
+    from_version: &str,
+    to_version: &str,
+    pr_url: Option<&str>,
+    created_at: &str,
+    changes: &[ChangeInsert],
+) -> Result<DiffWriteOutcome, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    let insert = sqlx::query(
+        "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(diff_id)
+    .bind(from_version)
+    .bind(to_version)
+    .bind(pr_url)
+    .bind(created_at)
+    .execute(&mut *tx)
+    .await;
+
+    if let Err(e) = insert {
+        let is_unique = matches!(&e, sqlx::Error::Database(db) if db.is_unique_violation());
+        drop(tx); // roll back the (empty) transaction
+        if is_unique {
+            use sqlx::Row;
+            let row = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
+                .bind(from_version)
+                .bind(to_version)
+                .fetch_one(pool)
+                .await?;
+            let existing: String = row.try_get("id")?;
+            return Ok(DiffWriteOutcome::AlreadyExists(existing));
+        }
+        return Err(e);
+    }
+
+    for c in changes {
+        sqlx::query(
+            "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(diff_id)
+        .bind(&c.path)
+        .bind(&c.kind)
+        .bind(&c.severity)
+        .bind(&c.description)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(DiffWriteOutcome::Created)
+}
+
 #[derive(serde::Deserialize, Default)]
 pub(crate) struct BlastRadiusParams {
     pub(crate) max_age_days: Option<u32>,
@@ -264,35 +377,25 @@ pub(crate) async fn create_diff(
         }
     }
 
+    // Insert the diff and all its changes atomically. A concurrent request may
+    // have inserted the same (from_version, to_version) transition, tripping the
+    // unique index `idx_diff_transition`; that race is returned as cached-200.
     let diff_id = Uuid::new_v4().to_string();
-    let insert_res = sqlx::query(
-        r#"
-        INSERT INTO diff (id, from_version, to_version, pr_url, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        "#,
+    let change_rows: Vec<ChangeInsert> =
+        body.changes.iter().map(ChangeInsert::from_input).collect();
+    match persist_diff_atomic(
+        &pool,
+        &diff_id,
+        &from_version_id,
+        &to_version_id,
+        body.pr_url.as_deref(),
+        &now,
+        &change_rows,
     )
-    .bind(&diff_id)
-    .bind(&from_version_id)
-    .bind(&to_version_id)
-    .bind(&body.pr_url)
-    .bind(&now)
-    .execute(&pool)
-    .await;
-
-    if let Err(e) = insert_res {
-        // A concurrent request may have inserted the same (from_version, to_version)
-        // transition between our SELECT above and this INSERT, tripping the unique
-        // index `idx_diff_transition`. Treat that race as "already exists" and return
-        // the existing diff as cached-200 rather than surfacing a 500.
-        let is_unique = matches!(&e, sqlx::Error::Database(db) if db.is_unique_violation());
-        if is_unique {
-            use sqlx::Row;
-            let row = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
-                .bind(&from_version_id)
-                .bind(&to_version_id)
-                .fetch_one(&pool)
-                .await?;
-            let existing_id: String = row.try_get("id").map_err(ApiError::Db)?;
+    .await
+    .map_err(ApiError::Db)?
+    {
+        DiffWriteOutcome::AlreadyExists(existing_id) => {
             return Ok((
                 StatusCode::OK,
                 Json(json!({
@@ -303,25 +406,7 @@ pub(crate) async fn create_diff(
                 })),
             ));
         }
-        return Err(ApiError::Db(e));
-    }
-
-    for change in &body.changes {
-        let change_id = Uuid::new_v4().to_string();
-        sqlx::query(
-            r#"
-            INSERT INTO change (id, diff_id, path, kind, severity, description)
-            VALUES (?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(&change_id)
-        .bind(&diff_id)
-        .bind(&change.path)
-        .bind(&change.kind)
-        .bind(&change.severity)
-        .bind(&change.description)
-        .execute(&pool)
-        .await?;
+        DiffWriteOutcome::Created => {}
     }
 
     metrics::counter!("radar_diffs_created_total").increment(1);
@@ -1113,40 +1198,35 @@ pub(crate) async fn compare_specs(
     }
 
     let diff_id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) \
-         VALUES (?, ?, ?, NULL, ?)",
+    let change_rows: Vec<ChangeInsert> = changes.iter().map(ChangeInsert::from_diff).collect();
+    let breaking_count = change_rows
+        .iter()
+        .filter(|c| c.severity == "breaking")
+        .count() as i64;
+    match persist_diff_atomic(
+        &pool,
+        &diff_id,
+        &from_version_id,
+        &to_version_id,
+        None,
+        &now,
+        &change_rows,
     )
-    .bind(&diff_id)
-    .bind(&from_version_id)
-    .bind(&to_version_id)
-    .bind(&now)
-    .execute(&pool)
-    .await?;
-
-    let mut breaking_count: i64 = 0;
-    for change in &changes {
-        let change_id = Uuid::new_v4().to_string();
-        let sev_str = match change.severity {
-            radar_core::models::Severity::Breaking => {
-                breaking_count += 1;
-                "breaking"
-            }
-            radar_core::models::Severity::NonBreakingRisky => "non_breaking_risky",
-            radar_core::models::Severity::Safe => "safe",
-        };
-        sqlx::query(
-            "INSERT INTO change (id, diff_id, path, kind, severity, description) \
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&change_id)
-        .bind(&diff_id)
-        .bind(&change.path)
-        .bind(change.kind.as_str())
-        .bind(sev_str)
-        .bind(&change.description)
-        .execute(&pool)
-        .await?;
+    .await
+    .map_err(ApiError::Db)?
+    {
+        DiffWriteOutcome::AlreadyExists(existing_id) => {
+            return Ok((
+                StatusCode::OK,
+                Json(json!({
+                    "diff_id":        existing_id,
+                    "changes_count":  changes.len() as i64,
+                    "breaking_count": breaking_count,
+                    "cached":         true,
+                })),
+            ));
+        }
+        DiffWriteOutcome::Created => {}
     }
 
     metrics::counter!("radar_diffs_created_total").increment(1);
@@ -1402,34 +1482,26 @@ async fn run_batch_item(
     }
 
     let diff_id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, NULL, ?)")
-        .bind(&diff_id).bind(&from_ver).bind(&to_ver).bind(&now)
-        .execute(pool).await.map_err(|e| anyhow::anyhow!("insert diff: {e}"))?;
-
-    let mut breaking_count: i64 = 0;
-    for change in &changes {
-        let sev = match change.severity {
-            radar_core::models::Severity::Breaking => {
-                breaking_count += 1;
-                "breaking"
-            }
-            radar_core::models::Severity::NonBreakingRisky => "non_breaking_risky",
-            radar_core::models::Severity::Safe => "safe",
+    let change_rows: Vec<ChangeInsert> = changes.iter().map(ChangeInsert::from_diff).collect();
+    let breaking_count = change_rows
+        .iter()
+        .filter(|c| c.severity == "breaking")
+        .count() as i64;
+    let final_diff_id =
+        match persist_diff_atomic(pool, &diff_id, &from_ver, &to_ver, None, &now, &change_rows)
+            .await
+            .map_err(|e| anyhow::anyhow!("persist diff: {e}"))?
+        {
+            DiffWriteOutcome::AlreadyExists(existing) => existing,
+            DiffWriteOutcome::Created => diff_id,
         };
-        sqlx::query(
-            "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(Uuid::new_v4().to_string()).bind(&diff_id)
-        .bind(&change.path).bind(change.kind.as_str()).bind(sev).bind(&change.description)
-        .execute(pool).await.map_err(|e| anyhow::anyhow!("insert change: {e}"))?;
-    }
 
     metrics::counter!("radar_diffs_created_total").increment(1);
 
     Ok(BatchResultItem {
         label: label.to_string(),
         status: "done".into(),
-        diff_id: Some(diff_id),
+        diff_id: Some(final_diff_id),
         breaking_count,
         changes_count: changes.len() as i64,
         error: None,

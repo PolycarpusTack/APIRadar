@@ -629,38 +629,31 @@ async fn create_scan_diff(
     .await;
 
     let diff_id = Uuid::new_v4().to_string();
-    let _ = sqlx::query(
-        "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, NULL, ?)",
+    let change_rows: Vec<crate::diffs::ChangeInsert> = changes
+        .iter()
+        .map(crate::diffs::ChangeInsert::from_diff)
+        .collect();
+    let final_diff_id = match crate::diffs::persist_diff_atomic(
+        pool,
+        &diff_id,
+        &from_id,
+        &to_id,
+        None,
+        now,
+        &change_rows,
     )
-    .bind(&diff_id)
-    .bind(&from_id)
-    .bind(&to_id)
-    .bind(now)
-    .execute(pool)
-    .await;
-
-    for change in &changes {
-        let change_id = Uuid::new_v4().to_string();
-        let sev = match change.severity {
-            radar_core::models::Severity::Breaking => "breaking",
-            radar_core::models::Severity::NonBreakingRisky => "non_breaking_risky",
-            radar_core::models::Severity::Safe => "safe",
-        };
-        let _ = sqlx::query(
-            "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&change_id)
-        .bind(&diff_id)
-        .bind(&change.path)
-        .bind(change.kind.as_str())
-        .bind(sev)
-        .bind(&change.description)
-        .execute(pool)
-        .await;
-    }
+    .await
+    {
+        Ok(crate::diffs::DiffWriteOutcome::Created) => diff_id,
+        Ok(crate::diffs::DiffWriteOutcome::AlreadyExists(existing)) => existing,
+        Err(e) => {
+            tracing::warn!("scan diff persist failed: {e}");
+            return None;
+        }
+    };
 
     metrics::counter!("radar_diffs_created_total").increment(1);
-    Some(diff_id)
+    Some(final_diff_id)
 }
 
 // GET /v1/scheduled-scans/run-history (basic: last_run_at per scan)
