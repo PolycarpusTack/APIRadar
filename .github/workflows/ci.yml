@@ -82,17 +82,23 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # Rust (Postgres): run tests against a real Postgres 16 instance
-  # ---------------------------------------------------------------------------
+  # Rust (Postgres): gate that all migrations apply cleanly on a real Postgres
+  # 16 instance (portability regression guard).
+  #
+  # NARROWED (N-30): this job used to run the full `cargo test --all` against
+  # Postgres under `continue-on-error: true`. The runtime query layer still has
+  # a sqlx Any→Postgres placeholder-translation bug (42601 syntax errors) that
+  # is deferred to the Postgres decision — see N-26 (supersedes M-20). Running
+  # the test suite there produced an ungated, always-red signal indistinguishable
+  # from a genuine new regression, and burned a full compile+test per push.
+  #
+  # Until N-26 lands, this job runs ONLY the migration step so that PG migration
+  # portability is gated again (this passes post-M-7b). The query-layer coverage
+  # is intentionally deferred — do NOT re-add `cargo test` here until N-26 gives
+  # Postgres real, checked queries.
   rust-postgres:
-    name: Rust (Postgres)
+    name: Rust (Postgres migrations)
     runs-on: ubuntu-latest
-    # DEFERRED: migrations now apply on Postgres (fixed in M-7b), but the runtime
-    # query layer has a sqlx Any→Postgres placeholder-translation bug (42601
-    # syntax errors) that was never exercised before. Tracked as a dedicated
-    # "Postgres query-layer compatibility" follow-up. Keep the job running so the
-    # failures stay visible, but don't block the overall workflow until it's fixed.
-    continue-on-error: true
 
     services:
       postgres:
@@ -130,9 +136,8 @@ jobs:
         run: |
           sqlx database create
           sqlx migrate run --source radar-api/migrations
-
-      - name: Run tests
-        run: cargo test --all
+        # Migration-only gate. Query-layer tests on Postgres are deferred to
+        # N-26 / M-20; do not add `cargo test` here until that lands.
 
   # ---------------------------------------------------------------------------
   # Node: lint, build UI
@@ -162,18 +167,38 @@ jobs:
             pnpm install --no-frozen-lockfile
           fi
 
+      # N-32: JS supply-chain scan. Advisory (non-gating): `|| true` keeps the
+      # job green so a transitive low/moderate advisory with no available fix
+      # doesn't block unrelated PRs. Dependabot (.github/dependabot.yml) opens
+      # the actual upgrade PRs. Tighten to gating (drop `|| true`) once the tree
+      # is clean at --audit-level=high.
+      - name: JS dependency audit (advisory)
+        run: pnpm audit --audit-level=high || true
+
       - name: Lint workspaces
         run: pnpm --recursive lint
 
       - name: Type-check UI
         run: pnpm --filter radar-ui typecheck
 
+      # N-31: type-check the desktop main/preload process (untrusted Node
+      # boundary) so it's covered on every push, not only at a release tag.
+      - name: Type-check desktop
+        run: pnpm --filter radar-desktop typecheck
+
       - name: Unit tests (Vitest)
         run: pnpm --filter radar-ui test
 
       - name: Build UI
         run: pnpm build:ui
-        # Note: Electron/desktop build is skipped in CI — requires signing certs.
+
+      # N-31: compile the desktop bundle (electron-vite build) unsigned — no
+      # electron-builder packaging or signing certs required. Catches renderer/
+      # main build breaks that were previously only found at release time.
+      - name: Build desktop (unsigned, no packaging)
+        run: pnpm --filter radar-desktop build
+        # Note: electron-builder packaging/signing (`pnpm dist`) is still skipped
+        # in CI — it requires signing certs.
 
       # D-8: Playwright E2E smoke tests (UI only, no API required)
       - name: Install Playwright browsers

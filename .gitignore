@@ -14,7 +14,9 @@ target/
 node_modules/
 dist/
 .next/
-# pnpm-lock.yaml is intentionally NOT ignored — keep it in source control
+# pnpm-lock.yaml is intentionally NOT ignored — keep it in source control.
+# This is a pnpm workspace: a root npm package-lock.json is stray (N-36).
+package-lock.json
 
 # =============================================================================
 # Environment / secrets
@@ -25,9 +27,12 @@ dist/
 *.env
 
 # =============================================================================
-# SQLite databases
+# SQLite databases (N-36: never commit local dev/test databases)
 # =============================================================================
 *.db
+# Explicit local dev/test database names (also covered by *.db above):
+drift.db
+radar.db
 *.sqlite
 *.sqlite3
 
