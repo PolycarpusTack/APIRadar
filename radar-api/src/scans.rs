@@ -109,23 +109,22 @@ pub(crate) async fn create_scan(
     }
 
     // Upsert on (org_id, service_id, spec_url)
-    let existing = sqlx::query(
-        "SELECT id FROM scheduled_scan WHERE org_id = ? AND service_id = ? AND spec_url = ?",
-    )
-    .bind(&org_id)
-    .bind(&body.service_id)
-    .bind(&body.spec_url)
-    .fetch_optional(&pool)
-    .await?;
+    let existing =
+        q!("SELECT id FROM scheduled_scan WHERE org_id = ? AND service_id = ? AND spec_url = ?",)
+            .bind(&org_id)
+            .bind(&body.service_id)
+            .bind(&body.spec_url)
+            .fetch_optional(&pool)
+            .await?;
 
     if let Some(row) = existing {
         let id: String = row.get("id");
-        sqlx::query("UPDATE scheduled_scan SET interval_minutes = ?, active = 1 WHERE id = ?")
+        q!("UPDATE scheduled_scan SET interval_minutes = ?, active = 1 WHERE id = ?")
             .bind(body.interval_minutes)
             .bind(&id)
             .execute(&pool)
             .await?;
-        let updated = sqlx::query(
+        let updated = q!(
             "SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_run_at, last_run_status, last_run_error, active, created_at FROM scheduled_scan WHERE id = ?",
         )
         .bind(&id)
@@ -136,7 +135,7 @@ pub(crate) async fn create_scan(
 
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    sqlx::query(
+    q!(
         "INSERT INTO scheduled_scan (id, org_id, service_id, spec_url, format, interval_minutes, active, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
     )
     .bind(&id)
@@ -149,7 +148,7 @@ pub(crate) async fn create_scan(
     .execute(&pool)
     .await?;
 
-    let row = sqlx::query(
+    let row = q!(
         "SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_run_at, last_run_status, last_run_error, active, created_at FROM scheduled_scan WHERE id = ?",
     )
     .bind(&id)
@@ -169,7 +168,7 @@ pub(crate) async fn list_scans(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let rows = sqlx::query(
+    let rows = q!(
         "SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_run_at, last_run_status, last_run_error, active, created_at FROM scheduled_scan WHERE org_id = ? ORDER BY created_at DESC",
     )
     .bind(&org_id)
@@ -191,7 +190,7 @@ pub(crate) async fn delete_scan(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let row = sqlx::query("SELECT id FROM scheduled_scan WHERE id = ? AND org_id = ?")
+    let row = q!("SELECT id FROM scheduled_scan WHERE id = ? AND org_id = ?")
         .bind(&id)
         .bind(&org_id)
         .fetch_optional(&pool)
@@ -200,7 +199,7 @@ pub(crate) async fn delete_scan(
         return Err(ApiError::NotFound(format!("scheduled scan {id} not found")));
     }
 
-    sqlx::query("DELETE FROM scheduled_scan WHERE id = ? AND org_id = ?")
+    q!("DELETE FROM scheduled_scan WHERE id = ? AND org_id = ?")
         .bind(&id)
         .bind(&org_id)
         .execute(&pool)
@@ -230,7 +229,7 @@ async fn run_due_scans(pool: sqlx::AnyPool) {
     // Fetch all active scans; due-time arithmetic is done in Rust to avoid
     // SQLite-only datetime() syntax (datetime(last_run_at, '+N minutes') is not
     // valid on PostgreSQL — the production deployment target).
-    let rows = match sqlx::query(
+    let rows = match q!(
         "SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_run_at, last_spec_hash
          FROM scheduled_scan WHERE active = 1",
     )
@@ -299,7 +298,7 @@ async fn execute_scan(
     }
 
     // Mark run started (status clears previous error to 'running').
-    let _ = sqlx::query(
+    let _ = q!(
         "UPDATE scheduled_scan SET last_run_at = ?, last_run_status = 'running', last_run_error = NULL WHERE id = ?",
     )
     .bind(&now)
@@ -400,7 +399,7 @@ async fn execute_scan(
         fetch_previous_spec(&pool, &service_id).await
     } else {
         // First run — store the spec, no diff to create yet.
-        let _ = sqlx::query("UPDATE scheduled_scan SET last_spec_hash = ? WHERE id = ?")
+        let _ = q!("UPDATE scheduled_scan SET last_spec_hash = ? WHERE id = ?")
             .bind(&hash)
             .bind(&scan_id)
             .execute(&pool)
@@ -453,7 +452,7 @@ async fn execute_scan(
     )
     .await
     {
-        let _ = sqlx::query("UPDATE scheduled_scan SET last_spec_hash = ? WHERE id = ?")
+        let _ = q!("UPDATE scheduled_scan SET last_spec_hash = ? WHERE id = ?")
             .bind(&hash)
             .bind(&scan_id)
             .execute(&pool)
@@ -471,7 +470,7 @@ async fn execute_scan(
         .await;
         dispatch_diff_event(pool, diff_id, org_id).await;
     } else {
-        let _ = sqlx::query("UPDATE scheduled_scan SET last_spec_hash = ? WHERE id = ?")
+        let _ = q!("UPDATE scheduled_scan SET last_spec_hash = ? WHERE id = ?")
             .bind(&hash)
             .bind(&scan_id)
             .execute(&pool)
@@ -495,7 +494,7 @@ async fn execute_scan(
 /// is `captured_at DESC, id DESC` so that identical timestamps break
 /// deterministically instead of relying on physical row order.
 async fn fetch_previous_spec(pool: &sqlx::AnyPool, service_id: &str) -> String {
-    let row = sqlx::query(
+    let row = q!(
         "SELECT spec_yaml FROM spec_version WHERE service_id = ? ORDER BY captured_at DESC, id DESC LIMIT 1",
     )
     .bind(service_id)
@@ -514,7 +513,7 @@ async fn set_scan_status(
     status: &str,
     error: Option<&str>,
 ) {
-    let _ = sqlx::query(
+    let _ = q!(
         "UPDATE scheduled_scan SET last_run_at = ?, last_run_status = ?, last_run_error = ? WHERE id = ?",
     )
     .bind(run_at)
@@ -535,7 +534,7 @@ async fn store_scan_spec(
     now: &str,
 ) {
     let svc_id = service_id.to_string();
-    let _ = sqlx::query(
+    let _ = q!(
         "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) VALUES (?, ?, '', '', ?, ?) ON CONFLICT(id) DO NOTHING",
     )
     .bind(&svc_id)
@@ -551,7 +550,7 @@ async fn store_scan_spec(
     )
     .to_string();
 
-    let _ = sqlx::query(
+    let _ = q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
     )
     .bind(&version_id)
@@ -606,7 +605,7 @@ async fn create_scan_diff(
     )
     .to_string();
 
-    let _ = sqlx::query(
+    let _ = q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) VALUES (?, ?, 'scan:base', ?, ?, ?) ON CONFLICT(id) DO NOTHING",
     )
     .bind(&from_id)
@@ -617,7 +616,7 @@ async fn create_scan_diff(
     .execute(pool)
     .await;
 
-    let _ = sqlx::query(
+    let _ = q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) VALUES (?, ?, 'scan:head', ?, ?, ?) ON CONFLICT(id) DO NOTHING",
     )
     .bind(&to_id)
@@ -629,38 +628,31 @@ async fn create_scan_diff(
     .await;
 
     let diff_id = Uuid::new_v4().to_string();
-    let _ = sqlx::query(
-        "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, NULL, ?)",
+    let change_rows: Vec<crate::diffs::ChangeInsert> = changes
+        .iter()
+        .map(crate::diffs::ChangeInsert::from_diff)
+        .collect();
+    let final_diff_id = match crate::diffs::persist_diff_atomic(
+        pool,
+        &diff_id,
+        &from_id,
+        &to_id,
+        None,
+        now,
+        &change_rows,
     )
-    .bind(&diff_id)
-    .bind(&from_id)
-    .bind(&to_id)
-    .bind(now)
-    .execute(pool)
-    .await;
-
-    for change in &changes {
-        let change_id = Uuid::new_v4().to_string();
-        let sev = match change.severity {
-            radar_core::models::Severity::Breaking => "breaking",
-            radar_core::models::Severity::NonBreakingRisky => "non_breaking_risky",
-            radar_core::models::Severity::Safe => "safe",
-        };
-        let _ = sqlx::query(
-            "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&change_id)
-        .bind(&diff_id)
-        .bind(&change.path)
-        .bind(change.kind.as_str())
-        .bind(sev)
-        .bind(&change.description)
-        .execute(pool)
-        .await;
-    }
+    .await
+    {
+        Ok(crate::diffs::DiffWriteOutcome::Created) => diff_id,
+        Ok(crate::diffs::DiffWriteOutcome::AlreadyExists(existing)) => existing,
+        Err(e) => {
+            tracing::warn!("scan diff persist failed: {e}");
+            return None;
+        }
+    };
 
     metrics::counter!("radar_diffs_created_total").increment(1);
-    Some(diff_id)
+    Some(final_diff_id)
 }
 
 // GET /v1/scheduled-scans/run-history (basic: last_run_at per scan)
@@ -670,7 +662,7 @@ pub(crate) async fn run_history(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     // NULLS LAST is PostgreSQL-only syntax; use CASE to sort nulls last on both SQLite and PostgreSQL.
-    let rows = sqlx::query(
+    let rows = q!(
         "SELECT id, service_id, spec_url, last_run_at, last_run_status, last_run_error, last_spec_hash \
          FROM scheduled_scan WHERE org_id = ? \
          ORDER BY CASE WHEN last_run_at IS NULL THEN 1 ELSE 0 END ASC, last_run_at DESC",
@@ -719,7 +711,7 @@ mod tests {
             .await
             .expect("migrate");
         if url.starts_with("sqlite") {
-            sqlx::query("PRAGMA foreign_keys = OFF")
+            q!("PRAGMA foreign_keys = OFF")
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -734,7 +726,21 @@ mod tests {
         captured_at: &str,
         yaml: &str,
     ) {
-        sqlx::query(
+        // spec_version.service_id references service(id). SQLite's test pool has
+        // FKs off, but Postgres always enforces them, so ensure the parent row
+        // exists first (idempotent — several specs share one service).
+        q!(
+            "INSERT INTO service (id, name, repo_url, owner_team, spec_format) \
+             VALUES (?, ?, 'https://example.com/repo', 'team', 'openapi') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(service_id)
+        .bind(service_id)
+        .execute(pool)
+        .await
+        .expect("insert service");
+
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
              VALUES (?, ?, 'test', ?, 'openapi', ?)",
         )

@@ -125,17 +125,16 @@ pub(crate) async fn create_webhook(
     let now = Utc::now().to_rfc3339();
 
     // Idempotent on (org_id, url, events)
-    let existing =
-        sqlx::query("SELECT id FROM webhook WHERE org_id = ? AND url = ? AND events = ?")
-            .bind(&org_id)
-            .bind(&body.url)
-            .bind(&events_str)
-            .fetch_optional(&pool)
-            .await?;
+    let existing = q!("SELECT id FROM webhook WHERE org_id = ? AND url = ? AND events = ?")
+        .bind(&org_id)
+        .bind(&body.url)
+        .bind(&events_str)
+        .fetch_optional(&pool)
+        .await?;
 
     if let Some(row) = existing {
         let id: String = row.get("id");
-        let wh = sqlx::query(
+        let wh = q!(
             "SELECT id, org_id, url, events, secret, active, created_at, type FROM webhook WHERE id = ?",
         )
         .bind(&id)
@@ -151,7 +150,7 @@ pub(crate) async fn create_webhook(
     };
 
     let id = Uuid::new_v4().to_string();
-    sqlx::query(
+    q!(
         "INSERT INTO webhook (id, org_id, url, events, secret, active, created_at, type) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
     )
     .bind(&id)
@@ -164,7 +163,7 @@ pub(crate) async fn create_webhook(
     .execute(&pool)
     .await?;
 
-    let wh = sqlx::query(
+    let wh = q!(
         "SELECT id, org_id, url, events, secret, active, created_at, type FROM webhook WHERE id = ?",
     )
     .bind(&id)
@@ -184,7 +183,7 @@ pub(crate) async fn list_webhooks(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let rows = sqlx::query(
+    let rows = q!(
         "SELECT id, org_id, url, events, secret, active, created_at, type FROM webhook WHERE org_id = ? ORDER BY created_at DESC",
     )
     .bind(&org_id)
@@ -206,7 +205,7 @@ pub(crate) async fn delete_webhook(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let row = sqlx::query("SELECT id FROM webhook WHERE id = ? AND org_id = ?")
+    let row = q!("SELECT id FROM webhook WHERE id = ? AND org_id = ?")
         .bind(&id)
         .bind(&org_id)
         .fetch_optional(&pool)
@@ -216,7 +215,7 @@ pub(crate) async fn delete_webhook(
         return Err(ApiError::NotFound(format!("webhook {id} not found")));
     }
 
-    sqlx::query("DELETE FROM webhook WHERE id = ? AND org_id = ?")
+    q!("DELETE FROM webhook WHERE id = ? AND org_id = ?")
         .bind(&id)
         .bind(&org_id)
         .execute(&pool)
@@ -236,13 +235,12 @@ pub(crate) async fn test_webhook(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let row = sqlx::query(
-        "SELECT id, url, secret, type FROM webhook WHERE id = ? AND org_id = ? AND active = 1",
-    )
-    .bind(&id)
-    .bind(&org_id)
-    .fetch_optional(&pool)
-    .await?;
+    let row =
+        q!("SELECT id, url, secret, type FROM webhook WHERE id = ? AND org_id = ? AND active = 1",)
+            .bind(&id)
+            .bind(&org_id)
+            .fetch_optional(&pool)
+            .await?;
 
     let row =
         row.ok_or_else(|| ApiError::NotFound(format!("webhook {id} not found or inactive")))?;
@@ -298,7 +296,7 @@ pub(crate) async fn dispatch_diff_event(pool: sqlx::AnyPool, diff_id: String, or
         }
     };
 
-    let rows = match sqlx::query(
+    let rows = match q!(
         "SELECT id, url, secret, type FROM webhook WHERE org_id = ? AND active = 1 AND (events = 'diff.created' OR events LIKE '%diff.created%')",
     )
     .bind(&org_id)
@@ -344,7 +342,7 @@ async fn build_diff_payload(
 ) -> anyhow::Result<serde_json::Value> {
     // diff has no service_id or change counts directly — join through spec_version → service
     // and aggregate change counts from the change table (portable SQL, no dialect-specific syntax).
-    let row = sqlx::query(
+    let row = q!(
         "SELECT d.id, d.created_at, sv.service_id, s.name as service_name,
                 COALESCE(SUM(CASE WHEN c.severity = 'breaking' THEN 1 ELSE 0 END), 0) as breaking_change_count,
                 COUNT(c.id) as total_change_count
@@ -422,8 +420,17 @@ fn build_slack_block_kit(diff_payload: &serde_json::Value) -> serde_json::Value 
 /// Build an absolute "View Diff" URL from RADAR_PUBLIC_BASE_URL, or None when the
 /// base URL is unset/empty so the caller can omit the (invalid-if-relative) button.
 fn slack_diff_url(diff_id: &str) -> Option<String> {
-    let base = std::env::var("RADAR_PUBLIC_BASE_URL").ok()?;
-    let base = base.trim().trim_end_matches('/');
+    diff_url_from_base(
+        std::env::var("RADAR_PUBLIC_BASE_URL").ok().as_deref(),
+        diff_id,
+    )
+}
+
+/// Pure core of [`slack_diff_url`]: given an optional base URL, return the
+/// absolute diff link or None. Kept free of env reads so tests exercise it
+/// hermetically without racing on the process-global RADAR_PUBLIC_BASE_URL.
+fn diff_url_from_base(base: Option<&str>, diff_id: &str) -> Option<String> {
+    let base = base?.trim().trim_end_matches('/');
     if base.is_empty() {
         return None;
     }
@@ -457,7 +464,7 @@ async fn deliver_webhook_event(t: DeliveryTask) {
     let now = Utc::now().to_rfc3339();
 
     // Insert pending delivery record
-    let _ = sqlx::query(
+    let _ = q!(
         "INSERT INTO webhook_delivery (id, webhook_id, event, payload, status, attempt, error, delivered_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, NULL, NULL, ?)",
     )
     .bind(&delivery_id)
@@ -497,7 +504,7 @@ async fn deliver_webhook_event(t: DeliveryTask) {
 
         match req_builder.send().await {
             Ok(resp) if resp.status().is_success() => {
-                let _ = sqlx::query(
+                let _ = q!(
                     "UPDATE webhook_delivery SET status = 'delivered', attempt = ?, delivered_at = ? WHERE id = ?",
                 )
                 .bind(attempt as i32 + 1)
@@ -525,7 +532,7 @@ async fn deliver_webhook_event(t: DeliveryTask) {
             }
         }
 
-        let _ = sqlx::query("UPDATE webhook_delivery SET attempt = ?, error = ? WHERE id = ?")
+        let _ = q!("UPDATE webhook_delivery SET attempt = ?, error = ? WHERE id = ?")
             .bind(attempt as i32 + 1)
             .bind(last_error.as_deref())
             .bind(&delivery_id)
@@ -534,7 +541,7 @@ async fn deliver_webhook_event(t: DeliveryTask) {
     }
 
     // All attempts exhausted
-    let _ = sqlx::query("UPDATE webhook_delivery SET status = 'failed', error = ? WHERE id = ?")
+    let _ = q!("UPDATE webhook_delivery SET status = 'failed', error = ? WHERE id = ?")
         .bind(last_error.as_deref())
         .bind(&delivery_id)
         .execute(&pool)
@@ -559,7 +566,7 @@ pub(crate) async fn list_deliveries(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
     // Verify webhook belongs to caller's org
-    let row = sqlx::query("SELECT id FROM webhook WHERE id = ? AND org_id = ?")
+    let row = q!("SELECT id FROM webhook WHERE id = ? AND org_id = ?")
         .bind(&id)
         .bind(&org_id)
         .fetch_optional(&pool)
@@ -568,7 +575,7 @@ pub(crate) async fn list_deliveries(
         return Err(ApiError::NotFound(format!("webhook {id} not found")));
     }
 
-    let rows = sqlx::query(
+    let rows = q!(
         "SELECT id, webhook_id, event, status, attempt, error, delivered_at FROM webhook_delivery WHERE webhook_id = ? ORDER BY created_at DESC, id DESC LIMIT 50",
     )
     .bind(&id)
@@ -602,13 +609,11 @@ pub(crate) fn start_webhook_outbox(pool: sqlx::AnyPool) {
         // Wait for the server to finish binding/routing before issuing DB queries.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-        let rows = match sqlx::query(
-            "SELECT wd.id, wd.event, wd.payload, \
+        let rows = match q!("SELECT wd.id, wd.event, wd.payload, \
                     w.id as webhook_id, w.url, w.secret, w.type as webhook_type \
              FROM webhook_delivery wd \
              JOIN webhook w ON w.id = wd.webhook_id \
-             WHERE wd.status = 'pending'",
-        )
+             WHERE wd.status = 'pending'",)
         .fetch_all(&pool)
         .await
         {
@@ -697,7 +702,7 @@ async fn retry_pending_delivery(
 
         match req_builder.send().await {
             Ok(resp) if resp.status().is_success() => {
-                let _ = sqlx::query(
+                let _ = q!(
                     "UPDATE webhook_delivery SET status = 'delivered', attempt = ?, delivered_at = ? WHERE id = ?",
                 )
                 .bind(attempt as i32 + 1)
@@ -719,7 +724,7 @@ async fn retry_pending_delivery(
             }
         }
 
-        let _ = sqlx::query("UPDATE webhook_delivery SET attempt = ?, error = ? WHERE id = ?")
+        let _ = q!("UPDATE webhook_delivery SET attempt = ?, error = ? WHERE id = ?")
             .bind(attempt as i32 + 1)
             .bind(last_error.as_deref())
             .bind(&delivery_id)
@@ -727,7 +732,7 @@ async fn retry_pending_delivery(
             .await;
     }
 
-    let _ = sqlx::query("UPDATE webhook_delivery SET status = 'failed', error = ? WHERE id = ?")
+    let _ = q!("UPDATE webhook_delivery SET status = 'failed', error = ? WHERE id = ?")
         .bind(last_error.as_deref())
         .bind(&delivery_id)
         .execute(&pool)
@@ -810,18 +815,18 @@ mod tests {
 
     #[test]
     fn slack_diff_url_absolute_when_base_set() {
-        std::env::set_var("RADAR_PUBLIC_BASE_URL", "https://radar.example.com/");
+        // Exercise the pure core so the test never mutates the process-global
+        // RADAR_PUBLIC_BASE_URL (which would race sibling tests in parallel).
         assert_eq!(
-            slack_diff_url("abc-123"),
+            diff_url_from_base(Some("https://radar.example.com/"), "abc-123"),
             Some("https://radar.example.com/diffs/abc-123".to_string()),
         );
-        std::env::remove_var("RADAR_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn slack_diff_url_none_when_base_unset() {
-        std::env::remove_var("RADAR_PUBLIC_BASE_URL");
-        assert_eq!(slack_diff_url("abc-123"), None);
+        assert_eq!(diff_url_from_base(None, "abc-123"), None);
+        assert_eq!(diff_url_from_base(Some("  "), "abc-123"), None);
     }
 
     #[test]

@@ -43,6 +43,119 @@ pub(crate) struct ChangeInput {
     pub(crate) description: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Atomic diff persistence (N-3)
+//
+// A diff row and its change rows were previously inserted in a loop WITHOUT a
+// transaction across four call sites. A mid-loop failure left a truncated diff,
+// which the `idx_diff_transition` dedup path then made permanent (every retry
+// returned cached=true). This helper writes the diff and all changes in one
+// transaction — all-or-nothing — and is the single source of truth for the four
+// callers (create_diff, compare_specs, run_batch_item, create_scan_diff).
+// ---------------------------------------------------------------------------
+
+/// A change row ready for insertion, independent of the source format.
+pub(crate) struct ChangeInsert {
+    pub(crate) path: String,
+    pub(crate) kind: String,
+    pub(crate) severity: String,
+    pub(crate) description: Option<String>,
+}
+
+impl ChangeInsert {
+    /// Build from a request `ChangeInput` (kind/severity already stringified).
+    pub(crate) fn from_input(c: &ChangeInput) -> Self {
+        ChangeInsert {
+            path: c.path.clone(),
+            kind: c.kind.clone(),
+            severity: c.severity.clone(),
+            description: c.description.clone(),
+        }
+    }
+
+    /// Build from a computed `radar_core` DiffChange.
+    pub(crate) fn from_diff(c: &radar_core::diff::DiffChange) -> Self {
+        let severity = match c.severity {
+            radar_core::models::Severity::Breaking => "breaking",
+            radar_core::models::Severity::NonBreakingRisky => "non_breaking_risky",
+            radar_core::models::Severity::Safe => "safe",
+        };
+        ChangeInsert {
+            path: c.path.clone(),
+            kind: c.kind.as_str().to_string(),
+            severity: severity.to_string(),
+            description: c.description.clone(),
+        }
+    }
+}
+
+pub(crate) enum DiffWriteOutcome {
+    /// The diff and its changes were inserted.
+    Created,
+    /// A concurrent identical (from_version, to_version) diff already exists;
+    /// nothing was written. Carries the existing diff id.
+    AlreadyExists(String),
+}
+
+/// Insert a diff row and all its change rows in a single transaction. On a
+/// unique-violation of `idx_diff_transition` (a concurrent identical diff),
+/// rolls back and returns the existing diff id. Never leaves a partial diff.
+pub(crate) async fn persist_diff_atomic(
+    pool: &sqlx::AnyPool,
+    diff_id: &str,
+    from_version: &str,
+    to_version: &str,
+    pr_url: Option<&str>,
+    created_at: &str,
+    changes: &[ChangeInsert],
+) -> Result<DiffWriteOutcome, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    let insert = q!(
+        "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(diff_id)
+    .bind(from_version)
+    .bind(to_version)
+    .bind(pr_url)
+    .bind(created_at)
+    .execute(&mut *tx)
+    .await;
+
+    if let Err(e) = insert {
+        let is_unique = matches!(&e, sqlx::Error::Database(db) if db.is_unique_violation());
+        drop(tx); // roll back the (empty) transaction
+        if is_unique {
+            use sqlx::Row;
+            let row = q!("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
+                .bind(from_version)
+                .bind(to_version)
+                .fetch_one(pool)
+                .await?;
+            let existing: String = row.try_get("id")?;
+            return Ok(DiffWriteOutcome::AlreadyExists(existing));
+        }
+        return Err(e);
+    }
+
+    for c in changes {
+        q!(
+            "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(diff_id)
+        .bind(&c.path)
+        .bind(&c.kind)
+        .bind(&c.severity)
+        .bind(&c.description)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(DiffWriteOutcome::Created)
+}
+
 #[derive(serde::Deserialize, Default)]
 pub(crate) struct BlastRadiusParams {
     pub(crate) max_age_days: Option<u32>,
@@ -102,7 +215,7 @@ pub(crate) async fn list_diffs(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
     if !org_id.is_empty() {
-        let svc_org: Option<String> = sqlx::query_scalar("SELECT org_id FROM service WHERE id = ?")
+        let svc_org: Option<String> = qs!("SELECT org_id FROM service WHERE id = ?")
             .bind(&service_id)
             .fetch_optional(&pool)
             .await?;
@@ -111,8 +224,7 @@ pub(crate) async fn list_diffs(
         }
     }
 
-    let rows = sqlx::query(
-        r#"
+    let rows = q!(r#"
         SELECT
             d.id          AS diff_id,
             sv_from.git_ref AS from_git_ref,
@@ -131,8 +243,7 @@ pub(crate) async fn list_diffs(
         JOIN service s            ON s.id        = sv_to.service_id
         WHERE (sv_from.service_id = ? OR sv_to.service_id = ?)
         ORDER BY d.created_at DESC
-        "#,
-    )
+        "#,)
     .bind(&service_id)
     .bind(&service_id)
     .fetch_all(&pool)
@@ -176,11 +287,12 @@ pub(crate) async fn create_diff(
 
     // Org isolation: reject if an existing service with this ID belongs to a different org.
     if !org_id.is_empty() {
-        if let Some(existing_org) =
-            sqlx::query_scalar::<_, String>("SELECT COALESCE(org_id, '') FROM service WHERE id = ?")
-                .bind(&service_id)
-                .fetch_optional(&pool)
-                .await?
+        if let Some(existing_org) = sqlx::query_scalar::<_, String>(&crate::db::pg(
+            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
+        ))
+        .bind(&service_id)
+        .fetch_optional(&pool)
+        .await?
         {
             if !existing_org.is_empty() && existing_org != org_id {
                 return Err(ApiError::Forbidden("service belongs to another org".into()));
@@ -188,8 +300,7 @@ pub(crate) async fn create_diff(
         }
     }
 
-    sqlx::query(
-        r#"
+    q!(r#"
         INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
@@ -197,8 +308,7 @@ pub(crate) async fn create_diff(
             repo_url   = excluded.repo_url,
             owner_team = excluded.owner_team,
             spec_format = excluded.spec_format
-        "#,
-    )
+        "#,)
     .bind(&service_id)
     .bind(&body.service_name)
     .bind(&body.repo_url)
@@ -209,13 +319,11 @@ pub(crate) async fn create_diff(
     .await?;
 
     let from_version_id = spec_version_id(&service_id, &body.from_git_ref);
-    sqlx::query(
-        r#"
+    q!(r#"
         INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(id) DO NOTHING
-        "#,
-    )
+        "#,)
     .bind(&from_version_id)
     .bind(&service_id)
     .bind(&body.from_git_ref)
@@ -225,14 +333,12 @@ pub(crate) async fn create_diff(
     .await?;
 
     let to_version_id = spec_version_id(&service_id, &body.to_git_ref);
-    sqlx::query(
-        r#"
+    q!(r#"
         INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             spec_yaml = COALESCE(excluded.spec_yaml, spec_version.spec_yaml)
-        "#,
-    )
+        "#,)
     .bind(&to_version_id)
     .bind(&service_id)
     .bind(&body.to_git_ref)
@@ -244,7 +350,7 @@ pub(crate) async fn create_diff(
 
     {
         use sqlx::Row;
-        let existing = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
+        let existing = q!("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
             .bind(&from_version_id)
             .bind(&to_version_id)
             .fetch_optional(&pool)
@@ -264,35 +370,25 @@ pub(crate) async fn create_diff(
         }
     }
 
+    // Insert the diff and all its changes atomically. A concurrent request may
+    // have inserted the same (from_version, to_version) transition, tripping the
+    // unique index `idx_diff_transition`; that race is returned as cached-200.
     let diff_id = Uuid::new_v4().to_string();
-    let insert_res = sqlx::query(
-        r#"
-        INSERT INTO diff (id, from_version, to_version, pr_url, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        "#,
+    let change_rows: Vec<ChangeInsert> =
+        body.changes.iter().map(ChangeInsert::from_input).collect();
+    match persist_diff_atomic(
+        &pool,
+        &diff_id,
+        &from_version_id,
+        &to_version_id,
+        body.pr_url.as_deref(),
+        &now,
+        &change_rows,
     )
-    .bind(&diff_id)
-    .bind(&from_version_id)
-    .bind(&to_version_id)
-    .bind(&body.pr_url)
-    .bind(&now)
-    .execute(&pool)
-    .await;
-
-    if let Err(e) = insert_res {
-        // A concurrent request may have inserted the same (from_version, to_version)
-        // transition between our SELECT above and this INSERT, tripping the unique
-        // index `idx_diff_transition`. Treat that race as "already exists" and return
-        // the existing diff as cached-200 rather than surfacing a 500.
-        let is_unique = matches!(&e, sqlx::Error::Database(db) if db.is_unique_violation());
-        if is_unique {
-            use sqlx::Row;
-            let row = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
-                .bind(&from_version_id)
-                .bind(&to_version_id)
-                .fetch_one(&pool)
-                .await?;
-            let existing_id: String = row.try_get("id").map_err(ApiError::Db)?;
+    .await
+    .map_err(ApiError::Db)?
+    {
+        DiffWriteOutcome::AlreadyExists(existing_id) => {
             return Ok((
                 StatusCode::OK,
                 Json(json!({
@@ -303,25 +399,7 @@ pub(crate) async fn create_diff(
                 })),
             ));
         }
-        return Err(ApiError::Db(e));
-    }
-
-    for change in &body.changes {
-        let change_id = Uuid::new_v4().to_string();
-        sqlx::query(
-            r#"
-            INSERT INTO change (id, diff_id, path, kind, severity, description)
-            VALUES (?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(&change_id)
-        .bind(&diff_id)
-        .bind(&change.path)
-        .bind(&change.kind)
-        .bind(&change.severity)
-        .bind(&change.description)
-        .execute(&pool)
-        .await?;
+        DiffWriteOutcome::Created => {}
     }
 
     metrics::counter!("radar_diffs_created_total").increment(1);
@@ -367,8 +445,7 @@ pub(crate) async fn get_diff(
 
     let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let row = sqlx::query(
-        r#"
+    let row = q!(r#"
         SELECT d.id, sv_from.git_ref AS from_git_ref, sv_to.git_ref AS to_git_ref,
                d.pr_url, d.created_at, d.share_token, sv_to.spec_yaml, s.org_id AS service_org_id
         FROM diff d
@@ -376,8 +453,7 @@ pub(crate) async fn get_diff(
         JOIN spec_version sv_to   ON sv_to.id   = d.to_version
         JOIN service s            ON s.id        = sv_to.service_id
         WHERE d.id = ?
-        "#,
-    )
+        "#,)
     .bind(&diff_id)
     .fetch_optional(&pool)
     .await?;
@@ -398,7 +474,7 @@ pub(crate) async fn get_diff(
         t
     } else {
         let token = Uuid::new_v4().to_string();
-        let _ = sqlx::query("UPDATE diff SET share_token = ? WHERE id = ?")
+        let _ = q!("UPDATE diff SET share_token = ? WHERE id = ?")
             .bind(&token)
             .bind(&diff_id)
             .execute(&pool)
@@ -406,14 +482,12 @@ pub(crate) async fn get_diff(
         token
     };
 
-    let change_rows = sqlx::query(
-        r#"
+    let change_rows = q!(r#"
         SELECT path, kind, severity, description
         FROM change
         WHERE diff_id = ?
         ORDER BY path, kind
-        "#,
-    )
+        "#,)
     .bind(&diff_id)
     .fetch_all(&pool)
     .await?;
@@ -430,7 +504,7 @@ pub(crate) async fn get_diff(
         })
         .collect();
 
-    let rule_rows = sqlx::query(
+    let rule_rows = q!(
         "SELECT id, name, path_pattern, change_kind, severity_override
          FROM evolution_rule
          WHERE org_id = ? AND enabled = 1
@@ -478,7 +552,7 @@ pub(crate) async fn get_shared_diff(
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
-    let diff_row = sqlx::query(
+    let diff_row = q!(
         r#"SELECT d.id, sv_from.git_ref AS from_git_ref, sv_to.git_ref AS to_git_ref,
                   d.pr_url, d.created_at, s.name AS service_name
            FROM diff d
@@ -494,7 +568,7 @@ pub(crate) async fn get_shared_diff(
     let diff_row = diff_row.ok_or_else(|| ApiError::NotFound("shared diff not found".into()))?;
     let diff_id: String = diff_row.get("id");
 
-    let change_rows = sqlx::query(
+    let change_rows = q!(
         "SELECT path, kind, severity, description FROM change WHERE diff_id = ? ORDER BY path, kind",
     )
     .bind(&diff_id)
@@ -535,7 +609,7 @@ pub(crate) async fn blast_radius(
 
     let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let diff_row = sqlx::query("SELECT id, from_version, to_version FROM diff WHERE id = ?")
+    let diff_row = q!("SELECT id, from_version, to_version FROM diff WHERE id = ?")
         .bind(&diff_id)
         .fetch_optional(&pool)
         .await?;
@@ -547,7 +621,7 @@ pub(crate) async fn blast_radius(
 
     let to_version: String = diff_row.try_get("to_version").map_err(ApiError::Db)?;
 
-    let sv_row = sqlx::query(
+    let sv_row = q!(
         "SELECT sv.service_id, s.org_id FROM spec_version sv JOIN service s ON s.id = sv.service_id WHERE sv.id = ?",
     )
     .bind(&to_version)
@@ -574,7 +648,7 @@ pub(crate) async fn blast_radius(
 
     assert_org_access(&svc_org_id, &caller_org_id, &format!("diff {diff_id}"))?;
 
-    let change_rows = sqlx::query("SELECT path FROM change WHERE diff_id = ?")
+    let change_rows = q!("SELECT path FROM change WHERE diff_id = ?")
         .bind(&diff_id)
         .fetch_all(&pool)
         .await?;
@@ -608,14 +682,12 @@ pub(crate) async fn blast_radius(
             .collect()
     };
 
-    let consumer_rows = sqlx::query(
-        r#"
+    let consumer_rows = q!(r#"
         SELECT c.id, c.name, c.repo_url, c.owner_team, c.contact
         FROM consumer c
         JOIN subscription s ON s.consumer_id = c.id
         WHERE s.service_id = ?
-        "#,
-    )
+        "#,)
     .bind(&service_id)
     .fetch_all(&pool)
     .await?;
@@ -657,6 +729,9 @@ pub(crate) async fn blast_radius(
             }
             sql.push_str(") ORDER BY recorded_at DESC LIMIT 5");
 
+            // Dynamic bind loop below stores the builder, so the placeholder-
+            // rewritten SQL must outlive it (a temporary would be dropped).
+            let sql = crate::db::pg(&sql);
             let mut q = sqlx::query(&sql)
                 .bind(&consumer_id)
                 .bind(&service_id)
@@ -714,6 +789,7 @@ pub(crate) async fn blast_radius(
             }
             sql.push_str(") ORDER BY last_seen_at DESC LIMIT 5");
 
+            let sql = crate::db::pg(&sql);
             let mut q = sqlx::query(&sql).bind(&consumer_id).bind(&service_id);
             for op in &op_level_ops {
                 q = q.bind(op);
@@ -797,12 +873,10 @@ pub(crate) async fn blast_radius(
                 };
                 // ON CONFLICT(id) DO NOTHING is atomic on SQLite and PostgreSQL; combined
                 // with the deterministic id above this makes the GET write idempotent.
-                sqlx::query(
-                    "INSERT INTO impact_evidence \
+                q!("INSERT INTO impact_evidence \
                      (id, org_id, diff_id, producer_service_id, consumer_id, source_type, \
                       operation, field_path, confidence, file_path, line_number, observed_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
-                )
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",)
                 .bind(&ev_id)
                 .bind(&svc_org_id)
                 .bind(&diff_id)
@@ -912,7 +986,7 @@ pub(crate) async fn list_all_diffs(
     "#;
 
     let rows = if !org_id.is_empty() {
-        sqlx::query(&format!(
+        q!(&format!(
             "{base_query} WHERE s.org_id = ? ORDER BY d.created_at DESC LIMIT ? OFFSET ?"
         ))
         .bind(&org_id)
@@ -921,7 +995,7 @@ pub(crate) async fn list_all_diffs(
         .fetch_all(&pool)
         .await?
     } else {
-        sqlx::query(&format!(
+        q!(&format!(
             "{base_query} ORDER BY d.created_at DESC LIMIT ? OFFSET ?"
         ))
         .bind(limit)
@@ -1028,11 +1102,12 @@ pub(crate) async fn compare_specs(
 
     // Org isolation: reject if an existing service with this ID belongs to a different org.
     if !org_id.is_empty() {
-        if let Some(existing_org) =
-            sqlx::query_scalar::<_, String>("SELECT COALESCE(org_id, '') FROM service WHERE id = ?")
-                .bind(&service_id)
-                .fetch_optional(&pool)
-                .await?
+        if let Some(existing_org) = sqlx::query_scalar::<_, String>(&crate::db::pg(
+            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
+        ))
+        .bind(&service_id)
+        .fetch_optional(&pool)
+        .await?
         {
             if !existing_org.is_empty() && existing_org != org_id {
                 return Err(ApiError::Forbidden("service belongs to another org".into()));
@@ -1041,7 +1116,7 @@ pub(crate) async fn compare_specs(
     }
 
     // Upsert the service record so the endpoint is self-contained.
-    sqlx::query(
+    q!(
         "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) \
          VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET spec_format = excluded.spec_format",
@@ -1056,7 +1131,7 @@ pub(crate) async fn compare_specs(
     .await?;
 
     let from_version_id = spec_version_id(&service_id, &body.base_ref);
-    sqlx::query(
+    q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
          VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO NOTHING",
@@ -1071,7 +1146,7 @@ pub(crate) async fn compare_specs(
     .await?;
 
     let to_version_id = spec_version_id(&service_id, &body.head_ref);
-    sqlx::query(
+    q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
          VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET spec_yaml = COALESCE(excluded.spec_yaml, spec_version.spec_yaml)",
@@ -1088,7 +1163,7 @@ pub(crate) async fn compare_specs(
     // Re-use an existing diff for the same (from, to) pair.
     {
         use sqlx::Row;
-        let existing = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
+        let existing = q!("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
             .bind(&from_version_id)
             .bind(&to_version_id)
             .fetch_optional(&pool)
@@ -1113,40 +1188,35 @@ pub(crate) async fn compare_specs(
     }
 
     let diff_id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) \
-         VALUES (?, ?, ?, NULL, ?)",
+    let change_rows: Vec<ChangeInsert> = changes.iter().map(ChangeInsert::from_diff).collect();
+    let breaking_count = change_rows
+        .iter()
+        .filter(|c| c.severity == "breaking")
+        .count() as i64;
+    match persist_diff_atomic(
+        &pool,
+        &diff_id,
+        &from_version_id,
+        &to_version_id,
+        None,
+        &now,
+        &change_rows,
     )
-    .bind(&diff_id)
-    .bind(&from_version_id)
-    .bind(&to_version_id)
-    .bind(&now)
-    .execute(&pool)
-    .await?;
-
-    let mut breaking_count: i64 = 0;
-    for change in &changes {
-        let change_id = Uuid::new_v4().to_string();
-        let sev_str = match change.severity {
-            radar_core::models::Severity::Breaking => {
-                breaking_count += 1;
-                "breaking"
-            }
-            radar_core::models::Severity::NonBreakingRisky => "non_breaking_risky",
-            radar_core::models::Severity::Safe => "safe",
-        };
-        sqlx::query(
-            "INSERT INTO change (id, diff_id, path, kind, severity, description) \
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&change_id)
-        .bind(&diff_id)
-        .bind(&change.path)
-        .bind(change.kind.as_str())
-        .bind(sev_str)
-        .bind(&change.description)
-        .execute(&pool)
-        .await?;
+    .await
+    .map_err(ApiError::Db)?
+    {
+        DiffWriteOutcome::AlreadyExists(existing_id) => {
+            return Ok((
+                StatusCode::OK,
+                Json(json!({
+                    "diff_id":        existing_id,
+                    "changes_count":  changes.len() as i64,
+                    "breaking_count": breaking_count,
+                    "cached":         true,
+                })),
+            ));
+        }
+        DiffWriteOutcome::Created => {}
     }
 
     metrics::counter!("radar_diffs_created_total").increment(1);
@@ -1321,12 +1391,13 @@ async fn run_batch_item(
 
     // Org isolation: reject if an existing service with this ID belongs to a different org.
     if !org_id.is_empty() {
-        if let Some(existing_org) =
-            sqlx::query_scalar::<_, String>("SELECT COALESCE(org_id, '') FROM service WHERE id = ?")
-                .bind(&service_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| anyhow::anyhow!("org check: {e}"))?
+        if let Some(existing_org) = sqlx::query_scalar::<_, String>(&crate::db::pg(
+            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
+        ))
+        .bind(&service_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("org check: {e}"))?
         {
             if !existing_org.is_empty() && existing_org != org_id {
                 anyhow::bail!("service belongs to another org");
@@ -1334,7 +1405,7 @@ async fn run_batch_item(
         }
     }
 
-    sqlx::query(
+    q!(
         "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) \
          VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET spec_format = excluded.spec_format",
@@ -1351,7 +1422,7 @@ async fn run_batch_item(
 
     // Use URL strings as git refs — keeps spec_version IDs stable across reruns.
     let from_ver = spec_version_id(&service_id, &item.base_url);
-    sqlx::query(
+    q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
          VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
     )
@@ -1366,7 +1437,7 @@ async fn run_batch_item(
     .map_err(|e| anyhow::anyhow!("insert base spec_version: {e}"))?;
 
     let to_ver = spec_version_id(&service_id, &item.head_url);
-    sqlx::query(
+    q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
          VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET spec_yaml = COALESCE(excluded.spec_yaml, spec_version.spec_yaml)",
@@ -1376,7 +1447,7 @@ async fn run_batch_item(
     .execute(pool).await.map_err(|e| anyhow::anyhow!("insert head spec_version: {e}"))?;
 
     // Re-use an existing diff for the same (from, to) pair.
-    if let Some(row) = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
+    if let Some(row) = q!("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
         .bind(&from_ver)
         .bind(&to_ver)
         .fetch_optional(pool)
@@ -1402,34 +1473,26 @@ async fn run_batch_item(
     }
 
     let diff_id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, NULL, ?)")
-        .bind(&diff_id).bind(&from_ver).bind(&to_ver).bind(&now)
-        .execute(pool).await.map_err(|e| anyhow::anyhow!("insert diff: {e}"))?;
-
-    let mut breaking_count: i64 = 0;
-    for change in &changes {
-        let sev = match change.severity {
-            radar_core::models::Severity::Breaking => {
-                breaking_count += 1;
-                "breaking"
-            }
-            radar_core::models::Severity::NonBreakingRisky => "non_breaking_risky",
-            radar_core::models::Severity::Safe => "safe",
+    let change_rows: Vec<ChangeInsert> = changes.iter().map(ChangeInsert::from_diff).collect();
+    let breaking_count = change_rows
+        .iter()
+        .filter(|c| c.severity == "breaking")
+        .count() as i64;
+    let final_diff_id =
+        match persist_diff_atomic(pool, &diff_id, &from_ver, &to_ver, None, &now, &change_rows)
+            .await
+            .map_err(|e| anyhow::anyhow!("persist diff: {e}"))?
+        {
+            DiffWriteOutcome::AlreadyExists(existing) => existing,
+            DiffWriteOutcome::Created => diff_id,
         };
-        sqlx::query(
-            "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(Uuid::new_v4().to_string()).bind(&diff_id)
-        .bind(&change.path).bind(change.kind.as_str()).bind(sev).bind(&change.description)
-        .execute(pool).await.map_err(|e| anyhow::anyhow!("insert change: {e}"))?;
-    }
 
     metrics::counter!("radar_diffs_created_total").increment(1);
 
     Ok(BatchResultItem {
         label: label.to_string(),
         status: "done".into(),
-        diff_id: Some(diff_id),
+        diff_id: Some(final_diff_id),
         breaking_count,
         changes_count: changes.len() as i64,
         error: None,

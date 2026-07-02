@@ -1,3 +1,8 @@
+// Placeholder-portability macros (q!/qs!/qa!) must be in scope for every module
+// below, so this `#[macro_use] mod db;` is declared first (N-26).
+#[macro_use]
+mod db;
+
 pub(crate) mod acknowledgements;
 mod ai;
 pub(crate) mod ai_tests;
@@ -251,6 +256,11 @@ pub async fn run(
     scalar_update::OVERRIDE_DIR
         .set(derive_sqlite_parent(effective_url))
         .ok();
+
+    // N-26: record the backend so `?` placeholders are rewritten to `$N` on
+    // PostgreSQL. Set before any query runs (the retention pool's first query is
+    // delayed, so this is in time for it too).
+    db::set_backend_from_url(effective_url);
 
     let max_conns: u32 = std::env::var("RADAR_DB_MAX_CONNECTIONS")
         .ok()
@@ -656,7 +666,7 @@ async fn serve_scalar_js() -> impl IntoResponse {
 }
 
 async fn health(State(pool): State<sqlx::AnyPool>) -> impl IntoResponse {
-    match sqlx::query("SELECT 1").execute(&pool).await {
+    match q!("SELECT 1").execute(&pool).await {
         Ok(_) => (
             StatusCode::OK,
             Json(json!({"status": "ok", "db": "ok", "version": "0.1.0"})),
@@ -731,10 +741,7 @@ mod tests {
             .expect("failed to run migrations");
         if is_sqlite {
             // Enable FK enforcement to match PostgreSQL behaviour.
-            sqlx::query("PRAGMA foreign_keys = ON")
-                .execute(&pool)
-                .await
-                .unwrap();
+            q!("PRAGMA foreign_keys = ON").execute(&pool).await.unwrap();
         }
         pool
     }
@@ -744,7 +751,7 @@ mod tests {
         let pool = test_pool().await;
 
         // Insert prerequisite rows to satisfy FK constraints.
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("consumer-a")
@@ -756,7 +763,7 @@ mod tests {
         .await
         .unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("service-b")
@@ -834,7 +841,7 @@ mod tests {
         let pool = test_pool().await;
 
         // Insert prerequisite consumer and service rows to satisfy FK constraints.
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("consumer-old")
@@ -845,7 +852,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("consumer-new")
@@ -856,7 +863,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("service-old")
@@ -867,7 +874,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("service-new")
@@ -882,7 +889,7 @@ mod tests {
         // Insert a usage_event with recorded_at 100 days ago.
         let old_id = Uuid::new_v4().to_string();
         let old_ts = (Utc::now() - Duration::days(100)).to_rfc3339();
-        sqlx::query(
+        q!(
             "INSERT INTO usage_event (id, consumer_id, service_id, operation, recorded_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&old_id)
@@ -904,7 +911,7 @@ mod tests {
         // Insert a fresh event (recorded_at = now).
         let fresh_id = Uuid::new_v4().to_string();
         let fresh_ts = Utc::now().to_rfc3339();
-        sqlx::query(
+        q!(
             "INSERT INTO usage_event (id, consumer_id, service_id, operation, recorded_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&fresh_id)
@@ -953,7 +960,7 @@ mod tests {
 
         // Create a service.
         let service_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&service_id)
@@ -969,7 +976,7 @@ mod tests {
         let from_sv_id = Uuid::new_v4().to_string();
         let to_sv_id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&from_sv_id)
@@ -980,7 +987,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&to_sv_id)
@@ -994,7 +1001,7 @@ mod tests {
 
         // Create diff.
         let diff_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&diff_id)
@@ -1008,7 +1015,7 @@ mod tests {
 
         // Create change.
         let change_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&change_id)
@@ -1049,7 +1056,7 @@ mod tests {
 
         // Create a service.
         let service_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&service_id)
@@ -1063,7 +1070,7 @@ mod tests {
 
         // Create consumer.
         let consumer_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&consumer_id)
@@ -1078,7 +1085,7 @@ mod tests {
         // Subscribe consumer to service.
         let sub_id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        q!(
             "INSERT INTO subscription (id, service_id, consumer_id, opted_in_at) VALUES (?, ?, ?, ?)",
         )
         .bind(&sub_id)
@@ -1092,7 +1099,7 @@ mod tests {
         // Create spec versions.
         let from_sv_id = Uuid::new_v4().to_string();
         let to_sv_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&from_sv_id)
@@ -1103,7 +1110,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&to_sv_id)
@@ -1117,7 +1124,7 @@ mod tests {
 
         // Create diff.
         let diff_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&diff_id)
@@ -1131,7 +1138,7 @@ mod tests {
 
         // Create change for GET /users → response.phone.
         let change_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&change_id)
@@ -1147,7 +1154,7 @@ mod tests {
         // Insert a usage_event from billing-svc for GET /users (within last 7 days → High).
         let event_id = Uuid::new_v4().to_string();
         // Use current time (well within 7 days).
-        sqlx::query(
+        q!(
             "INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&event_id)
@@ -1190,7 +1197,7 @@ mod tests {
         let pool = test_pool().await;
 
         let service_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&service_id)
@@ -1203,7 +1210,7 @@ mod tests {
         .unwrap();
 
         let consumer_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&consumer_id)
@@ -1217,7 +1224,7 @@ mod tests {
 
         let now = Utc::now().to_rfc3339();
         let sub_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO subscription (id, service_id, consumer_id, opted_in_at) VALUES (?, ?, ?, ?)",
         )
         .bind(&sub_id)
@@ -1230,26 +1237,26 @@ mod tests {
 
         let from_sv_id = Uuid::new_v4().to_string();
         let to_sv_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&from_sv_id).bind(&service_id).bind("v1.0").bind(&now).bind("openapi")
         .execute(&pool).await.unwrap();
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&to_sv_id).bind(&service_id).bind("v1.1").bind(&now).bind("openapi")
         .execute(&pool).await.unwrap();
 
         let diff_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&diff_id).bind(&from_sv_id).bind(&to_sv_id).bind::<Option<String>>(None).bind(&now)
         .execute(&pool).await.unwrap();
 
         let change_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&change_id).bind(&diff_id).bind("GET /invoices").bind("operation_removed").bind("breaking").bind::<Option<String>>(None)
@@ -1257,7 +1264,7 @@ mod tests {
 
         // Only a call_site — no usage_event.
         let cs_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO call_site (id, consumer_id, service_id, operation, file_path, line_number, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&cs_id).bind(&consumer_id).bind(&service_id)
@@ -1339,7 +1346,7 @@ mod tests {
 
         // Insert a service directly.
         let service_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&service_id)
@@ -1407,28 +1414,28 @@ mod tests {
         let now = Utc::now().to_rfc3339();
 
         let service_id = Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind(&service_id).bind("list-api").bind("https://github.com/acme/list").bind("platform").bind("openapi")
             .execute(&pool).await.unwrap();
 
         let from_sv = Uuid::new_v4().to_string();
         let to_sv = Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind(&from_sv).bind(&service_id).bind("main").bind(&now).bind("openapi")
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind(&to_sv).bind(&service_id).bind("pr-1").bind(&now).bind("openapi")
             .execute(&pool).await.unwrap();
 
         let diff_id = Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)")
             .bind(&diff_id).bind(&from_sv).bind(&to_sv).bind::<Option<String>>(None).bind(&now)
             .execute(&pool).await.unwrap();
 
-        sqlx::query("INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)")
+        q!("INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)")
             .bind(Uuid::new_v4().to_string()).bind(&diff_id).bind("GET /items").bind("operation_removed").bind("breaking").bind::<Option<String>>(None)
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)")
+        q!("INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)")
             .bind(Uuid::new_v4().to_string()).bind(&diff_id).bind("GET /items → response.name").bind("field_added").bind("safe").bind::<Option<String>>(None)
             .execute(&pool).await.unwrap();
 
@@ -1464,26 +1471,26 @@ mod tests {
         let now = Utc::now().to_rfc3339();
 
         let service_id = Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind(&service_id).bind("summary-api").bind("https://github.com/acme/summary").bind("platform").bind("openapi")
             .execute(&pool).await.unwrap();
 
         let from_sv = Uuid::new_v4().to_string();
         let to_sv = Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind(&from_sv).bind(&service_id).bind("v1").bind(&now).bind("openapi")
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind(&to_sv).bind(&service_id).bind("v2").bind(&now).bind("openapi")
             .execute(&pool).await.unwrap();
 
         let diff_id = Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)")
             .bind(&diff_id).bind(&from_sv).bind(&to_sv).bind::<Option<String>>(None).bind(&now)
             .execute(&pool).await.unwrap();
 
         for path in &["GET /users", "POST /orders"] {
-            sqlx::query("INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)")
+            q!("INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)")
                 .bind(Uuid::new_v4().to_string()).bind(&diff_id).bind(path).bind("operation_removed").bind("breaking").bind::<Option<String>>(None)
                 .execute(&pool).await.unwrap();
         }
@@ -1742,7 +1749,7 @@ mod tests {
         let pool = test_pool().await;
         let now = Utc::now().to_rfc3339();
         let id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO sandbox_env (id, name, base_url, bearer_token, description, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
@@ -1816,11 +1823,10 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
 
-        let row: (String,) =
-            sqlx::query_as("SELECT org_id FROM service WHERE name = 'svc-org-test'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let row: (String,) = qa!("SELECT org_id FROM service WHERE name = 'svc-org-test'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(row.0, "acme-corp");
     }
 
@@ -1828,13 +1834,13 @@ mod tests {
     async fn test_list_services_filtered_by_org_id() {
         let pool = test_pool().await;
 
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind("svc-alpha").bind("alpha-api").bind("").bind("team-a").bind("openapi").bind("org-alpha")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind("svc-beta").bind("beta-api").bind("").bind("team-b").bind("openapi").bind("org-beta")
@@ -1879,14 +1885,14 @@ mod tests {
         let now = Utc::now().to_rfc3339();
 
         let service_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&service_id).bind("evidence-svc").bind("").bind("team").bind("openapi")
         .execute(&pool).await.unwrap();
 
         let consumer_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&consumer_id)
@@ -1899,7 +1905,7 @@ mod tests {
         .unwrap();
 
         let sub_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO subscription (id, service_id, consumer_id, opted_in_at) VALUES (?, ?, ?, ?)",
         )
         .bind(&sub_id).bind(&service_id).bind(&consumer_id).bind(&now)
@@ -1907,26 +1913,26 @@ mod tests {
 
         let from_sv_id = Uuid::new_v4().to_string();
         let to_sv_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&from_sv_id).bind(&service_id).bind("v1.0").bind(&now).bind("openapi")
         .execute(&pool).await.unwrap();
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&to_sv_id).bind(&service_id).bind("v1.1").bind(&now).bind("openapi")
         .execute(&pool).await.unwrap();
 
         let diff_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&diff_id).bind(&from_sv_id).bind(&to_sv_id).bind::<Option<String>>(None).bind(&now)
         .execute(&pool).await.unwrap();
 
         let change_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&change_id).bind(&diff_id)
@@ -1935,7 +1941,7 @@ mod tests {
         .execute(&pool).await.unwrap();
 
         let event_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&event_id).bind(&consumer_id).bind(&service_id)
@@ -1974,14 +1980,14 @@ mod tests {
         let now = Utc::now().to_rfc3339();
 
         let service_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&service_id).bind("ev-write-svc").bind("").bind("team").bind("openapi")
         .execute(&pool).await.unwrap();
 
         let consumer_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&consumer_id)
@@ -1993,7 +1999,7 @@ mod tests {
         .await
         .unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO subscription (id, service_id, consumer_id, opted_in_at) VALUES (?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string()).bind(&service_id).bind(&consumer_id).bind(&now)
@@ -2002,7 +2008,7 @@ mod tests {
         let from_sv = Uuid::new_v4().to_string();
         let to_sv = Uuid::new_v4().to_string();
         for (id, git_ref) in [(&from_sv, "v1"), (&to_sv, "v2")] {
-            sqlx::query(
+            q!(
                 "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
             )
             .bind(id).bind(&service_id).bind(git_ref).bind(&now).bind("openapi")
@@ -2010,13 +2016,13 @@ mod tests {
         }
 
         let diff_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&diff_id).bind(&from_sv).bind(&to_sv).bind::<Option<String>>(None).bind(&now)
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string()).bind(&diff_id)
@@ -2024,7 +2030,7 @@ mod tests {
         .bind("field_removed").bind("breaking").bind::<Option<String>>(None)
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string()).bind(&consumer_id).bind(&service_id)
@@ -2047,12 +2053,11 @@ mod tests {
         assert_eq!(json["entries"].as_array().unwrap().len(), 1);
 
         // Core assertion: impact_evidence must have at least one row for this diff.
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?")
-                .bind(&diff_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let count: i64 = qs!("SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?")
+            .bind(&diff_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert!(
             count > 0,
             "impact_evidence must have rows after blast_radius call"
@@ -2067,14 +2072,14 @@ mod tests {
         let now = Utc::now().to_rfc3339();
 
         let service_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&service_id).bind("idem-svc").bind("").bind("team").bind("openapi")
         .execute(&pool).await.unwrap();
 
         let consumer_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&consumer_id)
@@ -2086,7 +2091,7 @@ mod tests {
         .await
         .unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO subscription (id, service_id, consumer_id, opted_in_at) VALUES (?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string()).bind(&service_id).bind(&consumer_id).bind(&now)
@@ -2095,7 +2100,7 @@ mod tests {
         let from_sv = Uuid::new_v4().to_string();
         let to_sv = Uuid::new_v4().to_string();
         for (id, git_ref) in [(&from_sv, "v1"), (&to_sv, "v2")] {
-            sqlx::query(
+            q!(
                 "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
             )
             .bind(id).bind(&service_id).bind(git_ref).bind(&now).bind("openapi")
@@ -2103,13 +2108,13 @@ mod tests {
         }
 
         let diff_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&diff_id).bind(&from_sv).bind(&to_sv).bind::<Option<String>>(None).bind(&now)
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string()).bind(&diff_id)
@@ -2117,7 +2122,7 @@ mod tests {
         .bind("field_removed").bind("breaking").bind::<Option<String>>(None)
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string()).bind(&consumer_id).bind(&service_id)
@@ -2138,22 +2143,20 @@ mod tests {
 
         // First GET seeds evidence.
         call(app.clone(), diff_id.clone()).await;
-        let count_after_first: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?")
-                .bind(&diff_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let count_after_first: i64 = qs!("SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?")
+            .bind(&diff_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert!(count_after_first > 0, "first GET must write evidence");
 
         // Second GET must NOT grow the append-only table.
         call(app.clone(), diff_id.clone()).await;
-        let count_after_second: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?")
-                .bind(&diff_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let count_after_second: i64 = qs!("SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?")
+            .bind(&diff_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(
             count_after_first, count_after_second,
             "repeat blast-radius GET must be idempotent (no new impact_evidence rows)"
@@ -2168,14 +2171,14 @@ mod tests {
         let now = Utc::now().to_rfc3339();
 
         let service_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&service_id).bind("max-age-svc").bind("").bind("team").bind("openapi")
         .execute(&pool).await.unwrap();
 
         let consumer_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&consumer_id)
@@ -2187,7 +2190,7 @@ mod tests {
         .await
         .unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO subscription (id, service_id, consumer_id, opted_in_at) VALUES (?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string()).bind(&service_id).bind(&consumer_id).bind(&now)
@@ -2196,7 +2199,7 @@ mod tests {
         let from_sv = Uuid::new_v4().to_string();
         let to_sv = Uuid::new_v4().to_string();
         for (id, git_ref) in [(&from_sv, "v1"), (&to_sv, "v2")] {
-            sqlx::query(
+            q!(
                 "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
             )
             .bind(id).bind(&service_id).bind(git_ref).bind(&now).bind("openapi")
@@ -2204,13 +2207,13 @@ mod tests {
         }
 
         let diff_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&diff_id).bind(&from_sv).bind(&to_sv).bind::<Option<String>>(None).bind(&now)
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string()).bind(&diff_id)
@@ -2219,7 +2222,7 @@ mod tests {
         .execute(&pool).await.unwrap();
 
         // Usage event recorded 10 days ago — outside a 7-day window.
-        sqlx::query(
+        q!(
             "INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string()).bind(&consumer_id).bind(&service_id)
@@ -2298,7 +2301,7 @@ mod tests {
     async fn setup_beta_service(pool: &sqlx::AnyPool) -> (String, String, String, String) {
         let service_id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&service_id).bind("beta-svc").bind("https://github.com/beta/svc")
@@ -2307,27 +2310,27 @@ mod tests {
 
         let from_sv = Uuid::new_v4().to_string();
         let to_sv = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&from_sv).bind(&service_id).bind("v1.0").bind(&now).bind("openapi")
         .execute(pool).await.unwrap();
 
         // to_sv has spec_yaml so raw endpoint can confirm org check fires before content check.
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&to_sv).bind(&service_id).bind("v1.1").bind(&now).bind("openapi").bind("openapi: 3.0.0\n")
         .execute(pool).await.unwrap();
 
         let diff_id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&diff_id).bind(&from_sv).bind(&to_sv).bind::<Option<String>>(None).bind(&now)
         .execute(pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string()).bind(&diff_id)
@@ -2451,7 +2454,7 @@ mod tests {
         let (service_id, _, _, _) = setup_beta_service(&pool).await;
         let suite_id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        q!(
             "INSERT INTO generated_test_suite (id, service_id, collection_name, collection_json, test_count, happy_count, negative_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&suite_id).bind(&service_id).bind("beta-suite").bind("{}")
@@ -2543,23 +2546,21 @@ mod tests {
     async fn insert_beta_release_note(pool: &sqlx::AnyPool, diff_id: &str) -> String {
         let note_id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO release_note (id, diff_id, content, created_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind(&note_id)
-        .bind(diff_id)
-        .bind("beta content")
-        .bind(&now)
-        .execute(pool)
-        .await
-        .unwrap();
+        q!("INSERT INTO release_note (id, diff_id, content, created_at) VALUES (?, ?, ?, ?)",)
+            .bind(&note_id)
+            .bind(diff_id)
+            .bind("beta content")
+            .bind(&now)
+            .execute(pool)
+            .await
+            .unwrap();
         note_id
     }
 
     /// Insert a consumer owned by org-beta. Returns the consumer id.
     async fn insert_beta_consumer(pool: &sqlx::AnyPool) -> String {
         let cid = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact, org_id) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&cid).bind("beta-consumer").bind("").bind("").bind("").bind("org-beta")
@@ -2991,7 +2992,7 @@ mod tests {
     async fn collection_evidence_written_and_accepted() {
         let pool = test_pool().await;
 
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("coll-consumer-1")
@@ -3035,7 +3036,7 @@ mod tests {
     async fn collection_evidence_idempotent_no_duplicate_rows() {
         let pool = test_pool().await;
 
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("coll-consumer-2")
@@ -3104,7 +3105,7 @@ mod tests {
         );
 
         // Verify only 1 row in impact_evidence
-        let count: i64 = sqlx::query_scalar(
+        let count: i64 = qs!(
             "SELECT COUNT(*) FROM impact_evidence WHERE consumer_id = ? AND source_type = 'collection_file'",
         )
         .bind("coll-consumer-2")
@@ -3170,7 +3171,7 @@ mod tests {
         let diff_id = Uuid::new_v4().to_string();
         let ack_id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        q!(
             "INSERT INTO acknowledgement (id, org_id, diff_id, acknowledged_by, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&ack_id)
@@ -3206,7 +3207,7 @@ mod tests {
 
         let diff_id = Uuid::new_v4().to_string();
         let past = "2020-01-01T00:00:00Z";
-        sqlx::query(
+        q!(
             "INSERT INTO acknowledgement (id, org_id, diff_id, acknowledged_by, expires_at, created_at) \
              VALUES (?, ?, ?, ?, ?, ?)",
         )
@@ -3298,7 +3299,7 @@ mod tests {
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        q!(
             "INSERT INTO catalog_source (id, org_id, kind, name, url, sync_interval_secs, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id).bind("").bind("codeowners").bind("Mono-repo CODEOWNERS")
@@ -3377,7 +3378,7 @@ mod tests {
         let pool = test_pool().await;
 
         // Register a consumer and service so sampling config lookup doesn't fail.
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("c-otlp")
@@ -3388,7 +3389,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind("s-otlp").bind("otlp-service").bind("").bind("").bind("openapi")
             .execute(&pool).await.unwrap();
 
@@ -3499,12 +3500,12 @@ mod tests {
         let pool = test_pool().await;
 
         // Insert parent rows required by usage_event FK constraints.
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("s-norm").bind("s-norm").bind("").bind("").bind("openapi")
         .execute(&pool).await.unwrap();
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("c-norm")
@@ -3529,12 +3530,11 @@ mod tests {
             .unwrap();
         let _ = app.oneshot(req).await.unwrap();
 
-        let stored: Option<String> = sqlx::query_scalar(
-            "SELECT operation FROM usage_event WHERE consumer_id = 'c-norm' LIMIT 1",
-        )
-        .fetch_optional(&pool)
-        .await
-        .unwrap();
+        let stored: Option<String> =
+            qs!("SELECT operation FROM usage_event WHERE consumer_id = 'c-norm' LIMIT 1",)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
         assert_eq!(stored.as_deref(), Some("GET /users/{id}"));
     }
 
@@ -3610,11 +3610,9 @@ mod tests {
         let pool = test_pool().await;
 
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO impact_evidence \
+        q!("INSERT INTO impact_evidence \
              (id, org_id, diff_id, consumer_id, source_type, confidence, observed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
+             VALUES (?, ?, ?, ?, ?, ?, ?)",)
         .bind(Uuid::new_v4().to_string())
         .bind("")
         .bind("diff-cov-1")
@@ -3812,7 +3810,7 @@ mod tests {
         let pool = test_pool().await;
 
         // Insert a rule directly so we don't need app.clone()
-        sqlx::query(
+        q!(
             "INSERT INTO evolution_rule (id, org_id, name, change_kind, severity_override, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string())
@@ -3846,7 +3844,7 @@ mod tests {
         let pool = test_pool().await;
         let rule_id = Uuid::new_v4().to_string();
 
-        sqlx::query(
+        q!(
             "INSERT INTO evolution_rule (id, org_id, name, change_kind, severity_override, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&rule_id)
@@ -3939,41 +3937,39 @@ mod tests {
         let pool = test_pool().await;
 
         // Seed: service + two spec versions + diff + change
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("svc-h1").bind("SvcH1").bind("").bind("").bind("openapi")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, spec_yaml, captured_at, spec_format) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind("sv-h1a").bind("svc-h1").bind("abc").bind("openapi: '3.0'").bind("2026-01-01T00:00:00Z").bind("openapi")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, spec_yaml, captured_at, spec_format) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind("sv-h1b").bind("svc-h1").bind("def").bind("openapi: '3.0'").bind("2026-01-02T00:00:00Z").bind("openapi")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("diff-h1").bind("sv-h1a").bind("sv-h1b").bind("").bind("2026-01-02T00:00:00Z")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
-            "INSERT INTO change (id, diff_id, path, kind, severity) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind("chg-h1")
-        .bind("diff-h1")
-        .bind("GET /items/{id} \u{2192} response.price")
-        .bind("field_removed")
-        .bind("breaking")
-        .execute(&pool)
-        .await
-        .unwrap();
+        q!("INSERT INTO change (id, diff_id, path, kind, severity) VALUES (?, ?, ?, ?, ?)",)
+            .bind("chg-h1")
+            .bind("diff-h1")
+            .bind("GET /items/{id} \u{2192} response.price")
+            .bind("field_removed")
+            .bind("breaking")
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
         let body = serde_json::to_vec(&json!({
@@ -4004,31 +4000,31 @@ mod tests {
         let pool = test_pool().await;
 
         // Seed required rows.
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("svc-rn").bind("SvcRN").bind("").bind("").bind("openapi")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, spec_yaml, captured_at, spec_format) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind("sv-rn1").bind("svc-rn").bind("v1").bind("").bind("2026-01-01T00:00:00Z").bind("openapi")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, spec_yaml, captured_at, spec_format) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind("sv-rn2").bind("svc-rn").bind("v2").bind("").bind("2026-01-02T00:00:00Z").bind("openapi")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("diff-rn").bind("sv-rn1").bind("sv-rn2").bind("").bind("2026-01-02T00:00:00Z")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO release_note (id, diff_id, content, created_at, status) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("rn-1").bind("diff-rn").bind("# Release notes").bind("2026-01-02T00:00:00Z").bind("draft")
@@ -4055,32 +4051,32 @@ mod tests {
     async fn test_release_note_invalid_transition_rejected() {
         let pool = test_pool().await;
 
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("svc-rn2").bind("SvcRN2").bind("").bind("").bind("openapi")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, spec_yaml, captured_at, spec_format) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind("sv-rn3").bind("svc-rn2").bind("v1").bind("").bind("2026-01-01T00:00:00Z").bind("openapi")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, spec_yaml, captured_at, spec_format) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind("sv-rn4").bind("svc-rn2").bind("v2").bind("").bind("2026-01-02T00:00:00Z").bind("openapi")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("diff-rn2").bind("sv-rn3").bind("sv-rn4").bind("").bind("2026-01-02T00:00:00Z")
         .execute(&pool).await.unwrap();
 
         // Insert a 'published' note — cannot go back to 'reviewed'.
-        sqlx::query(
+        q!(
             "INSERT INTO release_note (id, diff_id, content, created_at, status) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("rn-2").bind("diff-rn2").bind("# Notes").bind("2026-01-02T00:00:00Z").bind("published")
@@ -4106,41 +4102,39 @@ mod tests {
     async fn test_migration_guide_returns_markdown() {
         let pool = test_pool().await;
 
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("svc-mg").bind("Payments").bind("").bind("").bind("openapi")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, spec_yaml, captured_at, spec_format) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind("sv-mg1").bind("svc-mg").bind("v1.0").bind("").bind("2026-01-01T00:00:00Z").bind("openapi")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO spec_version (id, service_id, git_ref, spec_yaml, captured_at, spec_format) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind("sv-mg2").bind("svc-mg").bind("v2.0").bind("").bind("2026-01-02T00:00:00Z").bind("openapi")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("diff-mg").bind("sv-mg1").bind("sv-mg2").bind("").bind("2026-01-02T00:00:00Z")
         .execute(&pool).await.unwrap();
 
-        sqlx::query(
-            "INSERT INTO change (id, diff_id, path, kind, severity) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind("chg-mg")
-        .bind("diff-mg")
-        .bind("GET /charges/{id} \u{2192} response.amount")
-        .bind("field_removed")
-        .bind("breaking")
-        .execute(&pool)
-        .await
-        .unwrap();
+        q!("INSERT INTO change (id, diff_id, path, kind, severity) VALUES (?, ?, ?, ?, ?)",)
+            .bind("chg-mg")
+            .bind("diff-mg")
+            .bind("GET /charges/{id} \u{2192} response.amount")
+            .bind("field_removed")
+            .bind("breaking")
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
         let req = HttpRequest::builder()
@@ -4177,7 +4171,7 @@ mod tests {
         let pool = test_pool().await;
 
         // Consumer registered with a name matching the OTLP resource service.name attribute.
-        sqlx::query(
+        q!(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("c-svc-name")
@@ -4189,7 +4183,7 @@ mod tests {
         .await
         .unwrap();
 
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("s-svc-name").bind("ledger-svc").bind("").bind("").bind("openapi")
@@ -4295,20 +4289,20 @@ mod tests {
     async fn test_generate_release_note_async_job() {
         let pool = test_pool().await;
 
-        sqlx::query("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind("svc-rn").bind("RN Svc").bind("").bind("team").bind("openapi")
             .execute(&pool).await.unwrap();
         let now = Utc::now().to_rfc3339();
-        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind("sv-rn-a").bind("svc-rn").bind("v1").bind(&now).bind("openapi")
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind("sv-rn-b").bind("svc-rn").bind("v2").bind(&now).bind("openapi")
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, NULL, ?)")
+        q!("INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, NULL, ?)")
             .bind("diff-rn").bind("sv-rn-a").bind("sv-rn-b").bind(&now)
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)")
+        q!("INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)")
             .bind("chg-rn").bind("diff-rn").bind("GET /users → phone").bind("field_removed").bind("breaking").bind(Option::<String>::None)
             .execute(&pool).await.unwrap();
 
@@ -4461,7 +4455,7 @@ mod tests {
         let pool = test_pool().await;
         // Insert an audit event directly for org "org-a".
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        q!(
             "INSERT INTO audit_event (id, org_id, actor, action, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("evt-org-a").bind("org-a").bind("alice").bind("test.action").bind(&now)
@@ -4485,7 +4479,7 @@ mod tests {
         let pool = test_pool().await;
         // Insert a completed job directly.
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        q!(
             "INSERT INTO csv_run_job \
              (id, org_id, name, request_json, status, total_rows, completed_rows, error_count, created_at) \
              VALUES ('job-done', '', 'done-run', '{}', 'completed', 1, 1, 0, ?)",
@@ -4564,7 +4558,7 @@ mod tests {
     #[tokio::test]
     async fn test_compare_specs_returns_diff_id() {
         let pool = test_pool().await;
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("svc-cmp")
@@ -4631,7 +4625,7 @@ mod tests {
     #[tokio::test]
     async fn test_compare_specs_bad_yaml_returns_422() {
         let pool = test_pool().await;
-        sqlx::query(
+        q!(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("svc-cmp2")
@@ -4950,7 +4944,7 @@ mod tests {
         let wh_id = uuid::Uuid::new_v4().to_string();
         let secret = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        q!(
             "INSERT INTO webhook (id, org_id, url, events, secret, active, created_at) \
              VALUES (?, ?, ?, ?, ?, 1, ?)",
         )
@@ -4965,13 +4959,13 @@ mod tests {
         .unwrap();
 
         // Insert a diff to trigger webhook dispatch.
-        sqlx::query("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind("svc-wh").bind("WH Svc").bind("").bind("team").bind("openapi")
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind("sv-wh-a").bind("svc-wh").bind("v1").bind(&now).bind("openapi")
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
+        q!("INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind("sv-wh-b").bind("svc-wh").bind("v2").bind(&now).bind("openapi")
             .execute(&pool).await.unwrap();
 

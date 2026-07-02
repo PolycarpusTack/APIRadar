@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { GitCompare, Plus, Rows, X, ChevronLeft, ChevronRight } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
@@ -6,7 +6,9 @@ import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
 import CompareSpecsPanel from '../components/CompareSpecsPanel'
 import BatchComparePanel from '../components/BatchComparePanel'
-import { api, ApiError } from '../lib/apiClient'
+import { api } from '../lib/apiClient'
+import { useFetch } from '../lib/useFetch'
+import { activateOnKey } from '../lib/a11y'
 
 interface DiffSummary {
   id: string
@@ -48,7 +50,7 @@ function DiffTable({ rows, onSelect, onCompare }: { rows: DiffSummary[]; onSelec
           <button
             onClick={onCompare}
             className="inline-flex items-center gap-1.5 rounded-md px-4 py-2 text-[12.5px] font-medium transition-opacity hover:opacity-90"
-            style={{ background: 'var(--cobalt-mid)', color: '#fff' }}
+            style={{ background: 'var(--cobalt-mid)', color: 'var(--text-inverse)' }}
           >
             <Plus className="h-3.5 w-3.5" />
             Compare specs
@@ -81,6 +83,10 @@ function DiffTable({ rows, onSelect, onCompare }: { rows: DiffSummary[]; onSelec
               className="group cursor-pointer transition-colors"
               style={{ borderBottom: '1px solid var(--border)' }}
               onClick={() => onSelect(row.id)}
+              role="button"
+              tabIndex={0}
+              aria-label={`View diff for ${row.service_name}`}
+              onKeyDown={activateOnKey(() => onSelect(row.id))}
             >
               <td
                 className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]"
@@ -140,25 +146,20 @@ export default function DiffsPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const serviceFilter = searchParams.get('service')
-  const [rows, setRows] = useState<DiffSummary[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [offset, setOffset] = useState(0)
   // Auto-open when navigated here with ?compare=open (e.g. from FirstRunBanner)
   const [showCompare, setShowCompare] = useState(searchParams.get('compare') === 'open')
   const [showBatch, setShowBatch] = useState(false)
 
-  useEffect(() => {
-    setLoading(true)
-    setError(null)
-    const query = serviceFilter
-      ? `/v1/diffs?limit=${FILTER_WINDOW}&offset=0`
-      : `/v1/diffs?limit=${PAGE_SIZE}&offset=${offset}`
-    api.get<DiffSummary[]>(query)
-      .then(setRows)
-      .catch((e: unknown) => setError(e instanceof ApiError ? e.message : String(e)))
-      .finally(() => setLoading(false))
-  }, [offset, serviceFilter])
+  // Pagination/filter changes abort the previous request via useFetch, so a
+  // slow earlier page can never land after a newer one (ordering-safe).
+  const query = serviceFilter
+    ? `/v1/diffs?limit=${FILTER_WINDOW}&offset=0`
+    : `/v1/diffs?limit=${PAGE_SIZE}&offset=${offset}`
+  const { data: rows = [], loading, error } = useFetch<DiffSummary[]>(
+    (signal) => api.get(query, { signal }),
+    [offset, serviceFilter],
+  )
 
   // In filter mode we filter the fetched window client-side by service id.
   const visibleRows = serviceFilter ? rows.filter((r) => r.service_id === serviceFilter) : rows

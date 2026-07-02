@@ -6,7 +6,7 @@
     "dev:desktop": "pnpm --filter radar-desktop dev",
     "build:ui": "pnpm --filter radar-ui build",
     "build:desktop": "pnpm --filter radar-desktop build",
-    "lint": "pnpm --filter radar-ui lint && pnpm --filter radar-desktop lint",
+    "lint": "pnpm --filter radar-ui lint",
     "vendor:scalar": "node -e \"const fs=require('fs');fs.mkdirSync('radar-api/vendor',{recursive:true});fs.copyFileSync('node_modules/@scalar/api-reference/dist/browser/standalone.js','radar-api/vendor/scalar.js');console.log('Vendored @scalar/api-reference ' + require('./node_modules/@scalar/api-reference/package.json').version);\""
   },
   "engines": {

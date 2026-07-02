@@ -29,7 +29,7 @@ pub(crate) async fn load_sampling(
     org_id: &str,
 ) -> ServiceSamplingBody {
     use sqlx::Row;
-    let row = sqlx::query(
+    let row = q!(
         "SELECT sample_rate, field_deny_list FROM service_sampling WHERE service_id = ? AND org_id = ?",
     )
     .bind(service_id)
@@ -40,7 +40,14 @@ pub(crate) async fn load_sampling(
 
     match row {
         Some(r) => {
-            let rate: f64 = r.try_get("sample_rate").unwrap_or(1.0);
+            // `sample_rate` is a REAL column (migration 017). SQLite REAL is an
+            // 8-byte double (decodes as f64); Postgres REAL is 4-byte (decodes as
+            // f32). Try f64 first, then fall back to f32 so both backends read
+            // the stored rate instead of silently defaulting to 1.0.
+            let rate: f64 = r
+                .try_get::<f64, _>("sample_rate")
+                .or_else(|_| r.try_get::<f32, _>("sample_rate").map(|v| v as f64))
+                .unwrap_or(1.0);
             let deny_raw: String = r.try_get("field_deny_list").unwrap_or_default();
             let deny: Vec<String> = deny_raw
                 .split(',')
@@ -93,7 +100,7 @@ pub(crate) async fn put_sampling(
     let deny_str = body.field_deny_list.join(",");
     let now = Utc::now().to_rfc3339();
 
-    sqlx::query(
+    q!(
         "INSERT INTO service_sampling (service_id, org_id, sample_rate, field_deny_list, updated_at)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(service_id, org_id) DO UPDATE SET
@@ -137,8 +144,7 @@ pub(crate) async fn evidence_coverage(
     let now_str = Utc::now().to_rfc3339();
 
     let rows: Vec<_> = if service_id.is_empty() {
-        sqlx::query(
-            r#"SELECT ie.consumer_id,
+        q!(r#"SELECT ie.consumer_id,
                       COALESCE(c.name, ie.consumer_id) AS consumer_name,
                       ie.producer_service_id            AS service_id,
                       COALESCE(s.name, ie.producer_service_id) AS service_name,
@@ -151,16 +157,14 @@ pub(crate) async fn evidence_coverage(
                LEFT JOIN service  s ON s.id = ie.producer_service_id
                WHERE ie.org_id = ? AND (ie.expires_at IS NULL OR ie.expires_at > ?)
                GROUP BY ie.consumer_id, c.name, ie.producer_service_id, s.name, ie.source_type
-               ORDER BY MAX(ie.observed_at) DESC"#,
-        )
+               ORDER BY MAX(ie.observed_at) DESC"#,)
         .bind(&stale_cutoff)
         .bind(&org_id)
         .bind(&now_str)
         .fetch_all(&pool)
         .await?
     } else {
-        sqlx::query(
-            r#"SELECT ie.consumer_id,
+        q!(r#"SELECT ie.consumer_id,
                       COALESCE(c.name, ie.consumer_id) AS consumer_name,
                       ie.producer_service_id            AS service_id,
                       COALESCE(s.name, ie.producer_service_id) AS service_name,
@@ -174,8 +178,7 @@ pub(crate) async fn evidence_coverage(
                WHERE ie.org_id = ? AND ie.producer_service_id = ?
                  AND (ie.expires_at IS NULL OR ie.expires_at > ?)
                GROUP BY ie.consumer_id, c.name, ie.producer_service_id, s.name, ie.source_type
-               ORDER BY MAX(ie.observed_at) DESC"#,
-        )
+               ORDER BY MAX(ie.observed_at) DESC"#,)
         .bind(&stale_cutoff)
         .bind(&org_id)
         .bind(&service_id)

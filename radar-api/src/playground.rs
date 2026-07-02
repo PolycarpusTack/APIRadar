@@ -45,7 +45,7 @@ pub(crate) async fn list_sandbox_envs(
     use sqlx::Row;
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let rows = sqlx::query(
+    let rows = q!(
         "SELECT id, name, base_url, bearer_token, description, created_at, updated_at \
          FROM sandbox_env WHERE org_id = ? ORDER BY name ASC",
     )
@@ -89,11 +89,9 @@ pub(crate) async fn create_sandbox_env(
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
-    sqlx::query(
-        "INSERT INTO sandbox_env \
+    q!("INSERT INTO sandbox_env \
          (id, org_id, name, base_url, bearer_token, description, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",)
     .bind(&id)
     .bind(&org_id)
     .bind(body.name.trim())
@@ -137,7 +135,7 @@ pub(crate) async fn update_sandbox_env(
 
     // Verify ownership and fetch the current token so we can preserve it when
     // the caller doesn't provide a new one.
-    let existing = sqlx::query("SELECT bearer_token FROM sandbox_env WHERE id = ? AND org_id = ?")
+    let existing = q!("SELECT bearer_token FROM sandbox_env WHERE id = ? AND org_id = ?")
         .bind(&id)
         .bind(&org_id)
         .fetch_optional(&pool)
@@ -152,11 +150,9 @@ pub(crate) async fn update_sandbox_env(
         _ => current_token.clone(),
     };
 
-    sqlx::query(
-        "UPDATE sandbox_env \
+    q!("UPDATE sandbox_env \
          SET name = ?, base_url = ?, bearer_token = ?, description = ?, updated_at = ? \
-         WHERE id = ? AND org_id = ?",
-    )
+         WHERE id = ? AND org_id = ?",)
     .bind(body.name.trim())
     .bind(body.base_url.trim())
     .bind(&new_token)
@@ -186,7 +182,7 @@ pub(crate) async fn delete_sandbox_env(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let result = sqlx::query("DELETE FROM sandbox_env WHERE id = ? AND org_id = ?")
+    let result = q!("DELETE FROM sandbox_env WHERE id = ? AND org_id = ?")
         .bind(&id)
         .bind(&org_id)
         .execute(&pool)
@@ -208,7 +204,7 @@ pub(crate) async fn list_spec_versions(
     // Org isolation: mirror get_spec_version_raw — authenticated callers only see
     // spec versions for their own services. Empty org (desktop/no-auth) sees all.
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
-    let rows = sqlx::query(
+    let rows = q!(
         r#"SELECT sv.id, sv.service_id, s.name AS service_name, sv.git_ref,
                   sv.spec_format, sv.captured_at
            FROM spec_version sv
@@ -247,7 +243,7 @@ pub(crate) async fn get_spec_version_raw(
     org: Option<axum::extract::Extension<JwtClaims>>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
-    let row = sqlx::query(
+    let row = q!(
         "SELECT sv.spec_yaml, sv.spec_format, s.org_id AS service_org_id \
          FROM spec_version sv \
          JOIN service s ON s.id = sv.service_id \

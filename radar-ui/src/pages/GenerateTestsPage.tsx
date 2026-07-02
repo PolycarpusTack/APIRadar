@@ -209,7 +209,7 @@ export default function GenerateTestsPage() {
         </div>
 
         {error && (
-          <p className="text-[12px] px-3 py-2 rounded" style={{ background: 'var(--red-bg, #2a0a0a)', color: 'var(--red, #f87171)' }}>
+          <p className="text-[12px] px-3 py-2 rounded" style={{ background: 'var(--red-bg)', color: 'var(--red)' }}>
             {error}
           </p>
         )}

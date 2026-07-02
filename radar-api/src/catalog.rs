@@ -93,7 +93,7 @@ pub(crate) async fn create_catalog_source(
     let url = body.url.unwrap_or_default();
     let interval = body.sync_interval_secs.unwrap_or(3600);
 
-    sqlx::query(
+    q!(
         "INSERT INTO catalog_source (id, org_id, kind, name, url, token_env, sync_interval_secs, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
@@ -130,7 +130,7 @@ pub(crate) async fn list_catalog_sources(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let rows = sqlx::query(
+    let rows = q!(
         "SELECT id, kind, name, url, token_env, sync_interval_secs, last_sync_at, last_sync_status, last_sync_error, created_at \
          FROM catalog_source WHERE org_id = ? ORDER BY created_at DESC",
     )
@@ -171,13 +171,12 @@ pub(crate) async fn sync_catalog_source(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let now = Utc::now().to_rfc3339();
 
-    let row =
-        sqlx::query("SELECT kind, url, token_env FROM catalog_source WHERE id = ? AND org_id = ?")
-            .bind(&source_id)
-            .bind(&org_id)
-            .fetch_optional(&pool)
-            .await?
-            .ok_or_else(|| ApiError::NotFound(format!("catalog source {source_id} not found")))?;
+    let row = q!("SELECT kind, url, token_env FROM catalog_source WHERE id = ? AND org_id = ?")
+        .bind(&source_id)
+        .bind(&org_id)
+        .fetch_optional(&pool)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("catalog source {source_id} not found")))?;
 
     let kind: String = row.get("kind");
     let url: String = row.get("url");
@@ -201,7 +200,7 @@ pub(crate) async fn sync_catalog_source(
 
     let status = if error_msg.is_none() { "ok" } else { "error" };
 
-    sqlx::query(
+    q!(
         "UPDATE catalog_source SET last_sync_at = ?, last_sync_status = ?, last_sync_error = ? WHERE id = ?",
     )
     .bind(&now)
@@ -253,7 +252,7 @@ async fn sync_codeowners_source(
 
     for owner in &owners {
         let existing: Option<String> =
-            sqlx::query_scalar("SELECT id FROM consumer WHERE org_id = ? AND name = ? LIMIT 1")
+            qs!("SELECT id FROM consumer WHERE org_id = ? AND name = ? LIMIT 1")
                 .bind(org_id)
                 .bind(owner)
                 .fetch_optional(pool)
@@ -261,13 +260,13 @@ async fn sync_codeowners_source(
                 .unwrap_or(None);
 
         if let Some(existing_id) = existing {
-            let _ = sqlx::query("UPDATE consumer SET catalog_source = ? WHERE id = ?")
+            let _ = q!("UPDATE consumer SET catalog_source = ? WHERE id = ?")
                 .bind("codeowners")
                 .bind(&existing_id)
                 .execute(pool)
                 .await;
         } else {
-            let _ = sqlx::query(
+            let _ = q!(
                 "INSERT INTO consumer (id, org_id, name, repo_url, owner_team, contact, catalog_source, created_at) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
@@ -342,7 +341,7 @@ async fn sync_backstage_source(
         let owner = item["spec"]["owner"].as_str().unwrap_or("").to_string();
 
         let existing: Option<String> =
-            sqlx::query_scalar("SELECT id FROM consumer WHERE org_id = ? AND name = ? LIMIT 1")
+            qs!("SELECT id FROM consumer WHERE org_id = ? AND name = ? LIMIT 1")
                 .bind(org_id)
                 .bind(&name)
                 .fetch_optional(pool)
@@ -350,16 +349,15 @@ async fn sync_backstage_source(
                 .unwrap_or(None);
 
         if let Some(existing_id) = existing {
-            let _ =
-                sqlx::query("UPDATE consumer SET owner_team = ?, catalog_source = ? WHERE id = ?")
-                    .bind(&owner)
-                    .bind("backstage")
-                    .bind(&existing_id)
-                    .execute(pool)
-                    .await;
+            let _ = q!("UPDATE consumer SET owner_team = ?, catalog_source = ? WHERE id = ?")
+                .bind(&owner)
+                .bind("backstage")
+                .bind(&existing_id)
+                .execute(pool)
+                .await;
         } else {
             let consumer_id = Uuid::new_v4().to_string();
-            let _ = sqlx::query(
+            let _ = q!(
                 "INSERT INTO consumer (id, org_id, name, repo_url, owner_team, contact, catalog_source, created_at) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )

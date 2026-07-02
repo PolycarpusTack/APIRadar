@@ -12,6 +12,14 @@ use uuid::Uuid;
 /// When `RADAR_ALLOWED_HOSTS` is unset or empty, all non-SSRF hosts are allowed.
 pub(crate) fn is_host_allowed(url_str: &str) -> bool {
     let allowlist = std::env::var("RADAR_ALLOWED_HOSTS").unwrap_or_default();
+    host_matches_allowlist(url_str, &allowlist)
+}
+
+/// Pure matcher: does `url_str`'s host match `allowlist` (comma-separated
+/// glob-style patterns)? An empty allowlist permits all hosts (SSRF guard still
+/// applies at the call site). Kept free of process-global env reads so tests can
+/// exercise it hermetically without racing on `RADAR_ALLOWED_HOSTS`.
+fn host_matches_allowlist(url_str: &str, allowlist: &str) -> bool {
     if allowlist.trim().is_empty() {
         return true; // no restriction beyond SSRF guard
     }
@@ -170,8 +178,19 @@ pub(crate) fn sample_keep(rate: f64) -> bool {
     let ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
-        .unwrap_or(1);
-    (ns as f64 / u32::MAX as f64) < rate
+        .unwrap_or(0);
+    // NOTE: sampling uses the clock's sub-second part as a cheap pseudo-random
+    // source; it is adequate but weakly distributed under burst traffic (a real
+    // RNG would be better). What matters for correctness is the [0.0, 1.0) range.
+    unit_sample_from_nanos(ns) < rate
+}
+
+/// Map a sub-second nanosecond count to a sample in `[0.0, 1.0)`.
+/// `subsec_nanos()` spans `[0, 1_000_000_000)`, so it must be divided by 1e9.
+/// (Dividing by `u32::MAX` (~4.29e9) capped the sample at ~0.233 and made every
+/// `sample_rate >= 0.24` keep 100% of events — the bug this replaces.)
+fn unit_sample_from_nanos(ns: u32) -> f64 {
+    ns as f64 / 1_000_000_000.0
 }
 
 fn severity_rank(s: &str) -> u8 {
@@ -307,6 +326,55 @@ mod tests {
         assert!(constant_time_eq(b"", b""));
     }
 
+    // N-26 linchpin: confirm `$1`/`$2` positional placeholders bind correctly on
+    // SQLite via AnyPool — the prerequisite for converting the codebase's `?`
+    // placeholders to `$N` so the same queries also run on PostgreSQL (sqlx Any
+    // does not translate `?` for Postgres).
+    #[tokio::test]
+    async fn dollar_placeholders_bind_on_sqlite_via_any() {
+        sqlx::any::install_default_drivers();
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1) // one shared connection so :memory: keeps the table
+            .connect("sqlite::memory:")
+            .await
+            .expect("pool");
+        sqlx::query("CREATE TABLE t (id TEXT, n INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t (id, n) VALUES ($1, $2)")
+            .bind("a")
+            .bind(5_i64)
+            .execute(&pool)
+            .await
+            .expect("$N insert must bind on sqlite-via-Any");
+        let row: (String, i64) = sqlx::query_as("SELECT id, n FROM t WHERE id = $1")
+            .bind("a")
+            .fetch_one(&pool)
+            .await
+            .expect("$N select must bind on sqlite-via-Any");
+        assert_eq!(row, ("a".to_string(), 5));
+    }
+
+    #[test]
+    fn unit_sample_spans_full_range() {
+        // The regression guard for the divisor bug: the old code divided by
+        // u32::MAX and produced ~0.233 for max nanos, so any rate >= 0.24 kept
+        // everything. With /1e9 the sample spans the full [0,1) range.
+        assert_eq!(unit_sample_from_nanos(0), 0.0);
+        assert!(unit_sample_from_nanos(999_999_999) > 0.999);
+        let mid = unit_sample_from_nanos(500_000_000);
+        assert!((0.49..0.51).contains(&mid), "mid sample was {mid}");
+    }
+
+    #[test]
+    fn sample_keep_boundaries() {
+        assert!(sample_keep(1.0));
+        assert!(sample_keep(2.0)); // >= 1.0 keeps all
+        assert!(!sample_keep(0.0));
+        assert!(!sample_keep(-0.5)); // <= 0.0 drops all
+    }
+
     #[test]
     fn clamp_pagination_bounds() {
         // Negative limit → floored to 1 (not "everything"); huge → capped at 200.
@@ -405,32 +473,41 @@ mod tests {
         assert!(is_ssrf_blocked("https://[fe80::1]/hook"));
     }
 
-    // is_host_allowed — covers empty list, exact match, wildcard subdomain
+    // host_matches_allowlist — covers empty list, exact match, wildcard
+    // subdomain. Uses the pure matcher (not is_host_allowed) so the tests never
+    // mutate the process-global RADAR_ALLOWED_HOSTS and cannot race each other.
     #[test]
     fn host_allowed_empty_list_permits_all() {
-        std::env::remove_var("RADAR_ALLOWED_HOSTS");
-        assert!(is_host_allowed("https://api.github.com/hook"));
-        assert!(is_host_allowed("https://example.com/hook"));
+        assert!(host_matches_allowlist("https://api.github.com/hook", ""));
+        assert!(host_matches_allowlist("https://example.com/hook", "  "));
     }
 
     #[test]
     fn host_allowed_exact_match() {
-        std::env::set_var("RADAR_ALLOWED_HOSTS", "api.github.com,hooks.slack.com");
-        assert!(is_host_allowed("https://api.github.com/hook"));
-        assert!(is_host_allowed(
-            "https://hooks.slack.com/services/T0/B0/xyz"
+        let list = "api.github.com,hooks.slack.com";
+        assert!(host_matches_allowlist("https://api.github.com/hook", list));
+        assert!(host_matches_allowlist(
+            "https://hooks.slack.com/services/T0/B0/xyz",
+            list
         ));
-        assert!(!is_host_allowed("https://evil.com/hook"));
-        std::env::remove_var("RADAR_ALLOWED_HOSTS");
+        assert!(!host_matches_allowlist("https://evil.com/hook", list));
     }
 
     #[test]
     fn host_allowed_wildcard_subdomain() {
-        std::env::set_var("RADAR_ALLOWED_HOSTS", "*.internal");
-        assert!(is_host_allowed("https://api.internal/hook"));
-        assert!(is_host_allowed("https://build.ci.internal/hook"));
-        assert!(!is_host_allowed("https://notinternal.com/hook"));
-        assert!(!is_host_allowed("https://evil.internal.attacker.com/hook"));
-        std::env::remove_var("RADAR_ALLOWED_HOSTS");
+        let list = "*.internal";
+        assert!(host_matches_allowlist("https://api.internal/hook", list));
+        assert!(host_matches_allowlist(
+            "https://build.ci.internal/hook",
+            list
+        ));
+        assert!(!host_matches_allowlist(
+            "https://notinternal.com/hook",
+            list
+        ));
+        assert!(!host_matches_allowlist(
+            "https://evil.internal.attacker.com/hook",
+            list
+        ));
     }
 }

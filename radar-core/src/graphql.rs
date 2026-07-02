@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use graphql_parser::schema::{
     self, Definition, EnumType, Field, InputObjectType, InputValue, InterfaceType, ObjectType,
-    TypeDefinition, UnionType,
+    TypeDefinition, TypeExtension, UnionType,
 };
 
 use crate::{
@@ -20,6 +20,8 @@ pub struct GqlField {
     pub name: String,
     pub type_str: String,
     pub arguments: Vec<GqlArg>,
+    /// Whether the field carries a default value (only meaningful for input fields).
+    pub has_default: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -57,15 +59,120 @@ pub fn parse_graphql(content: &str) -> Result<TypeMap, DriftError> {
         .map_err(|e| DriftError::Parse(format!("GraphQL: {e}")))?;
 
     let mut map = TypeMap::new();
+    // `extend type X { … }` may appear before or after `type X`, so collect all
+    // extensions and merge them once the base types are in place.
+    let mut extensions = Vec::new();
     for def in doc.definitions {
-        if let Definition::TypeDefinition(td) = def {
-            let gql_type = convert_type_def(td);
-            if !is_builtin(&gql_type.name) {
-                map.insert(gql_type.name.clone(), gql_type);
+        match def {
+            Definition::TypeDefinition(td) => {
+                let gql_type = convert_type_def(td);
+                if !is_builtin(&gql_type.name) {
+                    map.insert(gql_type.name.clone(), gql_type);
+                }
             }
+            Definition::TypeExtension(te) => extensions.push(te),
+            _ => {}
         }
     }
+    for te in extensions {
+        apply_extension(&mut map, te);
+    }
     Ok(map)
+}
+
+/// Merge an `extend …` block into its base type, creating the type if the base
+/// definition is absent (a valid pattern when the base lives in another file).
+fn apply_extension<'a>(map: &mut TypeMap, te: TypeExtension<'a, String>) {
+    match te {
+        TypeExtension::Object(o) => {
+            let fields: Vec<GqlField> = o.fields.into_iter().map(field_to_gql).collect();
+            match map.get_mut(&o.name) {
+                Some(GqlType {
+                    kind: GqlTypeKind::Object { fields: existing },
+                    ..
+                }) => existing.extend(fields),
+                _ => {
+                    map.insert(
+                        o.name.clone(),
+                        GqlType {
+                            name: o.name,
+                            kind: GqlTypeKind::Object { fields },
+                        },
+                    );
+                }
+            }
+        }
+        TypeExtension::Interface(i) => {
+            let fields: Vec<GqlField> = i.fields.into_iter().map(field_to_gql).collect();
+            match map.get_mut(&i.name) {
+                Some(GqlType {
+                    kind: GqlTypeKind::Interface { fields: existing },
+                    ..
+                }) => existing.extend(fields),
+                _ => {
+                    map.insert(
+                        i.name.clone(),
+                        GqlType {
+                            name: i.name,
+                            kind: GqlTypeKind::Interface { fields },
+                        },
+                    );
+                }
+            }
+        }
+        TypeExtension::InputObject(io) => {
+            let fields: Vec<GqlField> = io.fields.into_iter().map(input_value_to_field).collect();
+            match map.get_mut(&io.name) {
+                Some(GqlType {
+                    kind: GqlTypeKind::InputObject { fields: existing },
+                    ..
+                }) => existing.extend(fields),
+                _ => {
+                    map.insert(
+                        io.name.clone(),
+                        GqlType {
+                            name: io.name,
+                            kind: GqlTypeKind::InputObject { fields },
+                        },
+                    );
+                }
+            }
+        }
+        TypeExtension::Enum(e) => {
+            let values: Vec<String> = e.values.into_iter().map(|v| v.name).collect();
+            match map.get_mut(&e.name) {
+                Some(GqlType {
+                    kind: GqlTypeKind::Enum { values: existing },
+                    ..
+                }) => existing.extend(values),
+                _ => {
+                    map.insert(
+                        e.name.clone(),
+                        GqlType {
+                            name: e.name,
+                            kind: GqlTypeKind::Enum { values },
+                        },
+                    );
+                }
+            }
+        }
+        TypeExtension::Union(u) => match map.get_mut(&u.name) {
+            Some(GqlType {
+                kind: GqlTypeKind::Union { members: existing },
+                ..
+            }) => existing.extend(u.types),
+            _ => {
+                map.insert(
+                    u.name.clone(),
+                    GqlType {
+                        name: u.name,
+                        kind: GqlTypeKind::Union { members: u.types },
+                    },
+                );
+            }
+        },
+        TypeExtension::Scalar(_) => {}
+    }
 }
 
 fn type_to_str(t: &graphql_parser::query::Type<String>) -> String {
@@ -81,6 +188,7 @@ fn field_to_gql<'a>(f: Field<'a, String>) -> GqlField {
         name: f.name,
         type_str: type_to_str(&f.field_type),
         arguments: f.arguments.into_iter().map(input_value_to_arg).collect(),
+        has_default: false,
     }
 }
 
@@ -97,6 +205,7 @@ fn input_value_to_field<'a>(iv: InputValue<'a, String>) -> GqlField {
         name: iv.name,
         type_str: type_to_str(&iv.value_type),
         arguments: vec![],
+        has_default: iv.default_value.is_some(),
     }
 }
 
@@ -191,9 +300,13 @@ pub fn diff_graphql(base: &TypeMap, head: &TypeMap) -> Vec<DiffChange> {
 fn diff_type(base: &GqlType, head: &GqlType, changes: &mut Vec<DiffChange>) {
     match (&base.kind, &head.kind) {
         (GqlTypeKind::Object { fields: bf }, GqlTypeKind::Object { fields: hf })
-        | (GqlTypeKind::Interface { fields: bf }, GqlTypeKind::Interface { fields: hf })
-        | (GqlTypeKind::InputObject { fields: bf }, GqlTypeKind::InputObject { fields: hf }) => {
-            diff_fields(&base.name, bf, hf, changes);
+        | (GqlTypeKind::Interface { fields: bf }, GqlTypeKind::Interface { fields: hf }) => {
+            diff_fields(&base.name, bf, hf, false, changes);
+        }
+        // Input objects are consumer-facing: adding a required (non-null, no
+        // default) field breaks every caller (direction-aware, mirroring N-4).
+        (GqlTypeKind::InputObject { fields: bf }, GqlTypeKind::InputObject { fields: hf }) => {
+            diff_fields(&base.name, bf, hf, true, changes);
         }
         (GqlTypeKind::Enum { values: bv }, GqlTypeKind::Enum { values: hv }) => {
             diff_enum_values(&base.name, bv, hv, changes);
@@ -216,6 +329,7 @@ fn diff_fields(
     type_name: &str,
     base_fields: &[GqlField],
     head_fields: &[GqlField],
+    is_input: bool,
     changes: &mut Vec<DiffChange>,
 ) {
     let base_map: HashMap<&str, &GqlField> =
@@ -254,13 +368,28 @@ fn diff_fields(
         }
     }
 
-    for name in head_map.keys() {
+    for (name, head_f) in &head_map {
         if !base_map.contains_key(name) {
+            // On an INPUT type, adding a required field (non-null, no default)
+            // breaks every caller that omits it; elsewhere an added field is Safe.
+            let required_input = is_input && head_f.type_str.ends_with('!') && !head_f.has_default;
             changes.push(DiffChange {
                 path: format!("{type_name}.{name}"),
-                kind: ChangeKind::FieldAdded,
-                severity: Severity::Safe,
-                description: Some(format!("Field '{type_name}.{name}' was added")),
+                kind: if required_input {
+                    ChangeKind::RequiredChanged
+                } else {
+                    ChangeKind::FieldAdded
+                },
+                severity: if required_input {
+                    Severity::Breaking
+                } else {
+                    Severity::Safe
+                },
+                description: Some(format!(
+                    "{} '{type_name}.{name}' was added{}",
+                    if is_input { "Input field" } else { "Field" },
+                    if required_input { " (required)" } else { "" }
+                )),
             });
         }
     }
@@ -276,16 +405,30 @@ fn diff_args(
     let base_map: HashMap<&str, &GqlArg> = base_args.iter().map(|a| (a.name.as_str(), a)).collect();
     let head_map: HashMap<&str, &GqlArg> = head_args.iter().map(|a| (a.name.as_str(), a)).collect();
 
-    for name in base_map.keys() {
-        if !head_map.contains_key(name) {
-            changes.push(DiffChange {
+    for (name, base_arg) in &base_map {
+        match head_map.get(name) {
+            None => changes.push(DiffChange {
                 path: format!("{type_name}.{field_name}({name}:)"),
                 kind: ChangeKind::FieldRemoved,
                 severity: Severity::Breaking,
                 description: Some(format!(
                     "Argument '{type_name}.{field_name}({name})' was removed"
                 )),
-            });
+            }),
+            Some(head_arg) => {
+                // An argument's type change (e.g. String → String!) breaks callers.
+                if base_arg.type_str != head_arg.type_str {
+                    changes.push(DiffChange {
+                        path: format!("{type_name}.{field_name}({name}:)"),
+                        kind: ChangeKind::TypeChanged,
+                        severity: Severity::Breaking,
+                        description: Some(format!(
+                            "Argument '{type_name}.{field_name}({name})' type changed from '{}' to '{}'",
+                            base_arg.type_str, head_arg.type_str
+                        )),
+                    });
+                }
+            }
         }
     }
 
@@ -462,5 +605,85 @@ mod tests {
             .collect();
         assert_eq!(breaking.len(), 1, "got {changes:?}");
         assert!(breaking[0].path.contains("filter"));
+    }
+
+    // -----------------------------------------------------------------------
+    // N-7: an existing argument's type change (String → String!) is Breaking
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_argument_type_change_is_breaking() {
+        let base = parse("type Query { user(filter: String): String }");
+        let head = parse("type Query { user(filter: String!): String }");
+        let changes = diff_graphql(&base, &head);
+        let breaking: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            breaking.len(),
+            1,
+            "argument type change must be Breaking, got {changes:?}"
+        );
+        assert!(breaking[0].path.contains("filter"));
+    }
+
+    // -----------------------------------------------------------------------
+    // N-7: adding a non-null field to an INPUT type breaks callers
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_non_null_input_field_added_is_breaking() {
+        let base = parse("input UserFilter { name: String }");
+        let head = parse("input UserFilter { name: String, age: Int! }");
+        let changes = diff_graphql(&base, &head);
+        let breaking: Vec<_> = changes
+            .iter()
+            .filter(|c| c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            breaking.len(),
+            1,
+            "non-null input field addition must be Breaking, got {changes:?}"
+        );
+        assert!(breaking[0].path.contains("age"));
+    }
+
+    // Adding a nullable input field remains Safe.
+    #[test]
+    fn test_nullable_input_field_added_is_safe() {
+        let base = parse("input UserFilter { name: String }");
+        let head = parse("input UserFilter { name: String, age: Int }");
+        let changes = diff_graphql(&base, &head);
+        assert!(
+            changes.iter().all(|c| c.severity == Severity::Safe),
+            "nullable input field addition must be Safe, got {changes:?}"
+        );
+    }
+
+    // Adding a non-null field to an OUTPUT object stays Safe (does not affect callers).
+    #[test]
+    fn test_non_null_object_field_added_is_safe() {
+        let base = parse("type User { id: ID! }");
+        let head = parse("type User { id: ID!, name: String! }");
+        let changes = diff_graphql(&base, &head);
+        assert!(
+            changes.iter().all(|c| c.severity == Severity::Safe),
+            "non-null output field addition must be Safe, got {changes:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // N-7: a field defined via `extend type` is not reported as removed
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_extend_type_field_not_reported_removed() {
+        let base = parse("type User { id: ID! email: String }");
+        let head = parse("type User { id: ID! } extend type User { email: String }");
+        let changes = diff_graphql(&base, &head);
+        assert!(
+            !changes
+                .iter()
+                .any(|c| c.kind == ChangeKind::FieldRemoved && c.path.contains("email")),
+            "extend-type field must be merged, not reported removed, got {changes:?}"
+        );
     }
 }

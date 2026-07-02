@@ -16,7 +16,7 @@ pub(crate) struct AppSettings {
 pub(crate) async fn get_settings(
     State(pool): State<sqlx::AnyPool>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = sqlx::query("SELECT key, value FROM settings")
+    let rows = q!("SELECT key, value FROM settings")
         .fetch_all(&pool)
         .await?;
 
@@ -81,10 +81,8 @@ pub(crate) async fn update_settings(
     ];
 
     for (key, value) in &pairs {
-        sqlx::query(
-            "INSERT INTO settings (key, value) VALUES (?, ?)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        )
+        q!("INSERT INTO settings (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",)
         .bind(key)
         .bind(value)
         .execute(&pool)
@@ -114,7 +112,7 @@ pub async fn purge_old_usage_events(
     lookback_days: u32,
 ) -> anyhow::Result<u64> {
     let cutoff = (Utc::now() - Duration::days(lookback_days as i64)).to_rfc3339();
-    let result = sqlx::query("DELETE FROM usage_event WHERE recorded_at < ?")
+    let result = q!("DELETE FROM usage_event WHERE recorded_at < ?")
         .bind(&cutoff)
         .execute(pool)
         .await?;
@@ -125,10 +123,9 @@ pub async fn purge_old_usage_events(
 /// Rows with expires_at = NULL are never deleted by this job.
 pub async fn expire_old_evidence(pool: &sqlx::AnyPool) -> anyhow::Result<u64> {
     let now = Utc::now().to_rfc3339();
-    let result =
-        sqlx::query("DELETE FROM impact_evidence WHERE expires_at IS NOT NULL AND expires_at < ?")
-            .bind(&now)
-            .execute(pool)
-            .await?;
+    let result = q!("DELETE FROM impact_evidence WHERE expires_at IS NOT NULL AND expires_at < ?")
+        .bind(&now)
+        .execute(pool)
+        .await?;
     Ok(result.rows_affected())
 }

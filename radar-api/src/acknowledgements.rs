@@ -51,7 +51,7 @@ pub(crate) async fn create_acknowledgement(
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 
-    sqlx::query(
+    q!(
         "INSERT INTO acknowledgement \
          (id, org_id, diff_id, change_id, consumer_id, service_id, acknowledged_by, reason, expires_at, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -72,7 +72,7 @@ pub(crate) async fn create_acknowledgement(
     // K-6: post GitHub status check if this acknowledgement is for a diff with a PR URL
     if let Some(ref diff_id) = body.diff_id {
         use sqlx::Row;
-        let pr_url: Option<String> = sqlx::query("SELECT pr_url FROM diff WHERE id = ?")
+        let pr_url: Option<String> = q!("SELECT pr_url FROM diff WHERE id = ?")
             .bind(diff_id)
             .fetch_optional(&pool)
             .await
@@ -114,7 +114,7 @@ pub(crate) async fn list_diff_acknowledgements(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let now = Utc::now().to_rfc3339();
 
-    let rows = sqlx::query(
+    let rows = q!(
         "SELECT id, diff_id, change_id, consumer_id, service_id, acknowledged_by, reason, expires_at, created_at \
          FROM acknowledgement \
          WHERE org_id = ? AND diff_id = ? \
@@ -165,7 +165,7 @@ pub(crate) async fn list_acknowledgements(
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    let rows = sqlx::query(
+    let rows = q!(
         "SELECT id, diff_id, change_id, consumer_id, service_id, acknowledged_by, reason, expires_at, created_at \
          FROM acknowledgement \
          WHERE org_id = ? \

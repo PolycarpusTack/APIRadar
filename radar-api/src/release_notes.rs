@@ -42,7 +42,7 @@ pub(crate) async fn create_release_note(
     }
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    sqlx::query("INSERT INTO release_note (id, diff_id, content, created_at) VALUES (?, ?, ?, ?)")
+    q!("INSERT INTO release_note (id, diff_id, content, created_at) VALUES (?, ?, ?, ?)")
         .bind(&id)
         .bind(&diff_id)
         .bind(&body.content)
@@ -76,7 +76,7 @@ pub(crate) async fn list_release_notes(
            JOIN spec_version sv_to   ON sv_to.id   = d.to_version
            JOIN service     svc    ON svc.id     = sv_from.service_id"#;
     let rows = if org_id.is_empty() {
-        sqlx::query(&format!(
+        q!(&format!(
             "{base} ORDER BY rn.created_at DESC LIMIT ? OFFSET ?"
         ))
         .bind(limit)
@@ -84,7 +84,7 @@ pub(crate) async fn list_release_notes(
         .fetch_all(&pool)
         .await?
     } else {
-        sqlx::query(&format!(
+        q!(&format!(
             "{base} WHERE svc.org_id = ? ORDER BY rn.created_at DESC LIMIT ? OFFSET ?"
         ))
         .bind(&org_id)
@@ -119,16 +119,14 @@ pub(crate) async fn get_release_note(
     org: OrgExt,
 ) -> Result<impl IntoResponse, ApiError> {
     require_org_owned(&pool, OrgResource::ReleaseNote, &note_id, &caller_org(&org)).await?;
-    let row = sqlx::query(
-        r#"SELECT rn.id, rn.diff_id, rn.content, rn.created_at,
+    let row = q!(r#"SELECT rn.id, rn.diff_id, rn.content, rn.created_at,
                   sv_from.git_ref AS from_git_ref,
                   sv_to.git_ref   AS to_git_ref
            FROM release_note rn
            JOIN diff        d      ON d.id        = rn.diff_id
            JOIN spec_version sv_from ON sv_from.id = d.from_version
            JOIN spec_version sv_to   ON sv_to.id   = d.to_version
-           WHERE rn.id = ?"#,
-    )
+           WHERE rn.id = ?"#,)
     .bind(&note_id)
     .fetch_optional(&pool)
     .await?;
@@ -170,7 +168,7 @@ pub(crate) async fn patch_release_note_status(
         )));
     }
 
-    let row = sqlx::query("SELECT status FROM release_note WHERE id = ?")
+    let row = q!("SELECT status FROM release_note WHERE id = ?")
         .bind(&note_id)
         .fetch_optional(&pool)
         .await?;
@@ -196,7 +194,7 @@ pub(crate) async fn patch_release_note_status(
         )));
     }
 
-    sqlx::query("UPDATE release_note SET status = ? WHERE id = ?")
+    q!("UPDATE release_note SET status = ? WHERE id = ?")
         .bind(&body.status)
         .bind(&note_id)
         .execute(&pool)
@@ -216,7 +214,7 @@ pub(crate) async fn get_migration_guide(
     require_org_owned(&pool, OrgResource::Diff, &diff_id, &caller_org(&org)).await?;
     let consumer_id = params.get("consumer_id").map(String::as_str);
 
-    let diff_row = sqlx::query(
+    let diff_row = q!(
         r#"SELECT d.id, sv_from.git_ref AS from_ref, sv_to.git_ref AS to_ref,
                   s.name AS service_name
            FROM diff d
@@ -238,7 +236,7 @@ pub(crate) async fn get_migration_guide(
         .unwrap_or_else(|_| diff_id.clone());
 
     let consumer_name: Option<String> = if let Some(cid) = consumer_id {
-        sqlx::query("SELECT name FROM consumer WHERE id = ?")
+        q!("SELECT name FROM consumer WHERE id = ?")
             .bind(cid)
             .fetch_optional(&pool)
             .await?
@@ -247,7 +245,7 @@ pub(crate) async fn get_migration_guide(
         None
     };
 
-    let change_rows = sqlx::query(
+    let change_rows = q!(
         "SELECT path, kind, severity, description FROM change WHERE diff_id = ? AND severity = 'breaking' ORDER BY path",
     )
     .bind(&diff_id)
@@ -263,6 +261,7 @@ pub(crate) async fn get_migration_guide(
         cs_q.push_str(" AND consumer_id = ?");
     }
     cs_q.push_str(" ORDER BY operation, field_path LIMIT 100");
+    let cs_q = crate::db::pg(&cs_q);
     let mut csqb = sqlx::query(&cs_q).bind(&diff_id);
     if let Some(cid) = consumer_id {
         csqb = csqb.bind(cid);
@@ -273,7 +272,7 @@ pub(crate) async fn get_migration_guide(
     let scope_label = consumer_name
         .as_deref()
         .or(consumer_id)
-        .map(|n| format!(" ��� scoped to **{n}**"))
+        .map(|n| format!(" \u{2014} scoped to **{n}**"))
         .unwrap_or_default();
 
     md.push_str(&format!(
@@ -352,7 +351,7 @@ pub(crate) async fn generate_release_note(
     let org_id = caller_org(&org);
     require_org_owned(&pool, OrgResource::Diff, &diff_id, &org_id).await?;
     // Verify diff exists before queuing.
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM diff WHERE id = ?")
+    let exists: Option<String> = qs!("SELECT id FROM diff WHERE id = ?")
         .bind(&diff_id)
         .fetch_optional(&pool)
         .await?;
@@ -363,7 +362,7 @@ pub(crate) async fn generate_release_note(
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
-    sqlx::query(
+    q!(
         "INSERT INTO release_note (id, diff_id, content, generation_status, created_at) \
          VALUES (?, ?, '', 'pending', ?)",
     )
@@ -402,7 +401,7 @@ pub(crate) async fn generate_release_note(
         tokio::spawn(async move {
             match build_release_note_content(&p2, &did).await {
                 Ok(md) => {
-                    let _ = sqlx::query(
+                    let _ = q!(
                         "UPDATE release_note SET content = ?, generation_status = 'completed' WHERE id = ?",
                     )
                     .bind(&md)
@@ -422,7 +421,7 @@ pub(crate) async fn generate_release_note(
                 }
                 Err(e) => {
                     let msg = e.to_string();
-                    let _ = sqlx::query(
+                    let _ = q!(
                         "UPDATE release_note SET generation_status = 'failed', generation_error = ? WHERE id = ?",
                     )
                     .bind(&msg)
@@ -468,7 +467,7 @@ pub(crate) async fn get_generate_status(
 
     require_org_owned(&pool, OrgResource::ReleaseNote, &id, &caller_org(&org)).await?;
 
-    let row = sqlx::query(
+    let row = q!(
         "SELECT id, diff_id, content, generation_status, generation_error, status, created_at \
          FROM release_note WHERE id = ?",
     )
@@ -513,7 +512,7 @@ async fn build_release_note_content(
 ) -> Result<String, crate::errors::ApiError> {
     use sqlx::Row;
 
-    let diff_row = sqlx::query(
+    let diff_row = q!(
         r#"SELECT d.id, sv_from.git_ref AS from_ref, sv_to.git_ref AS to_ref,
                   s.name AS service_name
            FROM diff d
@@ -536,7 +535,7 @@ async fn build_release_note_content(
         .try_get("service_name")
         .unwrap_or_else(|_| diff_id.to_owned());
 
-    let change_rows = sqlx::query(
+    let change_rows = q!(
         "SELECT path, kind, severity, description FROM change WHERE diff_id = ? ORDER BY severity DESC, path",
     )
     .bind(diff_id)

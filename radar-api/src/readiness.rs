@@ -16,7 +16,7 @@ pub(crate) async fn get_readiness(State(pool): State<AnyPool>) -> impl IntoRespo
     let catalog_sources = count_table(&pool, "catalog_source").await;
     let webhooks = count_table(&pool, "webhook").await;
 
-    let last_diff_at: Option<String> = sqlx::query_scalar("SELECT MAX(created_at) FROM \"diff\"")
+    let last_diff_at: Option<String> = qs!("SELECT MAX(created_at) FROM \"diff\"")
         .fetch_optional(&pool)
         .await
         .unwrap_or(None)

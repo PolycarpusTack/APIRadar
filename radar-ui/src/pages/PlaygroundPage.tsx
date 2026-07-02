@@ -427,7 +427,7 @@ export default function PlaygroundPage() {
                     style={{
                       background: isActive ? 'var(--cobalt)' : 'var(--bg-surface)',
                       border: `1px solid ${isActive ? 'var(--cobalt)' : 'var(--border)'}`,
-                      color: isActive ? '#fff' : 'var(--text-2)',
+                      color: isActive ? 'var(--text-inverse)' : 'var(--text-2)',
                       fontFamily: 'var(--font-mono)',
                     }}
                   >
@@ -659,7 +659,7 @@ function EnvForm({ form, setForm, editing, saveState, deleteConfirm, setDeleteCo
               <button
                 onClick={() => onDelete(editing.id)}
                 className="rounded-md px-3 py-[5px] text-[12px] font-semibold"
-                style={{ background: 'var(--red, #ef4444)', color: '#fff' }}
+                style={{ background: 'var(--red)', color: 'var(--text-inverse)' }}
               >
                 Delete
               </button>
@@ -675,7 +675,7 @@ function EnvForm({ form, setForm, editing, saveState, deleteConfirm, setDeleteCo
             <button
               onClick={() => setDeleteConfirm(editing.id)}
               className="ml-auto flex items-center gap-1.5 rounded-md px-3 py-[6px] text-[12px] font-medium transition-colors"
-              style={{ border: '1px solid var(--border)', color: 'var(--red, #ef4444)' }}
+              style={{ border: '1px solid var(--border)', color: 'var(--red)' }}
             >
               <Trash2 className="h-3 w-3" />
               Delete

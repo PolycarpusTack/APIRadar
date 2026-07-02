@@ -58,7 +58,7 @@ pub(crate) async fn create_evolution_rule(
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
-    sqlx::query(
+    q!(
         "INSERT INTO evolution_rule (id, org_id, name, change_kind, path_pattern, severity_override, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
@@ -93,7 +93,7 @@ pub(crate) async fn list_evolution_rules(
     use sqlx::Row;
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let rows = sqlx::query(
+    let rows = q!(
         "SELECT id, name, change_kind, path_pattern, severity_override, enabled, created_at
          FROM evolution_rule
          WHERE org_id = ?
@@ -129,7 +129,7 @@ pub(crate) async fn delete_evolution_rule(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let result = sqlx::query("DELETE FROM evolution_rule WHERE id = ? AND org_id = ?")
+    let result = q!("DELETE FROM evolution_rule WHERE id = ? AND org_id = ?")
         .bind(&rule_id)
         .bind(&org_id)
         .execute(&pool)
@@ -158,7 +158,7 @@ pub(crate) async fn toggle_evolution_rule(
         .map(|b| if b { 1 } else { 0 })
         .ok_or_else(|| ApiError::BadRequest("body must include enabled: bool".into()))?;
 
-    let result = sqlx::query("UPDATE evolution_rule SET enabled = ? WHERE id = ? AND org_id = ?")
+    let result = q!("UPDATE evolution_rule SET enabled = ? WHERE id = ? AND org_id = ?")
         .bind(enabled)
         .bind(&rule_id)
         .bind(&org_id)

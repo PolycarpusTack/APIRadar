@@ -23,6 +23,7 @@ pub enum ChangeKind {
     NullabilityChanged,
     RequestBodyAdded,
     RequestBodyRemoved,
+    ConstraintChanged,
 }
 
 impl ChangeKind {
@@ -42,6 +43,7 @@ impl ChangeKind {
             ChangeKind::NullabilityChanged => "nullability_changed",
             ChangeKind::RequestBodyAdded => "request_body_added",
             ChangeKind::RequestBodyRemoved => "request_body_removed",
+            ChangeKind::ConstraintChanged => "constraint_changed",
         }
     }
 }

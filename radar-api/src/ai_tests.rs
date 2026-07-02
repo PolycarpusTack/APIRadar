@@ -61,7 +61,7 @@ pub(crate) async fn generate_tests(
 
     if has_diff && !has_jira {
         let diff_id = body.diff_id.as_deref().unwrap();
-        let changes_rows = sqlx::query("SELECT path, kind, severity FROM change WHERE diff_id = ?")
+        let changes_rows = q!("SELECT path, kind, severity FROM change WHERE diff_id = ?")
             .bind(diff_id)
             .fetch_all(&pool)
             .await?;
@@ -116,7 +116,7 @@ pub(crate) async fn generate_tests(
         let now = Utc::now().to_rfc3339();
         let collection_str = serde_json::to_string(&collection_json).unwrap_or_default();
 
-        sqlx::query(
+        q!(
             r#"INSERT INTO generated_test_suite
                (id, service_id, diff_id, consumer_id, jira_key, jira_summary, collection_name,
                 collection_json, test_count, happy_count, negative_count, created_at, apitesting_yaml)
@@ -213,7 +213,7 @@ pub(crate) async fn generate_tests(
     let now = Utc::now().to_rfc3339();
     let collection_str = serde_json::to_string(&collection_json).unwrap_or_default();
 
-    sqlx::query(
+    q!(
         r#"INSERT INTO generated_test_suite
            (id, service_id, diff_id, consumer_id, jira_key, jira_summary, collection_name, collection_json,
             test_count, happy_count, negative_count, created_at, apitesting_yaml)
@@ -267,7 +267,7 @@ pub(crate) async fn list_test_suites(
     // Org isolation: authenticated callers only see suites whose service belongs
     // to their org. Empty org (desktop/no-auth) sees all.
     let rows = if org_id.is_empty() {
-        sqlx::query(
+        q!(
             r#"SELECT id, service_id, jira_key, jira_summary, collection_name,
                       test_count, happy_count, negative_count, created_at
                FROM generated_test_suite
@@ -279,7 +279,7 @@ pub(crate) async fn list_test_suites(
         .fetch_all(&pool)
         .await?
     } else {
-        sqlx::query(
+        q!(
             r#"SELECT ts.id, ts.service_id, ts.jira_key, ts.jira_summary, ts.collection_name,
                       ts.test_count, ts.happy_count, ts.negative_count, ts.created_at
                FROM generated_test_suite ts
@@ -324,7 +324,7 @@ pub(crate) async fn list_diff_test_suites(
     use sqlx::Row;
     let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     require_org_owned(&pool, OrgResource::Diff, &diff_id, &caller_org_id).await?;
-    let rows = sqlx::query(
+    let rows = q!(
         r#"SELECT id, collection_name, test_count, happy_count, negative_count, consumer_id, created_at
            FROM generated_test_suite
            WHERE diff_id = ?
@@ -362,7 +362,7 @@ pub(crate) async fn get_test_suite(
 
     let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let row = sqlx::query(
+    let row = q!(
         r#"SELECT ts.id, ts.service_id, ts.jira_key, ts.jira_summary, ts.collection_name,
                   ts.collection_json, ts.apitesting_yaml, ts.test_count, ts.happy_count,
                   ts.negative_count, ts.created_at, s.org_id AS service_org_id
@@ -429,6 +429,7 @@ pub(crate) async fn load_diff_evidence(
     }
     q.push_str(" ORDER BY ie.observed_at DESC LIMIT 200");
 
+    let q = crate::db::pg(&q);
     let mut qb = sqlx::query(&q).bind(diff_id);
     if let Some(cid) = consumer_id {
         qb = qb.bind(cid);
@@ -483,7 +484,7 @@ async fn resolve_spec_yaml(
     let Some(did) = diff_id else {
         return Err(ApiError::BadRequest("Provide spec_yaml or diff_id".into()));
     };
-    let row = sqlx::query(
+    let row = q!(
         "SELECT sv.spec_yaml FROM diff d JOIN spec_version sv ON sv.id = d.to_version WHERE d.id = ?",
     )
     .bind(did)

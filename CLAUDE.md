@@ -86,7 +86,7 @@ Migration compatibility rules:
 - Use `TEXT` for IDs and timestamps — never `SERIAL`, `BIGSERIAL`, or `TIMESTAMPTZ`
 - All migrations must work on **both** SQLite and PostgreSQL
 - Test locally against SQLite; CI and production use PostgreSQL
-- Current migrations: 001–033 (033 adds `created_at` + indices to `webhook_delivery`)
+- Current migrations: 001–034 (034 adds an index on `usage_event.recorded_at`)
 
 ---
 

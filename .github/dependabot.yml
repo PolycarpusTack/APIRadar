@@ -1,0 +1,36 @@
+# Dependabot configuration — N-32 (JS supply-chain scanning + dependency updates)
+# Weekly update PRs for the three ecosystems this repo uses. Grouped where it
+# makes sense to keep PR noise down.
+version: 2
+updates:
+  # Rust workspace (root Cargo.toml / Cargo.lock cover all radar-* crates).
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # pnpm workspace root (npm ecosystem covers all package.json workspaces:
+  # radar-ui, radar-desktop, and the root). Dependabot reads pnpm-lock.yaml.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions used in .github/workflows/*.yml.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10

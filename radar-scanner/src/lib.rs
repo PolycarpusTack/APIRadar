@@ -101,6 +101,25 @@ impl Lang {
         let lower = name.to_lowercase();
         lower.contains("api") || lower.contains("client")
     }
+
+    /// Assignment-like node kinds that bind a value to a variable, paired with the
+    /// grammar field holding the left-hand-side target. Used to discover the
+    /// variable a call result is assigned to (so field accesses on that variable
+    /// can be attributed to the call's operation).
+    fn assignment_kinds(&self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Lang::TypeScript | Lang::Tsx => &[
+                ("variable_declarator", "name"),
+                ("assignment_expression", "left"),
+            ],
+            Lang::Python => &[("assignment", "left")],
+            Lang::Go => &[
+                ("short_var_declaration", "left"),
+                ("assignment_statement", "left"),
+                ("var_spec", "name"),
+            ],
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -327,30 +346,322 @@ fn enclosing_scope<'a>(node: tree_sitter::Node<'a>, lang: &Lang) -> tree_sitter:
     cur
 }
 
-/// Map each function scope (by node id) to the operation of the FIRST API call it
-/// directly encloses, so field accesses can be attributed to their own scope's call.
-fn collect_scoped_api_ops(
+/// The operation inferred from a *generated-client* method call
+/// (`obj.method()` where `obj` looks like an API/HTTP client). Returns None
+/// when the call is not a recognised generated-client call.
+fn detect_api_call_op(node: &tree_sitter::Node<'_>, lang: &Lang, source: &[u8]) -> Option<String> {
+    let func = node.child_by_field_name("function")?;
+    if func.kind() != lang.member_kind() {
+        return None;
+    }
+    let obj_name = func
+        .child_by_field_name(lang.call_object_field())
+        .and_then(|n| n.utf8_text(source).ok())
+        .unwrap_or("");
+    if !lang.is_api_object(obj_name) {
+        return None;
+    }
+    let method_name = func
+        .child_by_field_name(lang.property_field())
+        .and_then(|n| n.utf8_text(source).ok())
+        .unwrap_or("");
+    method_name_to_operation(&normalise_method_name(method_name))
+}
+
+/// N-17: recognise a *direct* HTTP-client call that does not match the
+/// generated-client receiver heuristic — `fetch("/x")`, `axios.get("/x")`,
+/// `requests.get(f"{BASE}/users/{id}")`, `http.Get("…")` — and return the
+/// operation (`"GET /users/{id}"`) built from the string-literal URL argument.
+fn detect_http_op(node: &tree_sitter::Node<'_>, lang: &Lang, source: &[u8]) -> Option<String> {
+    let func = node.child_by_field_name("function")?;
+    let method: &str = if func.kind() == lang.member_kind() {
+        let obj_name = func
+            .child_by_field_name(lang.call_object_field())
+            .and_then(|n| n.utf8_text(source).ok())
+            .unwrap_or("");
+        if !is_http_client_receiver(obj_name) {
+            return None;
+        }
+        let method_name = func
+            .child_by_field_name(lang.property_field())
+            .and_then(|n| n.utf8_text(source).ok())
+            .unwrap_or("");
+        http_method_from(method_name)?
+    } else if func.kind() == "identifier" {
+        let name = func.utf8_text(source).ok()?;
+        match name.to_lowercase().as_str() {
+            "fetch" | "axios" => "GET",
+            _ => return None,
+        }
+    } else {
+        return None;
+    };
+    let url = extract_string_literal_arg(node, lang, source)?;
+    let path = normalize_http_path(&url)?;
+    Some(format!("{method} {path}"))
+}
+
+/// Known bare-name HTTP client receivers (case-insensitive).
+fn is_http_client_receiver(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "axios" | "requests" | "http" | "session"
+    )
+}
+
+/// Map an HTTP-verb method name (`get`, `Get`, `POST`, …) to an uppercase method.
+fn http_method_from(name: &str) -> Option<&'static str> {
+    match name.to_lowercase().as_str() {
+        "get" => Some("GET"),
+        "post" => Some("POST"),
+        "put" => Some("PUT"),
+        "patch" => Some("PATCH"),
+        "delete" => Some("DELETE"),
+        "head" => Some("HEAD"),
+        "options" => Some("OPTIONS"),
+        _ => None,
+    }
+}
+
+/// Return the cleaned text of the first string-literal argument of a call.
+fn extract_string_literal_arg(
+    node: &tree_sitter::Node<'_>,
+    _lang: &Lang,
+    source: &[u8],
+) -> Option<String> {
+    let args = node.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    for child in args.children(&mut cursor) {
+        let is_string = matches!(
+            child.kind(),
+            "string"
+                | "template_string"
+                | "string_literal"
+                | "interpreted_string_literal"
+                | "raw_string_literal"
+        );
+        if is_string {
+            if let Ok(text) = child.utf8_text(source) {
+                return Some(clean_string_literal(text));
+            }
+        }
+    }
+    None
+}
+
+/// Strip a string-prefix (`f`/`r`/`b`/`u`) and the surrounding quotes/backticks
+/// from a raw string-literal token.
+fn clean_string_literal(raw: &str) -> String {
+    let mut s = raw.trim();
+    // Drop a leading string prefix that is immediately followed by a quote.
+    while let Some(first) = s.chars().next() {
+        if matches!(first, 'f' | 'F' | 'r' | 'R' | 'b' | 'B' | 'u' | 'U')
+            && s.len() > 1
+            && matches!(s.as_bytes()[1], b'"' | b'\'' | b'`')
+        {
+            s = &s[1..];
+        } else {
+            break;
+        }
+    }
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let q = bytes[0];
+        if (q == b'"' || q == b'\'' || q == b'`') && bytes[bytes.len() - 1] == q {
+            s = &s[1..s.len() - 1];
+        }
+    }
+    s.to_string()
+}
+
+/// Normalise a URL string to an operation path: strip scheme/host and a leading
+/// template/host segment, drop query/fragment, and template path parameters
+/// (`:id` / `${id}` / `{id}` / numeric → `{id}`).
+fn normalize_http_path(raw: &str) -> Option<String> {
+    let mut s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(pos) = s.find("://") {
+        let after = &s[pos + 3..];
+        s = match after.find('/') {
+            Some(i) => &after[i..],
+            None => return Some("/".to_string()),
+        };
+    } else if !s.starts_with('/') {
+        // Template-host (`{{BASE}}`, `${BASE}`, `example.com`) or relative URL:
+        // drop the leading host-like segment before the first '/'.
+        if let Some(i) = s.find('/') {
+            let first = &s[..i];
+            if first.contains('{')
+                || first.contains('$')
+                || first.contains('.')
+                || first.contains(':')
+            {
+                s = &s[i..];
+            }
+        }
+    }
+    let s = s.split(['?', '#']).next().unwrap_or(s);
+    let with_slash = if s.starts_with('/') {
+        s.to_string()
+    } else {
+        format!("/{s}")
+    };
+    let normalized = with_slash
+        .split('/')
+        .map(normalize_path_segment)
+        .collect::<Vec<_>>()
+        .join("/");
+    let trimmed = normalized.trim_end_matches('/');
+    Some(if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    })
+}
+
+/// Normalise a single path segment to a brace-style path parameter where applicable.
+fn normalize_path_segment(seg: &str) -> String {
+    if let Some(v) = seg.strip_prefix(':') {
+        if !v.is_empty() {
+            return format!("{{{v}}}");
+        }
+    }
+    if let Some(inner) = seg.strip_prefix("${").and_then(|x| x.strip_suffix('}')) {
+        return format!("{{{inner}}}");
+    }
+    if seg.len() >= 2 && seg.starts_with('{') && seg.ends_with('}') {
+        return seg.to_string();
+    }
+    if !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()) {
+        return "{id}".to_string();
+    }
+    seg.to_string()
+}
+
+/// Recursively find the text of the first `identifier` node at or below `node`.
+fn first_identifier_text(node: &tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    if node.kind() == "identifier" {
+        return node.utf8_text(source).ok().map(|s| s.to_string());
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(t) = first_identifier_text(&child, source) {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// Walk up from a call node to find the variable its result is assigned to, e.g.
+/// `const response = await api.get(id)` → `Some("response")`. Returns None when
+/// the call result is not bound to a simple variable in the same scope.
+fn assigned_variable(call: &tree_sitter::Node<'_>, lang: &Lang, source: &[u8]) -> Option<String> {
+    let mut cur = *call;
+    // Bounded walk over the handful of wrapper nodes between a call and its binding
+    // (await_expression, expression_list, …).
+    for _ in 0..6 {
+        let parent = cur.parent()?;
+        if lang.is_function_scope(parent.kind()) {
+            return None;
+        }
+        for (kind, field) in lang.assignment_kinds() {
+            if parent.kind() == *kind {
+                if let Some(lhs) = parent.child_by_field_name(field) {
+                    return first_identifier_text(&lhs, source);
+                }
+            }
+        }
+        cur = parent;
+    }
+    None
+}
+
+/// Resolve the leftmost (root) identifier of a member/attribute/selector chain,
+/// e.g. `response.data.items` → `Some("response")`. Returns None when the chain
+/// is not rooted at a plain identifier (e.g. `foo().bar`).
+fn member_root_identifier(
+    member: &tree_sitter::Node<'_>,
+    lang: &Lang,
+    source: &[u8],
+) -> Option<String> {
+    let mut obj = member.child_by_field_name(lang.call_object_field())?;
+    while obj.kind() == lang.member_kind() {
+        obj = obj.child_by_field_name(lang.call_object_field())?;
+    }
+    if obj.kind() == "identifier" {
+        obj.utf8_text(source).ok().map(|s| s.to_string())
+    } else {
+        None
+    }
+}
+
+/// N-16: derive, per function scope, the map `(scope_id, var_name) → operation`
+/// for every variable assigned from an API call, and emit an operation-only
+/// record for each *direct* HTTP-client call (which may have no field access).
+fn collect_ops(
     node: &tree_sitter::Node<'_>,
     source: &[u8],
     lang: &Lang,
-    out: &mut std::collections::HashMap<usize, String>,
+    derived: &mut std::collections::HashMap<(usize, String), String>,
+    http_records: &mut Vec<CallSiteRecord>,
 ) {
     if node.kind() == lang.call_node_kind() {
-        if let Some(func) = node.child_by_field_name("function") {
-            if func.kind() == lang.member_kind() {
-                let obj_name = func
-                    .child_by_field_name(lang.call_object_field())
-                    .and_then(|n| n.utf8_text(source).ok())
-                    .unwrap_or("");
-                let method_name = func
-                    .child_by_field_name(lang.property_field())
-                    .and_then(|n| n.utf8_text(source).ok())
-                    .unwrap_or("");
-                if lang.is_api_object(obj_name) {
-                    if let Some(op) = method_name_to_operation(&normalise_method_name(method_name))
-                    {
-                        let scope_id = enclosing_scope(*node, lang).id();
-                        out.entry(scope_id).or_insert(op);
+        // A generated-client call (`api.getUserById`) or a direct HTTP call
+        // (`axios.get("/x")`). Direct HTTP calls also emit an operation record.
+        let op = if let Some(o) = detect_api_call_op(node, lang, source) {
+            Some(o)
+        } else if let Some(h) = detect_http_op(node, lang, source) {
+            http_records.push(CallSiteRecord {
+                file_path: String::new(),
+                line_number: node.start_position().row + 1,
+                field_path: String::new(),
+                operation: Some(h.clone()),
+            });
+            Some(h)
+        } else {
+            None
+        };
+        if let Some(op) = op {
+            if let Some(var) = assigned_variable(node, lang, source) {
+                let scope_id = enclosing_scope(*node, lang).id();
+                // Later assignments to the same variable legitimately override
+                // earlier ones; distinct variables never collide.
+                derived.insert((scope_id, var), op);
+            }
+        }
+    }
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            collect_ops(&child, source, lang, derived, http_records);
+        }
+    }
+}
+
+/// N-16: emit a call-site record for every property access whose receiver root
+/// is a variable derived from an API call in the same scope. Member accesses on
+/// non-derived values (`console.log`, `JSON.parse`, the API method name itself)
+/// are intentionally skipped so they do not flood impact evidence.
+fn collect_derived_fields(
+    node: &tree_sitter::Node<'_>,
+    source: &[u8],
+    lang: &Lang,
+    derived: &std::collections::HashMap<(usize, String), String>,
+    out: &mut Vec<CallSiteRecord>,
+) {
+    if node.kind() == lang.member_kind() {
+        if let Some(root) = member_root_identifier(node, lang, source) {
+            let scope_id = enclosing_scope(*node, lang).id();
+            if let Some(op) = derived.get(&(scope_id, root)) {
+                if let Some(prop) = node.child_by_field_name(lang.property_field()) {
+                    if let Ok(name) = prop.utf8_text(source) {
+                        out.push(CallSiteRecord {
+                            file_path: String::new(),
+                            line_number: prop.start_position().row + 1,
+                            field_path: name.to_string(),
+                            operation: Some(op.clone()),
+                        });
                     }
                 }
             }
@@ -358,43 +669,16 @@ fn collect_scoped_api_ops(
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            collect_scoped_api_ops(&child, source, lang, out);
+            collect_derived_fields(&child, source, lang, derived, out);
         }
     }
 }
 
-/// Collect leaf property accesses, attributing each to the operation of its
-/// enclosing function scope (if any).
-fn collect_leaves_scoped(
-    node: &tree_sitter::Node<'_>,
-    source: &[u8],
-    lang: &Lang,
-    scope_ops: &std::collections::HashMap<usize, String>,
-    out: &mut Vec<CallSiteRecord>,
-) {
-    if node.kind() == lang.member_kind() {
-        if let Some(prop) = node.child_by_field_name(lang.property_field()) {
-            if let Ok(name) = prop.utf8_text(source) {
-                let scope_id = enclosing_scope(*node, lang).id();
-                out.push(CallSiteRecord {
-                    file_path: String::new(),
-                    line_number: prop.start_position().row + 1,
-                    field_path: name.to_string(),
-                    operation: scope_ops.get(&scope_id).cloned(),
-                });
-            }
-        }
-    }
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            collect_leaves_scoped(&child, source, lang, scope_ops, out);
-        }
-    }
-}
-
-/// S2 scanner for any supported language: pairs leaf property accesses with the
-/// HTTP operation inferred from an API client method call in the SAME function scope.
-/// Falls back to S1 (operation = None) when no API call is detected in that scope.
+/// S2 scanner for any supported language. Emits evidence only for field accesses
+/// on values derived from an API call (generated-client or direct HTTP client),
+/// plus an operation-only record per direct HTTP call. Each field access is
+/// attributed to the operation of the call that produced its receiver, so a
+/// function's second API call attributes its own fields correctly.
 /// The `file_path` field is left empty and filled in by `walk()`.
 pub fn scan_s2(content: &[u8], lang: &Lang) -> Vec<CallSiteRecord> {
     let mut parser = Parser::new();
@@ -406,11 +690,11 @@ pub fn scan_s2(content: &[u8], lang: &Lang) -> Vec<CallSiteRecord> {
     };
     let root = tree.root_node();
 
-    let mut scope_ops: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
-    collect_scoped_api_ops(&root, content, lang, &mut scope_ops);
-
+    let mut derived: std::collections::HashMap<(usize, String), String> =
+        std::collections::HashMap::new();
     let mut records = Vec::new();
-    collect_leaves_scoped(&root, content, lang, &scope_ops, &mut records);
+    collect_ops(&root, content, lang, &mut derived, &mut records);
+    collect_derived_fields(&root, content, lang, &derived, &mut records);
     records
 }
 
@@ -423,8 +707,32 @@ pub fn scan_s2(content: &[u8], lang: &Lang) -> Vec<CallSiteRecord> {
 /// TypeScript files use the S2 operation-aware scanner; Python and Go use S1.
 pub fn scan_directory(dir: &Path) -> Vec<CallSiteRecord> {
     let mut records = Vec::new();
-    walk(dir, &mut records);
+    let mut skipped_large = 0usize;
+    walk(dir, 0, &mut records, &mut skipped_large);
+    if skipped_large > 0 {
+        tracing::info!(
+            "radar-scanner: skipped {skipped_large} file(s) larger than {MAX_FILE_SIZE} bytes"
+        );
+    }
     records
+}
+
+/// N-18: maximum directory recursion depth. Guards against runaway trees and,
+/// together with the symlink skip in `walk`, against symlink cycles.
+const MAX_DEPTH: usize = 64;
+
+/// N-18: files larger than this (~2 MB) are skipped — vendored/minified bundles
+/// are not meaningful consumer source and are expensive to parse.
+const MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
+
+/// True when a file of `len` bytes is within the size cap and should be scanned.
+fn is_within_size_limit(len: u64) -> bool {
+    len <= MAX_FILE_SIZE
+}
+
+/// True when recursion at `depth` would exceed the depth cap and must stop.
+fn exceeds_depth(depth: usize) -> bool {
+    depth > MAX_DEPTH
 }
 
 const SKIP_DIRS: &[&str] = &[
@@ -441,29 +749,50 @@ const SKIP_DIRS: &[&str] = &[
     "venv",
 ];
 
-fn walk(dir: &Path, records: &mut Vec<CallSiteRecord>) {
+fn walk(dir: &Path, depth: usize, records: &mut Vec<CallSiteRecord>, skipped_large: &mut usize) {
+    if exceeds_depth(depth) {
+        return;
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
     };
     for entry in entries.flatten() {
+        // Use file_type() so symlinks are neither followed nor stat-resolved:
+        // this is the primary guard against symlink cycles (no stack overflow).
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if SKIP_DIRS.contains(&name) {
                 continue;
             }
-            walk(&path, records);
-        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            if let Some(lang) = Lang::from_extension(ext) {
-                if let Ok(content) = std::fs::read(&path) {
-                    let file_str = path.to_string_lossy().into_owned();
-                    // S2: operation-aware scanner for all supported languages
-                    let mut recs = scan_s2(&content, &lang);
-                    for r in &mut recs {
-                        r.file_path = file_str.clone();
+            walk(&path, depth + 1, records, skipped_large);
+        } else if file_type.is_file() {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if let Some(lang) = Lang::from_extension(ext) {
+                    // Size cap: skip oversized (vendored/minified) files.
+                    if let Ok(meta) = entry.metadata() {
+                        if !is_within_size_limit(meta.len()) {
+                            *skipped_large += 1;
+                            continue;
+                        }
                     }
-                    records.extend(recs);
+                    if let Ok(content) = std::fs::read(&path) {
+                        let file_str = path.to_string_lossy().into_owned();
+                        // S2: operation-aware scanner for all supported languages
+                        let mut recs = scan_s2(&content, &lang);
+                        for r in &mut recs {
+                            r.file_path = file_str.clone();
+                        }
+                        records.extend(recs);
+                    }
                 }
             }
         }
@@ -1425,5 +1754,215 @@ async function getOrders(ordersApi) {
             Some("GET /orders"),
             "total should be attributed to its own function's call, not the first call"
         );
+    }
+
+    // --- N-16: evidence precision ---
+
+    #[test]
+    fn s2_console_log_and_json_parse_produce_no_evidence() {
+        // Neither `console.log` nor `JSON.parse` is derived from an API call, so
+        // no call-site evidence should be emitted for them.
+        let src = b"
+function noise(response) {
+    console.log(response);
+    JSON.parse(\"{}\");
+    return response;
+}
+";
+        let records = scan_typescript_s2(src);
+        assert!(
+            records.is_empty(),
+            "console.log / JSON.parse must not produce evidence; got {records:?}"
+        );
+    }
+
+    #[test]
+    fn s2_only_derived_values_emit_field_evidence() {
+        // `user.phone` is derived from an API call → evidence.
+        // `console.log(user)` and the `usersApi.getUserById` method name → no evidence.
+        let src = b"
+async function loadUser(usersApi, id) {
+    const user = await usersApi.getUserById(id);
+    console.log(user);
+    return user.phone;
+}
+";
+        let records = scan_typescript_s2(src);
+        let fields: Vec<&str> = records.iter().map(|r| r.field_path.as_str()).collect();
+        assert!(fields.contains(&"phone"), "expected phone; got {fields:?}");
+        assert!(
+            !fields.iter().any(|f| *f == "log" || *f == "getUserById"),
+            "must not emit method-name / console.log leaves; got {fields:?}"
+        );
+    }
+
+    #[test]
+    fn s2_second_api_call_fields_attributed_to_second_operation() {
+        // Regression for the `or_insert` scope-pinning bug: two API calls in ONE
+        // function must attribute each block's fields to its own operation.
+        let src = b"
+async function loadBoth(usersApi, ordersApi, id) {
+    const user = await usersApi.getUserById(id);
+    const orders = await ordersApi.listOrders();
+    console.log(user.phone);
+    return orders.total;
+}
+";
+        let records = scan_typescript_s2(src);
+        let phone = records
+            .iter()
+            .find(|r| r.field_path == "phone")
+            .expect("phone record");
+        assert_eq!(
+            phone.operation.as_deref(),
+            Some("GET /users/{id}"),
+            "phone belongs to the first call"
+        );
+        let total = records
+            .iter()
+            .find(|r| r.field_path == "total")
+            .expect("total record");
+        assert_eq!(
+            total.operation.as_deref(),
+            Some("GET /orders"),
+            "total belongs to the SECOND call, not the first (or_insert bug)"
+        );
+    }
+
+    // --- N-17: direct HTTP client detection ---
+
+    #[test]
+    fn s2_direct_axios_get_extracts_operation() {
+        let src = b"const r = axios.get(\"/users/1\");";
+        let records = scan_s2(src, &Lang::TypeScript);
+        assert!(
+            records
+                .iter()
+                .any(|r| r.operation.as_deref() == Some("GET /users/{id}")),
+            "axios.get(\"/users/1\") should yield GET /users/{{id}}; got {records:?}"
+        );
+    }
+
+    #[test]
+    fn s2_direct_requests_get_extracts_operation() {
+        let src = b"resp = requests.get(\"/orders\")\n";
+        let records = scan_s2(src, &Lang::Python);
+        assert!(
+            records
+                .iter()
+                .any(|r| r.operation.as_deref() == Some("GET /orders")),
+            "requests.get(\"/orders\") should yield GET /orders; got {records:?}"
+        );
+    }
+
+    #[test]
+    fn s2_direct_fetch_extracts_operation() {
+        let src = b"const r = fetch(\"/users/1\");";
+        let records = scan_s2(src, &Lang::TypeScript);
+        assert!(
+            records
+                .iter()
+                .any(|r| r.operation.as_deref() == Some("GET /users/{id}")),
+            "fetch(\"/users/1\") should yield GET /users/{{id}}; got {records:?}"
+        );
+    }
+
+    #[test]
+    fn s2_direct_requests_fstring_strips_base_and_templatizes() {
+        let src = b"resp = requests.get(f\"{BASE}/users/{id}\")\n";
+        let records = scan_s2(src, &Lang::Python);
+        assert!(
+            records
+                .iter()
+                .any(|r| r.operation.as_deref() == Some("GET /users/{id}")),
+            "f-string URL should strip host and keep {{id}}; got {records:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_http_path_examples() {
+        assert_eq!(
+            normalize_http_path("/users/1").as_deref(),
+            Some("/users/{id}")
+        );
+        assert_eq!(normalize_http_path("/orders").as_deref(), Some("/orders"));
+        assert_eq!(
+            normalize_http_path("https://api.example.com/v1/users/42?active=true").as_deref(),
+            Some("/v1/users/{id}")
+        );
+        assert_eq!(
+            normalize_http_path("{BASE}/users/${id}").as_deref(),
+            Some("/users/{id}")
+        );
+        assert_eq!(
+            normalize_http_path("/users/:userId/orders").as_deref(),
+            Some("/users/{userId}/orders")
+        );
+    }
+
+    // --- N-18: robustness ---
+
+    #[test]
+    fn size_limit_helper_boundaries() {
+        assert!(is_within_size_limit(0));
+        assert!(is_within_size_limit(MAX_FILE_SIZE));
+        assert!(!is_within_size_limit(MAX_FILE_SIZE + 1));
+    }
+
+    #[test]
+    fn depth_cap_helper_boundaries() {
+        assert!(!exceeds_depth(0));
+        assert!(!exceeds_depth(MAX_DEPTH));
+        assert!(exceeds_depth(MAX_DEPTH + 1));
+    }
+
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("radar_scanner_{tag}_{nanos}_{n}"))
+    }
+
+    #[test]
+    fn walk_recurses_normal_directory_tree() {
+        let dir = unique_temp_dir("tree");
+        let nested = dir.join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("f.ts"),
+            b"const user = usersApi.getUserById(1);\nconst p = user.phone;",
+        )
+        .unwrap();
+        let records = scan_directory(&dir);
+        let has_phone = records.iter().any(|r| r.field_path == "phone");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(has_phone, "nested source file should be scanned");
+    }
+
+    #[test]
+    fn walk_skips_files_over_size_cap() {
+        let dir = unique_temp_dir("size");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Small file: should be scanned.
+        std::fs::write(
+            dir.join("small.ts"),
+            b"const user = usersApi.getUserById(1);\nconst p = user.phone;",
+        )
+        .unwrap();
+        // Oversized file (>2 MB): should be skipped, so `bigfield` never appears.
+        let mut big = String::from("const q = usersApi.listUsers();\nconst z = q.bigfield;\n// ");
+        big.push_str(&"a".repeat((MAX_FILE_SIZE as usize) + 1000));
+        std::fs::write(dir.join("big.ts"), big.as_bytes()).unwrap();
+
+        let records = scan_directory(&dir);
+        let has_phone = records.iter().any(|r| r.field_path == "phone");
+        let has_bigfield = records.iter().any(|r| r.field_path == "bigfield");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(has_phone, "small file should be scanned");
+        assert!(!has_bigfield, "oversized file should be skipped");
     }
 }

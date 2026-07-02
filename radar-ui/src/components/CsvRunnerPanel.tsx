@@ -501,7 +501,7 @@ export default function CsvRunnerPanel() {
             <button
               onClick={cancel}
               className="flex items-center gap-2 rounded-md px-4 py-2 text-[12.5px] font-semibold"
-              style={{ background: 'var(--red)', color: '#fff' }}
+              style={{ background: 'var(--red)', color: 'var(--text-inverse)' }}
             >
               <Square className="h-3.5 w-3.5" />
               Cancel
