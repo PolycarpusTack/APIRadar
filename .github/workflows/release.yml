@@ -34,7 +34,7 @@ jobs:
       DATABASE_URL: sqlite:ci-release.db
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -70,7 +70,7 @@ jobs:
       DATABASE_URL: sqlite:ci-release.db
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Enable pnpm via Corepack
         run: corepack enable && corepack prepare pnpm@10.30.3 --activate
@@ -129,7 +129,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
