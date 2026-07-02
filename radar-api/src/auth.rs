@@ -725,7 +725,7 @@ pub(crate) async fn require_org_owned(
     if caller_org_id.is_empty() {
         return Ok(());
     }
-    let row = sqlx::query(resource.org_lookup_sql())
+    let row = q!(resource.org_lookup_sql())
         .bind(id)
         .fetch_optional(pool)
         .await?;

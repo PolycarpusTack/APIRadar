@@ -87,7 +87,7 @@ pub(crate) async fn ingest_usage_event(
     let mut tx = pool.begin().await?;
     for event in &to_insert {
         let id = Uuid::new_v4().to_string();
-        sqlx::query(
+        q!(
             r#"INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at)
                VALUES (?, ?, ?, ?, ?, ?)"#,
         )
@@ -136,17 +136,16 @@ pub(crate) async fn upsert_call_sites(
             &site.field_path,
         );
 
-        let updated =
-            sqlx::query("UPDATE call_site SET last_seen_at = ?, operation = ? WHERE id = ?")
-                .bind(&now)
-                .bind(&site.operation)
-                .bind(&id)
-                .execute(&mut *tx)
-                .await
-                .map_err(crate::errors::map_ingest_db_error)?;
+        let updated = q!("UPDATE call_site SET last_seen_at = ?, operation = ? WHERE id = ?")
+            .bind(&now)
+            .bind(&site.operation)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await
+            .map_err(crate::errors::map_ingest_db_error)?;
 
         if updated.rows_affected() == 0 {
-            sqlx::query(
+            q!(
                 r#"INSERT INTO call_site
                    (id, consumer_id, service_id, operation, file_path, line_number, field_path, last_seen_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
@@ -223,7 +222,7 @@ pub(crate) async fn ingest_otlp_traces(
                     Some(id) => id,
                     None => match &resource_service_name {
                         Some(name) => {
-                            let found: Option<String> = sqlx::query_scalar(
+                            let found: Option<String> = qs!(
                                 "SELECT id FROM consumer WHERE org_id = ? AND name = ? LIMIT 1",
                             )
                             .bind(&org_id)
@@ -261,7 +260,7 @@ pub(crate) async fn ingest_otlp_traces(
                 }
 
                 let id = Uuid::new_v4().to_string();
-                let _ = sqlx::query(
+                let _ = q!(
                     "INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at)
                      VALUES (?, ?, ?, ?, ?, ?)",
                 )
@@ -311,7 +310,7 @@ pub(crate) async fn ingest_gateway_logs(
         }
 
         let id = Uuid::new_v4().to_string();
-        let _ = sqlx::query(
+        let _ = q!(
             "INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at)
              VALUES (?, ?, ?, ?, ?, ?)",
         )

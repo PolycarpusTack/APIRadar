@@ -83,11 +83,9 @@ pub(crate) async fn record_event(
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let meta_str = meta.map(|m| redact_secrets(m).to_string());
-    let _ = sqlx::query(
-        "INSERT INTO audit_event \
+    let _ = q!("INSERT INTO audit_event \
          (id, org_id, actor, action, entity_type, entity_id, meta, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",)
     .bind(&id)
     .bind(org_id)
     .bind(actor)
@@ -146,7 +144,7 @@ pub(crate) async fn list_audit_events(
                 FROM audit_event WHERE org_id = ?";
 
     let rows: Vec<RowTuple> = if let Some(action_filter) = &q.action {
-        sqlx::query_as(&format!(
+        qa!(&format!(
             "{base} AND action LIKE ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
         ))
         .bind(org_id)
@@ -156,7 +154,7 @@ pub(crate) async fn list_audit_events(
         .fetch_all(&pool)
         .await
     } else if let Some(et) = &q.entity_type {
-        sqlx::query_as(&format!(
+        qa!(&format!(
             "{base} AND entity_type = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
         ))
         .bind(org_id)
@@ -166,7 +164,7 @@ pub(crate) async fn list_audit_events(
         .fetch_all(&pool)
         .await
     } else {
-        sqlx::query_as(&format!("{base} ORDER BY created_at DESC LIMIT ? OFFSET ?"))
+        qa!(&format!("{base} ORDER BY created_at DESC LIMIT ? OFFSET ?"))
             .bind(org_id)
             .bind(q.limit)
             .bind(q.offset)

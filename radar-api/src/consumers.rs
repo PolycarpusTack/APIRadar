@@ -59,7 +59,7 @@ pub(crate) async fn list_consumers(
 
     // Org isolation: authenticated callers may only list consumers of their own services.
     if !org_id.is_empty() {
-        let svc_org: Option<String> = sqlx::query_scalar("SELECT org_id FROM service WHERE id = ?")
+        let svc_org: Option<String> = qs!("SELECT org_id FROM service WHERE id = ?")
             .bind(&service_id)
             .fetch_optional(&pool)
             .await?;
@@ -68,14 +68,12 @@ pub(crate) async fn list_consumers(
         }
     }
 
-    let rows = sqlx::query(
-        r#"
+    let rows = q!(r#"
         SELECT c.id, c.name, c.repo_url, c.owner_team, c.contact
         FROM consumer c
         JOIN subscription s ON s.consumer_id = c.id
         WHERE s.service_id = ?
-        "#,
-    )
+        "#,)
     .bind(&service_id)
     .fetch_all(&pool)
     .await?;
@@ -109,13 +107,11 @@ pub(crate) async fn create_consumer(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let id = Uuid::new_v4().to_string();
 
-    sqlx::query(
-        r#"
+    q!(r#"
         INSERT INTO consumer (id, name, repo_url, owner_team, contact, org_id)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO NOTHING
-        "#,
-    )
+        "#,)
     .bind(&id)
     .bind(&body.name)
     .bind(&body.repo_url)
@@ -174,7 +170,7 @@ pub(crate) async fn upsert_consumer_by_name(
     // of SELECT-then-INSERT under concurrent scanner runs.
     // Requires the UNIQUE index on (org_id, name) from migration 020.
     let new_id = Uuid::new_v4().to_string();
-    sqlx::query(
+    q!(
         "INSERT INTO consumer (id, name, repo_url, owner_team, contact, org_id, catalog_source) \
          VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (org_id, name) DO NOTHING",
     )
@@ -188,7 +184,7 @@ pub(crate) async fn upsert_consumer_by_name(
     .execute(&pool)
     .await?;
 
-    let row = sqlx::query("SELECT id FROM consumer WHERE org_id = ? AND name = ? LIMIT 1")
+    let row = q!("SELECT id FROM consumer WHERE org_id = ? AND name = ? LIMIT 1")
         .bind(&org_id)
         .bind(&name)
         .fetch_one(&pool)
@@ -242,12 +238,10 @@ pub(crate) async fn ingest_collection_evidence(
 
         // ON CONFLICT(id) DO NOTHING is atomic on both SQLite and PostgreSQL.
         // The deterministic UUID v5 id makes this idempotent across re-scans and restarts.
-        let result = sqlx::query(
-            "INSERT INTO impact_evidence \
+        let result = q!("INSERT INTO impact_evidence \
              (id, org_id, diff_id, producer_service_id, consumer_id, source_type, \
               operation, field_path, confidence, evidence_uri, observed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
-        )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",)
         .bind(&id)
         .bind(&org_id)
         .bind("")
@@ -298,7 +292,7 @@ pub(crate) async fn create_subscription(
     require_org_owned(&pool, OrgResource::Consumer, &body.consumer_id, &org_id).await?;
 
     // Verify consumer exists.
-    let consumer_exists = sqlx::query("SELECT id FROM consumer WHERE id = ?")
+    let consumer_exists = q!("SELECT id FROM consumer WHERE id = ?")
         .bind(&body.consumer_id)
         .fetch_optional(&pool)
         .await?;
@@ -310,7 +304,7 @@ pub(crate) async fn create_subscription(
     }
 
     // Verify service exists.
-    let service_exists = sqlx::query("SELECT id FROM service WHERE id = ?")
+    let service_exists = q!("SELECT id FROM service WHERE id = ?")
         .bind(&service_id)
         .fetch_optional(&pool)
         .await?;
@@ -321,7 +315,7 @@ pub(crate) async fn create_subscription(
     }
 
     // Check for existing subscription — idempotent.
-    let existing = sqlx::query(
+    let existing = q!(
         "SELECT id, service_id, consumer_id, opted_in_at FROM subscription WHERE service_id = ? AND consumer_id = ?",
     )
     .bind(&service_id)
@@ -342,12 +336,10 @@ pub(crate) async fn create_subscription(
     let sub_id = Uuid::new_v4().to_string();
     let opted_in_at = Utc::now().to_rfc3339();
 
-    sqlx::query(
-        r#"
+    q!(r#"
         INSERT INTO subscription (id, service_id, consumer_id, opted_in_at)
         VALUES (?, ?, ?, ?)
-        "#,
-    )
+        "#,)
     .bind(&sub_id)
     .bind(&service_id)
     .bind(&body.consumer_id)
@@ -376,7 +368,7 @@ pub(crate) async fn list_all_consumers(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
     let rows = if !org_id.is_empty() {
-        sqlx::query(
+        q!(
             r#"
             SELECT
                 c.id, c.name, c.repo_url, c.owner_team, c.contact,
@@ -391,7 +383,7 @@ pub(crate) async fn list_all_consumers(
         .fetch_all(&pool)
         .await?
     } else {
-        sqlx::query(
+        q!(
             r#"
             SELECT
                 c.id, c.name, c.repo_url, c.owner_team, c.contact,

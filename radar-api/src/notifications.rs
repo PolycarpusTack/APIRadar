@@ -71,12 +71,10 @@ pub(crate) struct DigestData {
 async fn aggregate_digest(pool: &sqlx::AnyPool, org_id: &str) -> anyhow::Result<DigestData> {
     let window_start = (Utc::now() - chrono::Duration::days(7)).to_rfc3339();
 
-    let total_row = sqlx::query(
-        "SELECT COUNT(*) as cnt FROM diff d \
+    let total_row = q!("SELECT COUNT(*) as cnt FROM diff d \
          JOIN spec_version sv ON sv.id = d.to_version \
          JOIN service s ON s.id = sv.service_id \
-         WHERE d.created_at >= ? AND (? = '' OR s.org_id = ?)",
-    )
+         WHERE d.created_at >= ? AND (? = '' OR s.org_id = ?)",)
     .bind(&window_start)
     .bind(org_id)
     .bind(org_id)
@@ -84,13 +82,11 @@ async fn aggregate_digest(pool: &sqlx::AnyPool, org_id: &str) -> anyhow::Result<
     .await?;
     let total_diffs: i64 = total_row.try_get("cnt").unwrap_or(0);
 
-    let breaking_row = sqlx::query(
-        "SELECT COUNT(DISTINCT d.id) as cnt FROM diff d \
+    let breaking_row = q!("SELECT COUNT(DISTINCT d.id) as cnt FROM diff d \
          JOIN change c ON c.diff_id = d.id \
          JOIN spec_version sv ON sv.id = d.to_version \
          JOIN service s ON s.id = sv.service_id \
-         WHERE c.severity = 'breaking' AND d.created_at >= ? AND (? = '' OR s.org_id = ?)",
-    )
+         WHERE c.severity = 'breaking' AND d.created_at >= ? AND (? = '' OR s.org_id = ?)",)
     .bind(&window_start)
     .bind(org_id)
     .bind(org_id)
@@ -98,16 +94,14 @@ async fn aggregate_digest(pool: &sqlx::AnyPool, org_id: &str) -> anyhow::Result<
     .await?;
     let breaking_diffs: i64 = breaking_row.try_get("cnt").unwrap_or(0);
 
-    let service_rows = sqlx::query(
-        "SELECT s.name, COUNT(d.id) as diff_count \
+    let service_rows = q!("SELECT s.name, COUNT(d.id) as diff_count \
          FROM diff d \
          JOIN spec_version sv ON sv.id = d.to_version \
          JOIN service s ON s.id = sv.service_id \
          WHERE d.created_at >= ? AND (? = '' OR s.org_id = ?) \
          GROUP BY s.id, s.name \
          ORDER BY diff_count DESC \
-         LIMIT 3",
-    )
+         LIMIT 3",)
     .bind(&window_start)
     .bind(org_id)
     .bind(org_id)
@@ -222,7 +216,7 @@ pub(crate) fn start_digest_scheduler(pool: sqlx::AnyPool) {
             if now.weekday() == chrono::Weekday::Mon && now.hour() == 8 {
                 // ISO year-week key prevents duplicate sends across restarts.
                 let week_key = format!("digest_sent_{}", now.format("%G-W%V"));
-                let already_sent = sqlx::query("SELECT 1 FROM settings WHERE key = ?")
+                let already_sent = q!("SELECT 1 FROM settings WHERE key = ?")
                     .bind(&week_key)
                     .fetch_optional(&pool)
                     .await
@@ -236,10 +230,8 @@ pub(crate) fn start_digest_scheduler(pool: sqlx::AnyPool) {
 
                 send_digest(&pool).await;
 
-                let _ = sqlx::query(
-                    "INSERT INTO settings (key, value) VALUES (?, ?)
-                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                )
+                let _ = q!("INSERT INTO settings (key, value) VALUES (?, ?)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",)
                 .bind(&week_key)
                 .bind(Utc::now().to_rfc3339())
                 .execute(&pool)

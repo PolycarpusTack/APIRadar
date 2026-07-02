@@ -82,22 +82,17 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # Rust (Postgres): gate that all migrations apply cleanly on a real Postgres
+  # Rust (Postgres): gate migrations AND the full query layer on a real Postgres
   # 16 instance (portability regression guard).
   #
-  # NARROWED (N-30): this job used to run the full `cargo test --all` against
-  # Postgres under `continue-on-error: true`. The runtime query layer still has
-  # a sqlx Any→Postgres placeholder-translation bug (42601 syntax errors) that
-  # is deferred to the Postgres decision — see N-26 (supersedes M-20). Running
-  # the test suite there produced an ungated, always-red signal indistinguishable
-  # from a genuine new regression, and burned a full compile+test per push.
-  #
-  # Until N-26 lands, this job runs ONLY the migration step so that PG migration
-  # portability is gated again (this passes post-M-7b). The query-layer coverage
-  # is intentionally deferred — do NOT re-add `cargo test` here until N-26 gives
-  # Postgres real, checked queries.
+  # RE-ENABLED (N-26): this job previously ran migrations only, because the sqlx
+  # Any driver does not translate `?` placeholders to `$N` for Postgres (42601
+  # syntax errors). N-26 fixes that at the query layer (radar-api/src/db.rs: the
+  # `pg()` rewrite + q!/qs!/qa! macros rewrite `?`→`$N` when the pool is Postgres).
+  # The full `cargo test --all` now runs against Postgres as a GATING check, so a
+  # placeholder-portability regression turns CI red instead of silently passing.
   rust-postgres:
-    name: Rust (Postgres migrations)
+    name: Rust (Postgres)
     runs-on: ubuntu-latest
 
     services:
@@ -136,8 +131,9 @@ jobs:
         run: |
           sqlx database create
           sqlx migrate run --source radar-api/migrations
-        # Migration-only gate. Query-layer tests on Postgres are deferred to
-        # N-26 / M-20; do not add `cargo test` here until that lands.
+
+      - name: Run tests against Postgres
+        run: cargo test --all
 
   # ---------------------------------------------------------------------------
   # Node: lint, build UI

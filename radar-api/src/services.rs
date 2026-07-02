@@ -33,11 +33,12 @@ pub(crate) async fn create_service(
     // Org isolation: if a service with this ID already exists, ensure it belongs
     // to the caller's org before allowing an overwrite.
     if !org_id.is_empty() {
-        if let Some(existing_org) =
-            sqlx::query_scalar::<_, String>("SELECT COALESCE(org_id, '') FROM service WHERE id = ?")
-                .bind(&id)
-                .fetch_optional(&pool)
-                .await?
+        if let Some(existing_org) = sqlx::query_scalar::<_, String>(&crate::db::pg(
+            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
+        ))
+        .bind(&id)
+        .fetch_optional(&pool)
+        .await?
         {
             if !existing_org.is_empty() && existing_org != org_id {
                 return Err(ApiError::Forbidden("service belongs to another org".into()));
@@ -45,8 +46,7 @@ pub(crate) async fn create_service(
         }
     }
 
-    sqlx::query(
-        r#"
+    q!(r#"
         INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
@@ -54,8 +54,7 @@ pub(crate) async fn create_service(
             repo_url    = excluded.repo_url,
             owner_team  = excluded.owner_team,
             spec_format = excluded.spec_format
-        "#,
-    )
+        "#,)
     .bind(&id)
     .bind(&body.name)
     .bind(&body.repo_url)
@@ -87,12 +86,11 @@ pub(crate) async fn get_service(
 
     let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let row = sqlx::query(
-        "SELECT id, name, repo_url, owner_team, spec_format, org_id FROM service WHERE id = ?",
-    )
-    .bind(&service_id)
-    .fetch_optional(&pool)
-    .await?;
+    let row =
+        q!("SELECT id, name, repo_url, owner_team, spec_format, org_id FROM service WHERE id = ?",)
+            .bind(&service_id)
+            .fetch_optional(&pool)
+            .await?;
 
     match row {
         None => Err(ApiError::NotFound(format!(
@@ -129,14 +127,14 @@ pub(crate) async fn list_services(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
     let rows = if !org_id.is_empty() {
-        sqlx::query(
+        q!(
             "SELECT id, name, repo_url, owner_team, spec_format FROM service WHERE org_id = ? ORDER BY name",
         )
         .bind(&org_id)
         .fetch_all(&pool)
         .await?
     } else {
-        sqlx::query("SELECT id, name, repo_url, owner_team, spec_format FROM service ORDER BY name")
+        q!("SELECT id, name, repo_url, owner_team, spec_format FROM service ORDER BY name")
             .fetch_all(&pool)
             .await?
     };

@@ -37,7 +37,7 @@ pub(crate) async fn list_policy_decisions(
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    let rows = sqlx::query(
+    let rows = q!(
         "SELECT id, diff_id, service_id, verdict, fail_mode, actor, created_at \
          FROM policy_decision WHERE org_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
     )
@@ -85,7 +85,7 @@ pub(crate) async fn create_policy_decision(
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 
-    sqlx::query(
+    q!(
         "INSERT INTO policy_decision (id, org_id, diff_id, service_id, verdict, fail_mode, actor, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )

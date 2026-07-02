@@ -141,7 +141,7 @@ pub(crate) async fn create_csv_run(
     let request_json = serde_json::to_string(&body.request)
         .map_err(|_| ApiError::BadRequest("failed to serialize request template".into()))?;
 
-    sqlx::query(
+    q!(
         "INSERT INTO csv_run_job \
          (id, org_id, name, request_json, status, total_rows, completed_rows, error_count, created_at) \
          VALUES (?, ?, ?, ?, 'pending', ?, 0, 0, ?)",
@@ -199,7 +199,7 @@ pub(crate) async fn list_csv_runs(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let rows = sqlx::query(
+    let rows = q!(
         "SELECT id, name, status, total_rows, completed_rows, error_count, error_message, \
                 created_at, started_at, completed_at \
          FROM csv_run_job WHERE org_id = ? ORDER BY created_at DESC LIMIT 50",
@@ -220,7 +220,7 @@ pub(crate) async fn get_csv_run(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let row = sqlx::query(
+    let row = q!(
         "SELECT id, name, status, total_rows, completed_rows, error_count, error_message, \
                 created_at, started_at, completed_at \
          FROM csv_run_job WHERE id = ? AND org_id = ?",
@@ -242,10 +242,8 @@ pub(crate) async fn cancel_csv_run(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let result = sqlx::query(
-        "UPDATE csv_run_job SET status = 'cancelled' \
-         WHERE id = ? AND org_id = ? AND status IN ('pending', 'running')",
-    )
+    let result = q!("UPDATE csv_run_job SET status = 'cancelled' \
+         WHERE id = ? AND org_id = ? AND status IN ('pending', 'running')",)
     .bind(&id)
     .bind(&org_id)
     .execute(&pool)
@@ -269,7 +267,7 @@ pub(crate) async fn get_csv_run_results(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let exists = sqlx::query("SELECT 1 FROM csv_run_job WHERE id = ? AND org_id = ?")
+    let exists = q!("SELECT 1 FROM csv_run_job WHERE id = ? AND org_id = ?")
         .bind(&id)
         .bind(&org_id)
         .fetch_optional(&pool)
@@ -279,7 +277,7 @@ pub(crate) async fn get_csv_run_results(
         return Err(ApiError::NotFound("csv run not found".into()));
     }
 
-    let rows = sqlx::query(
+    let rows = q!(
         "SELECT row_number, http_status, duration_ms, error, url, response_body, row_data \
          FROM csv_run_result WHERE job_id = ? ORDER BY row_number ASC \
          LIMIT ? OFFSET ?",
@@ -328,7 +326,7 @@ pub(crate) async fn execute_csv_run(
 
 async fn set_job_running(pool: &sqlx::AnyPool, job_id: &str) {
     let started_at = Utc::now().to_rfc3339();
-    let _ = sqlx::query("UPDATE csv_run_job SET status = 'running', started_at = ? WHERE id = ?")
+    let _ = q!("UPDATE csv_run_job SET status = 'running', started_at = ? WHERE id = ?")
         .bind(&started_at)
         .bind(job_id)
         .execute(pool)
@@ -394,11 +392,9 @@ async fn finalize_job(
         "completed"
     };
     let completed_at = Utc::now().to_rfc3339();
-    let _ = sqlx::query(
-        "UPDATE csv_run_job \
+    let _ = q!("UPDATE csv_run_job \
          SET status = ?, completed_at = ?, completed_rows = ?, error_count = ? \
-         WHERE id = ? AND status NOT IN ('cancelled')",
-    )
+         WHERE id = ? AND status NOT IN ('cancelled')",)
     .bind(status)
     .bind(&completed_at)
     .bind(completed)
@@ -599,7 +595,7 @@ fn build_request(
 // ---------------------------------------------------------------------------
 
 async fn job_is_cancelled(pool: &sqlx::AnyPool, job_id: &str) -> bool {
-    sqlx::query("SELECT status FROM csv_run_job WHERE id = ?")
+    q!("SELECT status FROM csv_run_job WHERE id = ?")
         .bind(job_id)
         .fetch_optional(pool)
         .await
@@ -658,7 +654,7 @@ fn resolve_vars(template: &str, row: &serde_json::Map<String, serde_json::Value>
 async fn insert_result(pool: &sqlx::AnyPool, job_id: &str, r: &RowOutcome) {
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    if let Err(e) = sqlx::query(
+    if let Err(e) = q!(
         "INSERT INTO csv_run_result \
          (id, job_id, row_number, http_status, duration_ms, error, url, response_body, row_data, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -686,7 +682,7 @@ async fn update_progress(
     completed: i64,
     error_count: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE csv_run_job SET completed_rows = ?, error_count = ? WHERE id = ?")
+    q!("UPDATE csv_run_job SET completed_rows = ?, error_count = ? WHERE id = ?")
         .bind(completed)
         .bind(error_count)
         .bind(job_id)
@@ -719,7 +715,7 @@ fn row_to_job_json(r: &sqlx::any::AnyRow) -> serde_json::Value {
 /// Running/pending jobs are never purged.
 pub async fn purge_old_csv_runs(pool: &sqlx::AnyPool, days: u32) -> Result<u64, sqlx::Error> {
     let cutoff = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
-    let result = sqlx::query(
+    let result = q!(
         "DELETE FROM csv_run_job \
          WHERE status IN ('completed', 'completed_with_failures', 'failed', 'cancelled') AND created_at < ?",
     )
@@ -754,7 +750,7 @@ mod tests {
             .await
             .expect("migrate");
         if url.starts_with("sqlite") {
-            sqlx::query("PRAGMA foreign_keys = OFF")
+            q!("PRAGMA foreign_keys = OFF")
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -910,7 +906,7 @@ mod tests {
     async fn purge_old_csv_runs_deletes_completed_jobs_beyond_window() {
         let pool = test_pool().await;
         let old_ts = (chrono::Utc::now() - chrono::Duration::days(91)).to_rfc3339();
-        sqlx::query(
+        q!(
             "INSERT INTO csv_run_job \
              (id, org_id, name, request_json, status, total_rows, completed_rows, error_count, created_at) \
              VALUES ('job-old', '', 'old', '{}', 'completed', 1, 1, 0, ?)",
@@ -932,7 +928,7 @@ mod tests {
         let pool = test_pool().await;
         // An old 'running' job must never be purged (could be a long-running job or zombie).
         let old_ts = (chrono::Utc::now() - chrono::Duration::days(365)).to_rfc3339();
-        sqlx::query(
+        q!(
             "INSERT INTO csv_run_job \
              (id, org_id, name, request_json, status, total_rows, completed_rows, error_count, created_at) \
              VALUES ('job-running', '', 'run', '{}', 'running', 10, 5, 0, ?)",
@@ -971,7 +967,7 @@ mod tests {
             enable_retry: false,
         };
         let request_json = serde_json::to_string(&template).unwrap();
-        sqlx::query(
+        q!(
             "INSERT INTO csv_run_job \
              (id, org_id, name, request_json, status, total_rows, completed_rows, error_count, created_at) \
              VALUES (?, '', 'echo-test', ?, 'pending', ?, 0, 0, ?)",
@@ -989,7 +985,7 @@ mod tests {
     async fn wait_for_status(pool: &sqlx::AnyPool, job_id: &str, timeout_ms: u64) -> String {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
         loop {
-            let s: String = sqlx::query_scalar("SELECT status FROM csv_run_job WHERE id = ?")
+            let s: String = qs!("SELECT status FROM csv_run_job WHERE id = ?")
                 .bind(job_id)
                 .fetch_one(pool)
                 .await
@@ -1028,13 +1024,12 @@ mod tests {
         echo.wait_for_requests(2, 3000).await;
         assert_eq!(wait_for_status(&pool, job_id, 1000).await, "completed");
 
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM csv_run_result WHERE job_id = ? AND http_status = 200",
-        )
-        .bind(job_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let count: i64 =
+            qs!("SELECT COUNT(*) FROM csv_run_result WHERE job_id = ? AND http_status = 200",)
+                .bind(job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(count, 2, "both rows must record http_status=200");
         super::SSRF_BYPASS.with(|v| v.set(false));
     }
@@ -1061,7 +1056,7 @@ mod tests {
         wait_for_status(&pool, job_id, 1000).await;
 
         let resp_body: Option<String> =
-            sqlx::query_scalar("SELECT response_body FROM csv_run_result WHERE job_id = ?")
+            qs!("SELECT response_body FROM csv_run_result WHERE job_id = ?")
                 .bind(job_id)
                 .fetch_optional(&pool)
                 .await

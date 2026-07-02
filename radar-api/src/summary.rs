@@ -18,16 +18,14 @@ pub(crate) async fn get_summary(
     // twice because sqlx `Any` uses positional `?` placeholders.
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let breaking_row = sqlx::query(
-        r#"
+    let breaking_row = q!(r#"
         SELECT COUNT(*) AS cnt FROM change c
         JOIN diff d ON d.id = c.diff_id
         JOIN spec_version sv ON sv.id = d.to_version
         JOIN service s ON s.id = sv.service_id
         WHERE c.severity = 'breaking' AND d.created_at >= ?
           AND (? = '' OR s.org_id = ?)
-        "#,
-    )
+        "#,)
     .bind(&cutoff_30)
     .bind(&org_id)
     .bind(&org_id)
@@ -35,8 +33,7 @@ pub(crate) async fn get_summary(
     .await?;
     let breaking_changes_30d: i64 = breaking_row.try_get("cnt").unwrap_or(0);
 
-    let consumers_row = sqlx::query(
-        r#"
+    let consumers_row = q!(r#"
         SELECT COUNT(DISTINCT s.consumer_id) AS cnt FROM subscription s
         WHERE EXISTS (
             SELECT 1 FROM diff d
@@ -48,8 +45,7 @@ pub(crate) async fn get_summary(
               AND d.created_at  >= ?
               AND (? = '' OR svc.org_id = ?)
         )
-        "#,
-    )
+        "#,)
     .bind(&cutoff_30)
     .bind(&org_id)
     .bind(&org_id)
@@ -57,12 +53,11 @@ pub(crate) async fn get_summary(
     .await?;
     let consumers_at_risk: i64 = consumers_row.try_get("cnt").unwrap_or(0);
 
-    let services_row =
-        sqlx::query("SELECT COUNT(*) AS cnt FROM service WHERE (? = '' OR org_id = ?)")
-            .bind(&org_id)
-            .bind(&org_id)
-            .fetch_one(&pool)
-            .await?;
+    let services_row = q!("SELECT COUNT(*) AS cnt FROM service WHERE (? = '' OR org_id = ?)")
+        .bind(&org_id)
+        .bind(&org_id)
+        .fetch_one(&pool)
+        .await?;
     let services_count: i64 = services_row.try_get("cnt").unwrap_or(0);
 
     Ok((

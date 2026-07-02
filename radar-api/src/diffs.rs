@@ -111,7 +111,7 @@ pub(crate) async fn persist_diff_atomic(
 ) -> Result<DiffWriteOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let insert = sqlx::query(
+    let insert = q!(
         "INSERT INTO diff (id, from_version, to_version, pr_url, created_at) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(diff_id)
@@ -127,7 +127,7 @@ pub(crate) async fn persist_diff_atomic(
         drop(tx); // roll back the (empty) transaction
         if is_unique {
             use sqlx::Row;
-            let row = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
+            let row = q!("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
                 .bind(from_version)
                 .bind(to_version)
                 .fetch_one(pool)
@@ -139,7 +139,7 @@ pub(crate) async fn persist_diff_atomic(
     }
 
     for c in changes {
-        sqlx::query(
+        q!(
             "INSERT INTO change (id, diff_id, path, kind, severity, description) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string())
@@ -215,7 +215,7 @@ pub(crate) async fn list_diffs(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
     if !org_id.is_empty() {
-        let svc_org: Option<String> = sqlx::query_scalar("SELECT org_id FROM service WHERE id = ?")
+        let svc_org: Option<String> = qs!("SELECT org_id FROM service WHERE id = ?")
             .bind(&service_id)
             .fetch_optional(&pool)
             .await?;
@@ -224,8 +224,7 @@ pub(crate) async fn list_diffs(
         }
     }
 
-    let rows = sqlx::query(
-        r#"
+    let rows = q!(r#"
         SELECT
             d.id          AS diff_id,
             sv_from.git_ref AS from_git_ref,
@@ -244,8 +243,7 @@ pub(crate) async fn list_diffs(
         JOIN service s            ON s.id        = sv_to.service_id
         WHERE (sv_from.service_id = ? OR sv_to.service_id = ?)
         ORDER BY d.created_at DESC
-        "#,
-    )
+        "#,)
     .bind(&service_id)
     .bind(&service_id)
     .fetch_all(&pool)
@@ -289,11 +287,12 @@ pub(crate) async fn create_diff(
 
     // Org isolation: reject if an existing service with this ID belongs to a different org.
     if !org_id.is_empty() {
-        if let Some(existing_org) =
-            sqlx::query_scalar::<_, String>("SELECT COALESCE(org_id, '') FROM service WHERE id = ?")
-                .bind(&service_id)
-                .fetch_optional(&pool)
-                .await?
+        if let Some(existing_org) = sqlx::query_scalar::<_, String>(&crate::db::pg(
+            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
+        ))
+        .bind(&service_id)
+        .fetch_optional(&pool)
+        .await?
         {
             if !existing_org.is_empty() && existing_org != org_id {
                 return Err(ApiError::Forbidden("service belongs to another org".into()));
@@ -301,8 +300,7 @@ pub(crate) async fn create_diff(
         }
     }
 
-    sqlx::query(
-        r#"
+    q!(r#"
         INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
@@ -310,8 +308,7 @@ pub(crate) async fn create_diff(
             repo_url   = excluded.repo_url,
             owner_team = excluded.owner_team,
             spec_format = excluded.spec_format
-        "#,
-    )
+        "#,)
     .bind(&service_id)
     .bind(&body.service_name)
     .bind(&body.repo_url)
@@ -322,13 +319,11 @@ pub(crate) async fn create_diff(
     .await?;
 
     let from_version_id = spec_version_id(&service_id, &body.from_git_ref);
-    sqlx::query(
-        r#"
+    q!(r#"
         INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(id) DO NOTHING
-        "#,
-    )
+        "#,)
     .bind(&from_version_id)
     .bind(&service_id)
     .bind(&body.from_git_ref)
@@ -338,14 +333,12 @@ pub(crate) async fn create_diff(
     .await?;
 
     let to_version_id = spec_version_id(&service_id, &body.to_git_ref);
-    sqlx::query(
-        r#"
+    q!(r#"
         INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             spec_yaml = COALESCE(excluded.spec_yaml, spec_version.spec_yaml)
-        "#,
-    )
+        "#,)
     .bind(&to_version_id)
     .bind(&service_id)
     .bind(&body.to_git_ref)
@@ -357,7 +350,7 @@ pub(crate) async fn create_diff(
 
     {
         use sqlx::Row;
-        let existing = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
+        let existing = q!("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
             .bind(&from_version_id)
             .bind(&to_version_id)
             .fetch_optional(&pool)
@@ -452,8 +445,7 @@ pub(crate) async fn get_diff(
 
     let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let row = sqlx::query(
-        r#"
+    let row = q!(r#"
         SELECT d.id, sv_from.git_ref AS from_git_ref, sv_to.git_ref AS to_git_ref,
                d.pr_url, d.created_at, d.share_token, sv_to.spec_yaml, s.org_id AS service_org_id
         FROM diff d
@@ -461,8 +453,7 @@ pub(crate) async fn get_diff(
         JOIN spec_version sv_to   ON sv_to.id   = d.to_version
         JOIN service s            ON s.id        = sv_to.service_id
         WHERE d.id = ?
-        "#,
-    )
+        "#,)
     .bind(&diff_id)
     .fetch_optional(&pool)
     .await?;
@@ -483,7 +474,7 @@ pub(crate) async fn get_diff(
         t
     } else {
         let token = Uuid::new_v4().to_string();
-        let _ = sqlx::query("UPDATE diff SET share_token = ? WHERE id = ?")
+        let _ = q!("UPDATE diff SET share_token = ? WHERE id = ?")
             .bind(&token)
             .bind(&diff_id)
             .execute(&pool)
@@ -491,14 +482,12 @@ pub(crate) async fn get_diff(
         token
     };
 
-    let change_rows = sqlx::query(
-        r#"
+    let change_rows = q!(r#"
         SELECT path, kind, severity, description
         FROM change
         WHERE diff_id = ?
         ORDER BY path, kind
-        "#,
-    )
+        "#,)
     .bind(&diff_id)
     .fetch_all(&pool)
     .await?;
@@ -515,7 +504,7 @@ pub(crate) async fn get_diff(
         })
         .collect();
 
-    let rule_rows = sqlx::query(
+    let rule_rows = q!(
         "SELECT id, name, path_pattern, change_kind, severity_override
          FROM evolution_rule
          WHERE org_id = ? AND enabled = 1
@@ -563,7 +552,7 @@ pub(crate) async fn get_shared_diff(
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
-    let diff_row = sqlx::query(
+    let diff_row = q!(
         r#"SELECT d.id, sv_from.git_ref AS from_git_ref, sv_to.git_ref AS to_git_ref,
                   d.pr_url, d.created_at, s.name AS service_name
            FROM diff d
@@ -579,7 +568,7 @@ pub(crate) async fn get_shared_diff(
     let diff_row = diff_row.ok_or_else(|| ApiError::NotFound("shared diff not found".into()))?;
     let diff_id: String = diff_row.get("id");
 
-    let change_rows = sqlx::query(
+    let change_rows = q!(
         "SELECT path, kind, severity, description FROM change WHERE diff_id = ? ORDER BY path, kind",
     )
     .bind(&diff_id)
@@ -620,7 +609,7 @@ pub(crate) async fn blast_radius(
 
     let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let diff_row = sqlx::query("SELECT id, from_version, to_version FROM diff WHERE id = ?")
+    let diff_row = q!("SELECT id, from_version, to_version FROM diff WHERE id = ?")
         .bind(&diff_id)
         .fetch_optional(&pool)
         .await?;
@@ -632,7 +621,7 @@ pub(crate) async fn blast_radius(
 
     let to_version: String = diff_row.try_get("to_version").map_err(ApiError::Db)?;
 
-    let sv_row = sqlx::query(
+    let sv_row = q!(
         "SELECT sv.service_id, s.org_id FROM spec_version sv JOIN service s ON s.id = sv.service_id WHERE sv.id = ?",
     )
     .bind(&to_version)
@@ -659,7 +648,7 @@ pub(crate) async fn blast_radius(
 
     assert_org_access(&svc_org_id, &caller_org_id, &format!("diff {diff_id}"))?;
 
-    let change_rows = sqlx::query("SELECT path FROM change WHERE diff_id = ?")
+    let change_rows = q!("SELECT path FROM change WHERE diff_id = ?")
         .bind(&diff_id)
         .fetch_all(&pool)
         .await?;
@@ -693,14 +682,12 @@ pub(crate) async fn blast_radius(
             .collect()
     };
 
-    let consumer_rows = sqlx::query(
-        r#"
+    let consumer_rows = q!(r#"
         SELECT c.id, c.name, c.repo_url, c.owner_team, c.contact
         FROM consumer c
         JOIN subscription s ON s.consumer_id = c.id
         WHERE s.service_id = ?
-        "#,
-    )
+        "#,)
     .bind(&service_id)
     .fetch_all(&pool)
     .await?;
@@ -742,6 +729,9 @@ pub(crate) async fn blast_radius(
             }
             sql.push_str(") ORDER BY recorded_at DESC LIMIT 5");
 
+            // Dynamic bind loop below stores the builder, so the placeholder-
+            // rewritten SQL must outlive it (a temporary would be dropped).
+            let sql = crate::db::pg(&sql);
             let mut q = sqlx::query(&sql)
                 .bind(&consumer_id)
                 .bind(&service_id)
@@ -799,6 +789,7 @@ pub(crate) async fn blast_radius(
             }
             sql.push_str(") ORDER BY last_seen_at DESC LIMIT 5");
 
+            let sql = crate::db::pg(&sql);
             let mut q = sqlx::query(&sql).bind(&consumer_id).bind(&service_id);
             for op in &op_level_ops {
                 q = q.bind(op);
@@ -882,12 +873,10 @@ pub(crate) async fn blast_radius(
                 };
                 // ON CONFLICT(id) DO NOTHING is atomic on SQLite and PostgreSQL; combined
                 // with the deterministic id above this makes the GET write idempotent.
-                sqlx::query(
-                    "INSERT INTO impact_evidence \
+                q!("INSERT INTO impact_evidence \
                      (id, org_id, diff_id, producer_service_id, consumer_id, source_type, \
                       operation, field_path, confidence, file_path, line_number, observed_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
-                )
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",)
                 .bind(&ev_id)
                 .bind(&svc_org_id)
                 .bind(&diff_id)
@@ -997,7 +986,7 @@ pub(crate) async fn list_all_diffs(
     "#;
 
     let rows = if !org_id.is_empty() {
-        sqlx::query(&format!(
+        q!(&format!(
             "{base_query} WHERE s.org_id = ? ORDER BY d.created_at DESC LIMIT ? OFFSET ?"
         ))
         .bind(&org_id)
@@ -1006,7 +995,7 @@ pub(crate) async fn list_all_diffs(
         .fetch_all(&pool)
         .await?
     } else {
-        sqlx::query(&format!(
+        q!(&format!(
             "{base_query} ORDER BY d.created_at DESC LIMIT ? OFFSET ?"
         ))
         .bind(limit)
@@ -1113,11 +1102,12 @@ pub(crate) async fn compare_specs(
 
     // Org isolation: reject if an existing service with this ID belongs to a different org.
     if !org_id.is_empty() {
-        if let Some(existing_org) =
-            sqlx::query_scalar::<_, String>("SELECT COALESCE(org_id, '') FROM service WHERE id = ?")
-                .bind(&service_id)
-                .fetch_optional(&pool)
-                .await?
+        if let Some(existing_org) = sqlx::query_scalar::<_, String>(&crate::db::pg(
+            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
+        ))
+        .bind(&service_id)
+        .fetch_optional(&pool)
+        .await?
         {
             if !existing_org.is_empty() && existing_org != org_id {
                 return Err(ApiError::Forbidden("service belongs to another org".into()));
@@ -1126,7 +1116,7 @@ pub(crate) async fn compare_specs(
     }
 
     // Upsert the service record so the endpoint is self-contained.
-    sqlx::query(
+    q!(
         "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) \
          VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET spec_format = excluded.spec_format",
@@ -1141,7 +1131,7 @@ pub(crate) async fn compare_specs(
     .await?;
 
     let from_version_id = spec_version_id(&service_id, &body.base_ref);
-    sqlx::query(
+    q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
          VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO NOTHING",
@@ -1156,7 +1146,7 @@ pub(crate) async fn compare_specs(
     .await?;
 
     let to_version_id = spec_version_id(&service_id, &body.head_ref);
-    sqlx::query(
+    q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
          VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET spec_yaml = COALESCE(excluded.spec_yaml, spec_version.spec_yaml)",
@@ -1173,7 +1163,7 @@ pub(crate) async fn compare_specs(
     // Re-use an existing diff for the same (from, to) pair.
     {
         use sqlx::Row;
-        let existing = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
+        let existing = q!("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
             .bind(&from_version_id)
             .bind(&to_version_id)
             .fetch_optional(&pool)
@@ -1401,12 +1391,13 @@ async fn run_batch_item(
 
     // Org isolation: reject if an existing service with this ID belongs to a different org.
     if !org_id.is_empty() {
-        if let Some(existing_org) =
-            sqlx::query_scalar::<_, String>("SELECT COALESCE(org_id, '') FROM service WHERE id = ?")
-                .bind(&service_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| anyhow::anyhow!("org check: {e}"))?
+        if let Some(existing_org) = sqlx::query_scalar::<_, String>(&crate::db::pg(
+            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
+        ))
+        .bind(&service_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("org check: {e}"))?
         {
             if !existing_org.is_empty() && existing_org != org_id {
                 anyhow::bail!("service belongs to another org");
@@ -1414,7 +1405,7 @@ async fn run_batch_item(
         }
     }
 
-    sqlx::query(
+    q!(
         "INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) \
          VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET spec_format = excluded.spec_format",
@@ -1431,7 +1422,7 @@ async fn run_batch_item(
 
     // Use URL strings as git refs — keeps spec_version IDs stable across reruns.
     let from_ver = spec_version_id(&service_id, &item.base_url);
-    sqlx::query(
+    q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
          VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
     )
@@ -1446,7 +1437,7 @@ async fn run_batch_item(
     .map_err(|e| anyhow::anyhow!("insert base spec_version: {e}"))?;
 
     let to_ver = spec_version_id(&service_id, &item.head_url);
-    sqlx::query(
+    q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
          VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET spec_yaml = COALESCE(excluded.spec_yaml, spec_version.spec_yaml)",
@@ -1456,7 +1447,7 @@ async fn run_batch_item(
     .execute(pool).await.map_err(|e| anyhow::anyhow!("insert head spec_version: {e}"))?;
 
     // Re-use an existing diff for the same (from, to) pair.
-    if let Some(row) = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
+    if let Some(row) = q!("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
         .bind(&from_ver)
         .bind(&to_ver)
         .fetch_optional(pool)
