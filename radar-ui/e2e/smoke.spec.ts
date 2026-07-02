@@ -19,23 +19,24 @@ test.describe('Dashboard smoke tests', () => {
     }
   });
 
-  test('playground page renders Scalar iframe or placeholder', async ({ page }) => {
+  test('playground page renders the API Explorer iframe', async ({ page }) => {
     await page.goto('/playground');
-    // Either the Scalar iframe is present or a placeholder message.
-    const iframe = page.locator('iframe');
-    const placeholder = page.getByText(/playground/i).first();
-    await expect(iframe.or(placeholder)).toBeVisible({ timeout: 10_000 });
+    // The playground's default "API Explorer" mode renders the Scalar iframe.
+    await expect(page.locator('iframe[title="API Playground"]')).toBeVisible({
+      timeout: 10_000,
+    });
   });
 
   test('health endpoint returns ok (API reachability)', async ({ request }) => {
     const apiUrl = process.env.RADAR_API_URL ?? 'http://localhost:8080';
-    const resp = await request.get(`${apiUrl}/health`);
-    if (resp.ok()) {
-      const body = await resp.json();
-      expect(body).toMatchObject({ status: 'ok' });
-    } else {
-      // API not running in this test env — skip gracefully.
+    // A refused connection throws rather than returning a non-ok response, so
+    // catch it and skip gracefully when radar-api isn't running in this env.
+    const resp = await request.get(`${apiUrl}/health`).catch(() => null);
+    if (!resp || !resp.ok()) {
       test.skip(true, 'radar-api not reachable, skipping API health check');
+      return;
     }
+    const body = await resp.json();
+    expect(body).toMatchObject({ status: 'ok' });
   });
 });
