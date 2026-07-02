@@ -10,7 +10,9 @@ CREATE TABLE IF NOT EXISTS acknowledgement (
     acknowledged_by TEXT NOT NULL, -- actor: user identity or system (e.g. 'ci/label:drift-ack')
     reason TEXT,                   -- free-text rationale recorded for audit
     expires_at TEXT,               -- ISO8601 UTC; NULL = no expiry
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    -- created_at is bound by the application (RFC3339 UTC). No strftime() default:
+    -- that function is SQLite-only and aborts CREATE TABLE on PostgreSQL.
+    created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_ack_org_diff ON acknowledgement (org_id, diff_id);

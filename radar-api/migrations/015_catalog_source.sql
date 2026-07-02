@@ -11,7 +11,9 @@ CREATE TABLE IF NOT EXISTS catalog_source (
     last_sync_at TEXT DEFAULT NULL,
     last_sync_status TEXT DEFAULT NULL, -- 'ok' | 'error' | NULL
     last_sync_error TEXT DEFAULT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    -- created_at is bound by the application (RFC3339 UTC). No strftime() default:
+    -- that function is SQLite-only and aborts CREATE TABLE on PostgreSQL.
+    created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_catalog_source_org ON catalog_source (org_id);

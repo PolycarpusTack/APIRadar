@@ -47,10 +47,11 @@ pub(crate) async fn create_evolution_rule(
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
 
     sqlx::query(
-        "INSERT INTO evolution_rule (id, org_id, name, change_kind, path_pattern, severity_override)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO evolution_rule (id, org_id, name, change_kind, path_pattern, severity_override, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&org_id)
@@ -58,6 +59,7 @@ pub(crate) async fn create_evolution_rule(
     .bind(&body.change_kind)
     .bind(body.path_pattern.as_deref())
     .bind(&body.severity_override)
+    .bind(&now)
     .execute(&pool)
     .await?;
 

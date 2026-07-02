@@ -3383,13 +3383,14 @@ mod tests {
 
         // Insert a rule directly so we don't need app.clone()
         sqlx::query(
-            "INSERT INTO evolution_rule (id, org_id, name, change_kind, severity_override) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO evolution_rule (id, org_id, name, change_kind, severity_override, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string())
         .bind("")
         .bind("Test Rule")
         .bind("enum_value_added")
         .bind("safe")
+        .bind("2026-01-01T00:00:00Z")
         .execute(&pool)
         .await
         .unwrap();
@@ -3416,13 +3417,14 @@ mod tests {
         let rule_id = Uuid::new_v4().to_string();
 
         sqlx::query(
-            "INSERT INTO evolution_rule (id, org_id, name, change_kind, severity_override) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO evolution_rule (id, org_id, name, change_kind, severity_override, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&rule_id)
         .bind("")
         .bind("To Delete")
         .bind("field_removed")
         .bind("non_breaking_risky")
+        .bind("2026-01-01T00:00:00Z")
         .execute(&pool)
         .await
         .unwrap();

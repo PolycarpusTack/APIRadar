@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS evolution_rule (
     path_pattern TEXT DEFAULT NULL,
     severity_override TEXT NOT NULL CHECK (severity_override IN ('safe', 'non_breaking_risky')),
     enabled      INTEGER NOT NULL DEFAULT 1,
-    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    -- created_at is bound by the application (RFC3339 UTC). No strftime() default:
+    -- that function is SQLite-only and aborts CREATE TABLE on PostgreSQL.
+    created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_evo_rule_org ON evolution_rule (org_id, enabled);

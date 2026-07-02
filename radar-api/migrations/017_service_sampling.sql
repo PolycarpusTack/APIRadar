@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS service_sampling (
     org_id          TEXT NOT NULL DEFAULT '',
     sample_rate     REAL NOT NULL DEFAULT 1.0,
     field_deny_list TEXT NOT NULL DEFAULT '',
-    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    -- updated_at is bound by the application (RFC3339 UTC). No strftime() default:
+    -- that function is SQLite-only and aborts CREATE TABLE on PostgreSQL.
+    updated_at      TEXT NOT NULL,
     PRIMARY KEY (service_id, org_id)
 );
