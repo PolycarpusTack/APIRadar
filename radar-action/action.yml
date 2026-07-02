@@ -93,7 +93,11 @@ runs:
         else
           echo "Building radar-cli from source…"
           cd "$GITHUB_ACTION_PATH"
-          cargo build --release -p radar-cli 2>&1
+          # Force the output into the action dir's target so it matches both the
+          # PATH entry below and the cache paths. Without --target-dir, cargo
+          # builds into the surrounding workspace target and `radar` is never
+          # found on PATH (the check then silently falls back to breaking-count=0).
+          cargo build --release -p radar-cli --target-dir "$GITHUB_ACTION_PATH/target" 2>&1
           echo "$GITHUB_ACTION_PATH/target/release" >> "$GITHUB_PATH"
         fi
       env:
