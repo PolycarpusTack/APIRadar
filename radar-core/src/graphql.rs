@@ -243,7 +243,13 @@ fn diff_fields(
                         )),
                     });
                 }
-                diff_args(type_name, name, &base_f.arguments, &head_f.arguments, changes);
+                diff_args(
+                    type_name,
+                    name,
+                    &base_f.arguments,
+                    &head_f.arguments,
+                    changes,
+                );
             }
         }
     }
@@ -267,10 +273,8 @@ fn diff_args(
     head_args: &[GqlArg],
     changes: &mut Vec<DiffChange>,
 ) {
-    let base_map: HashMap<&str, &GqlArg> =
-        base_args.iter().map(|a| (a.name.as_str(), a)).collect();
-    let head_map: HashMap<&str, &GqlArg> =
-        head_args.iter().map(|a| (a.name.as_str(), a)).collect();
+    let base_map: HashMap<&str, &GqlArg> = base_args.iter().map(|a| (a.name.as_str(), a)).collect();
+    let head_map: HashMap<&str, &GqlArg> = head_args.iter().map(|a| (a.name.as_str(), a)).collect();
 
     for name in base_map.keys() {
         if !head_map.contains_key(name) {
@@ -291,7 +295,11 @@ fn diff_args(
             changes.push(DiffChange {
                 path: format!("{type_name}.{field_name}({name}:)"),
                 kind: ChangeKind::RequiredChanged,
-                severity: if required { Severity::Breaking } else { Severity::Safe },
+                severity: if required {
+                    Severity::Breaking
+                } else {
+                    Severity::Safe
+                },
                 description: Some(format!(
                     "Argument '{type_name}.{field_name}({name})' was added{}",
                     if required { " (required)" } else { "" }
@@ -307,10 +315,8 @@ fn diff_enum_values(
     head_vals: &[String],
     changes: &mut Vec<DiffChange>,
 ) {
-    let base_set: std::collections::HashSet<&str> =
-        base_vals.iter().map(|v| v.as_str()).collect();
-    let head_set: std::collections::HashSet<&str> =
-        head_vals.iter().map(|v| v.as_str()).collect();
+    let base_set: std::collections::HashSet<&str> = base_vals.iter().map(|v| v.as_str()).collect();
+    let head_set: std::collections::HashSet<&str> = head_vals.iter().map(|v| v.as_str()).collect();
 
     for val in base_set.difference(&head_set) {
         changes.push(DiffChange {

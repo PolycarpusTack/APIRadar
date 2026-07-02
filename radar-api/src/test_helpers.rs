@@ -30,8 +30,7 @@ pub(crate) struct EchoRequest {
 impl EchoServer {
     /// Wait until the server has recorded at least `n` requests (with timeout).
     pub(crate) async fn wait_for_requests(&self, n: usize, timeout_ms: u64) {
-        let deadline = tokio::time::Instant::now()
-            + tokio::time::Duration::from_millis(timeout_ms);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
         loop {
             if self.requests.lock().await.len() >= n {
                 return;
@@ -55,39 +54,46 @@ pub(crate) async fn spawn_echo_server() -> EchoServer {
     let requests: Arc<Mutex<Vec<EchoRequest>>> = Arc::new(Mutex::new(Vec::new()));
     let req_clone = Arc::clone(&requests);
 
-    let app = axum::Router::new().fallback(
-        axum::routing::any(move |req: AxumRequest| {
-            let store = Arc::clone(&req_clone);
-            async move {
-                let method = req.method().to_string();
-                let path   = req.uri().path_and_query()
-                               .map(|p| p.as_str().to_owned())
-                               .unwrap_or_default();
-                let headers: Vec<(String, String)> = req.headers().iter()
-                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_owned()))
-                    .collect();
-                let body_bytes = axum::body::to_bytes(req.into_body(), 1_048_576)
-                    .await
-                    .unwrap_or_default();
-                let body = String::from_utf8_lossy(&body_bytes).to_string();
-                // Parse optional ?status= query param for configurable responses.
-                let status_code = path
-                    .split_once('?')
-                    .and_then(|(_, q)| {
-                        url::form_urlencoded::parse(q.as_bytes())
-                            .find(|(k, _)| k == "status")
-                            .and_then(|(_, v)| v.parse::<u16>().ok())
-                    })
-                    .unwrap_or(200);
-                store.lock().await.push(EchoRequest { method, path, body, headers });
-                (
-                    axum::http::StatusCode::from_u16(status_code)
-                        .unwrap_or(axum::http::StatusCode::OK),
-                    "ok",
-                ).into_response()
-            }
-        }),
-    );
+    let app = axum::Router::new().fallback(axum::routing::any(move |req: AxumRequest| {
+        let store = Arc::clone(&req_clone);
+        async move {
+            let method = req.method().to_string();
+            let path = req
+                .uri()
+                .path_and_query()
+                .map(|p| p.as_str().to_owned())
+                .unwrap_or_default();
+            let headers: Vec<(String, String)> = req
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_owned()))
+                .collect();
+            let body_bytes = axum::body::to_bytes(req.into_body(), 1_048_576)
+                .await
+                .unwrap_or_default();
+            let body = String::from_utf8_lossy(&body_bytes).to_string();
+            // Parse optional ?status= query param for configurable responses.
+            let status_code = path
+                .split_once('?')
+                .and_then(|(_, q)| {
+                    url::form_urlencoded::parse(q.as_bytes())
+                        .find(|(k, _)| k == "status")
+                        .and_then(|(_, v)| v.parse::<u16>().ok())
+                })
+                .unwrap_or(200);
+            store.lock().await.push(EchoRequest {
+                method,
+                path,
+                body,
+                headers,
+            });
+            (
+                axum::http::StatusCode::from_u16(status_code).unwrap_or(axum::http::StatusCode::OK),
+                "ok",
+            )
+                .into_response()
+        }
+    }));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -95,12 +101,18 @@ pub(crate) async fn spawn_echo_server() -> EchoServer {
 
     tokio::spawn(async move {
         axum::serve(listener, app)
-            .with_graceful_shutdown(async { let _ = rx.await; })
+            .with_graceful_shutdown(async {
+                let _ = rx.await;
+            })
             .await
             .ok();
     });
 
-    EchoServer { addr, requests, _shutdown: tx }
+    EchoServer {
+        addr,
+        requests,
+        _shutdown: tx,
+    }
 }
 
 pub(crate) struct TestClient {
@@ -124,13 +136,16 @@ impl TestClient {
             exp: usize::MAX,
         };
         let app = super::build_router(pool, None, 4 * 1024 * 1024, false, None).layer(
-            axum::middleware::from_fn(move |mut req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
-                let c = claims.clone();
-                async move {
-                    req.extensions_mut().insert(c);
-                    next.run(req).await
-                }
-            }),
+            axum::middleware::from_fn(
+                move |mut req: axum::http::Request<axum::body::Body>,
+                      next: axum::middleware::Next| {
+                    let c = claims.clone();
+                    async move {
+                        req.extensions_mut().insert(c);
+                        next.run(req).await
+                    }
+                },
+            ),
         );
         TestClient { app }
     }
@@ -184,7 +199,13 @@ impl TestClient {
     async fn send(&self, req: Request<Body>) -> TestResponse {
         let resp = self.app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec();
         TestResponse { status, bytes }
     }
 }

@@ -1,3 +1,6 @@
+use crate::auth::JwtClaims;
+use crate::errors::ApiError;
+use crate::utils::{is_host_allowed, is_ssrf_blocked, parse_codeowners};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -7,9 +10,6 @@ use axum::{
 use chrono::Utc;
 use serde_json::{json, Value};
 use uuid::Uuid;
-use crate::auth::JwtClaims;
-use crate::errors::ApiError;
-use crate::utils::{is_host_allowed, is_ssrf_blocked, parse_codeowners};
 
 const VALID_CATALOG_KINDS: &[&str] = &["backstage", "codeowners", "csv", "manual"];
 
@@ -171,14 +171,13 @@ pub(crate) async fn sync_catalog_source(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let now = Utc::now().to_rfc3339();
 
-    let row = sqlx::query(
-        "SELECT kind, url, token_env FROM catalog_source WHERE id = ? AND org_id = ?",
-    )
-    .bind(&source_id)
-    .bind(&org_id)
-    .fetch_optional(&pool)
-    .await?
-    .ok_or_else(|| ApiError::NotFound(format!("catalog source {source_id} not found")))?;
+    let row =
+        sqlx::query("SELECT kind, url, token_env FROM catalog_source WHERE id = ? AND org_id = ?")
+            .bind(&source_id)
+            .bind(&org_id)
+            .fetch_optional(&pool)
+            .await?
+            .ok_or_else(|| ApiError::NotFound(format!("catalog source {source_id} not found")))?;
 
     let kind: String = row.get("kind");
     let url: String = row.get("url");
@@ -189,13 +188,13 @@ pub(crate) async fn sync_catalog_source(
     let (upserted, error_msg) = match validate_catalog_target(&url, token_env.as_deref()) {
         Err(reason) => (0, Some(reason)),
         Ok(()) => {
-            let token = token_env
-                .as_deref()
-                .and_then(|env| std::env::var(env).ok());
+            let token = token_env.as_deref().and_then(|env| std::env::var(env).ok());
             match kind.as_str() {
-                "backstage"  => sync_backstage_source(&pool, &org_id, &url, token.as_deref()).await,
-                "codeowners" => sync_codeowners_source(&pool, &org_id, &url, token.as_deref()).await,
-                _            => (0, Some(format!("sync not implemented for kind={kind}"))),
+                "backstage" => sync_backstage_source(&pool, &org_id, &url, token.as_deref()).await,
+                "codeowners" => {
+                    sync_codeowners_source(&pool, &org_id, &url, token.as_deref()).await
+                }
+                _ => (0, Some(format!("sync not implemented for kind={kind}"))),
             }
         }
     };
@@ -235,7 +234,7 @@ async fn sync_codeowners_source(
     }
 
     let resp = match req.send().await {
-        Ok(r)  => r,
+        Ok(r) => r,
         Err(e) => return (0, Some(format!("HTTP error fetching CODEOWNERS: {e}"))),
     };
     if !resp.status().is_success() {
@@ -244,7 +243,7 @@ async fn sync_codeowners_source(
     }
 
     let content = match resp.text().await {
-        Ok(t)  => t,
+        Ok(t) => t,
         Err(e) => return (0, Some(format!("Failed to read CODEOWNERS body: {e}"))),
     };
 
@@ -253,14 +252,13 @@ async fn sync_codeowners_source(
     let mut upserted = 0usize;
 
     for owner in &owners {
-        let existing: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM consumer WHERE org_id = ? AND name = ? LIMIT 1",
-        )
-        .bind(org_id)
-        .bind(owner)
-        .fetch_optional(pool)
-        .await
-        .unwrap_or(None);
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT id FROM consumer WHERE org_id = ? AND name = ? LIMIT 1")
+                .bind(org_id)
+                .bind(owner)
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
 
         if let Some(existing_id) = existing {
             let _ = sqlx::query("UPDATE consumer SET catalog_source = ? WHERE id = ?")
@@ -309,8 +307,13 @@ async fn sync_backstage_source(
     }
 
     let resp = match req.send().await {
-        Ok(r)  => r,
-        Err(e) => return (0, Some(format!("HTTP error fetching Backstage entities: {e}"))),
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                0,
+                Some(format!("HTTP error fetching Backstage entities: {e}")),
+            )
+        }
     };
 
     if !resp.status().is_success() {
@@ -319,13 +322,13 @@ async fn sync_backstage_source(
     }
 
     let entities: serde_json::Value = match resp.json().await {
-        Ok(v)  => v,
+        Ok(v) => v,
         Err(e) => return (0, Some(format!("Failed to parse Backstage response: {e}"))),
     };
 
     let items = match entities.as_array() {
         Some(a) => a,
-        None    => return (0, Some("Backstage response was not an array".to_string())),
+        None => return (0, Some("Backstage response was not an array".to_string())),
     };
 
     let mut upserted = 0usize;
@@ -334,28 +337,26 @@ async fn sync_backstage_source(
     for item in items {
         let name = match item["metadata"]["name"].as_str() {
             Some(n) if !n.is_empty() => n.to_string(),
-            _                        => continue,
+            _ => continue,
         };
         let owner = item["spec"]["owner"].as_str().unwrap_or("").to_string();
 
-        let existing: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM consumer WHERE org_id = ? AND name = ? LIMIT 1",
-        )
-        .bind(org_id)
-        .bind(&name)
-        .fetch_optional(pool)
-        .await
-        .unwrap_or(None);
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT id FROM consumer WHERE org_id = ? AND name = ? LIMIT 1")
+                .bind(org_id)
+                .bind(&name)
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
 
         if let Some(existing_id) = existing {
-            let _ = sqlx::query(
-                "UPDATE consumer SET owner_team = ?, catalog_source = ? WHERE id = ?",
-            )
-            .bind(&owner)
-            .bind("backstage")
-            .bind(&existing_id)
-            .execute(pool)
-            .await;
+            let _ =
+                sqlx::query("UPDATE consumer SET owner_team = ?, catalog_source = ? WHERE id = ?")
+                    .bind(&owner)
+                    .bind("backstage")
+                    .bind(&existing_id)
+                    .execute(pool)
+                    .await;
         } else {
             let consumer_id = Uuid::new_v4().to_string();
             let _ = sqlx::query(
@@ -416,10 +417,13 @@ mod tests {
     #[test]
     fn validate_blocks_ssrf_targets() {
         // Private / loopback / non-HTTPS targets are blocked before any fetch.
-        assert!(validate_catalog_target("https://169.254.169.254/latest/meta-data/", None).is_err());
+        assert!(
+            validate_catalog_target("https://169.254.169.254/latest/meta-data/", None).is_err()
+        );
         assert!(validate_catalog_target("https://127.0.0.1/catalog", None).is_err());
         assert!(validate_catalog_target("https://10.0.0.1/catalog", None).is_err());
-        assert!(validate_catalog_target("http://example.com/catalog", None).is_err()); // non-HTTPS
+        assert!(validate_catalog_target("http://example.com/catalog", None).is_err());
+        // non-HTTPS
     }
 
     #[test]

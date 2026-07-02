@@ -15,7 +15,9 @@ pub(crate) fn is_host_allowed(url_str: &str) -> bool {
     if allowlist.trim().is_empty() {
         return true; // no restriction beyond SSRF guard
     }
-    let Ok(url) = url::Url::parse(url_str) else { return false };
+    let Ok(url) = url::Url::parse(url_str) else {
+        return false;
+    };
     let host = url.host_str().unwrap_or("").to_lowercase();
     allowlist.split(',').any(|pat| {
         let p = pat.trim().to_lowercase();
@@ -92,13 +94,13 @@ fn is_rfc1918_or_loopback(ip: std::net::IpAddr) -> bool {
             || (oct[0] == 172 && (oct[1] & 0xf0) == 16)         // 172.16.0.0/12
             || (oct[0] == 192 && oct[1] == 168)                  // 192.168.0.0/16
             || oct[0] == 127                                     // 127.0.0.0/8
-            || (oct[0] == 169 && oct[1] == 254)                  // 169.254.0.0/16 link-local
+            || (oct[0] == 169 && oct[1] == 254) // 169.254.0.0/16 link-local
         }
         std::net::IpAddr::V6(v6) => {
             let s = v6.segments();
             v6.is_loopback()                       // ::1
             || (s[0] & 0xfe00) == 0xfc00           // fc00::/7 — ULA (private unicast)
-            || (s[0] & 0xffc0) == 0xfe80           // fe80::/10 — link-local
+            || (s[0] & 0xffc0) == 0xfe80 // fe80::/10 — link-local
         }
     }
 }
@@ -122,7 +124,10 @@ pub(crate) fn collection_evidence_id(
 pub(crate) fn otlp_attr(attrs: &[Value], key: &str) -> Option<String> {
     attrs.iter().find_map(|a| {
         if a.get("key")?.as_str()? == key {
-            a.get("value")?.get("stringValue")?.as_str().map(|s| s.to_owned())
+            a.get("value")?
+                .get("stringValue")?
+                .as_str()
+                .map(|s| s.to_owned())
         } else {
             None
         }
@@ -146,14 +151,22 @@ pub(crate) fn normalise_path(path: &str) -> String {
 
 /// Check whether a field path matches any deny-list pattern (comma-separated globs).
 pub(crate) fn field_in_deny_list(field: &str, deny_list: &str) -> bool {
-    if deny_list.is_empty() { return false; }
-    deny_list.split(',').any(|pat| path_matches(pat.trim(), field))
+    if deny_list.is_empty() {
+        return false;
+    }
+    deny_list
+        .split(',')
+        .any(|pat| path_matches(pat.trim(), field))
 }
 
 /// Determine whether this event should be kept given the sample rate [0.0, 1.0].
 pub(crate) fn sample_keep(rate: f64) -> bool {
-    if rate >= 1.0 { return true; }
-    if rate <= 0.0 { return false; }
+    if rate >= 1.0 {
+        return true;
+    }
+    if rate <= 0.0 {
+        return false;
+    }
     let ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
@@ -220,15 +233,33 @@ pub(crate) fn apply_evolution_rules(
     changes
         .into_iter()
         .map(|mut c| {
-            let kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_owned();
-            let path = c.get("path").and_then(|v| v.as_str()).unwrap_or("").to_owned();
-            let current_sev = c.get("severity").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+            let kind = c
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let path = c
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let current_sev = c
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
 
             for (id, name, pat, rule_kind, override_sev) in rules {
-                if rule_kind != &kind { continue; }
+                if rule_kind != &kind {
+                    continue;
+                }
                 let pattern = pat.as_deref().unwrap_or("");
-                if !path_matches(pattern, &path) { continue; }
-                if !is_severity_downgrade(&current_sev, override_sev) { continue; }
+                if !path_matches(pattern, &path) {
+                    continue;
+                }
+                if !is_severity_downgrade(&current_sev, override_sev) {
+                    continue;
+                }
                 let original = current_sev.clone();
                 c["severity"] = json!(override_sev);
                 c["applied_rule"] = json!({
@@ -385,8 +416,10 @@ mod tests {
     #[test]
     fn host_allowed_exact_match() {
         std::env::set_var("RADAR_ALLOWED_HOSTS", "api.github.com,hooks.slack.com");
-        assert!( is_host_allowed("https://api.github.com/hook"));
-        assert!( is_host_allowed("https://hooks.slack.com/services/T0/B0/xyz"));
+        assert!(is_host_allowed("https://api.github.com/hook"));
+        assert!(is_host_allowed(
+            "https://hooks.slack.com/services/T0/B0/xyz"
+        ));
         assert!(!is_host_allowed("https://evil.com/hook"));
         std::env::remove_var("RADAR_ALLOWED_HOSTS");
     }
@@ -394,8 +427,8 @@ mod tests {
     #[test]
     fn host_allowed_wildcard_subdomain() {
         std::env::set_var("RADAR_ALLOWED_HOSTS", "*.internal");
-        assert!( is_host_allowed("https://api.internal/hook"));
-        assert!( is_host_allowed("https://build.ci.internal/hook"));
+        assert!(is_host_allowed("https://api.internal/hook"));
+        assert!(is_host_allowed("https://build.ci.internal/hook"));
         assert!(!is_host_allowed("https://notinternal.com/hook"));
         assert!(!is_host_allowed("https://evil.internal.attacker.com/hook"));
         std::env::remove_var("RADAR_ALLOWED_HOSTS");

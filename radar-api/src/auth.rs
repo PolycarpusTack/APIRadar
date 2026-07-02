@@ -1,3 +1,5 @@
+use crate::errors::ApiError;
+use axum::http::header::{LOCATION, SET_COOKIE};
 use axum::{
     extract::{Query, Request, State},
     http::StatusCode,
@@ -5,12 +7,10 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use axum::http::header::{LOCATION, SET_COOKIE};
 use chrono::{Duration, Utc};
 use serde_json::json;
 use std::collections::HashMap;
 use uuid::Uuid;
-use crate::errors::ApiError;
 
 // ---------------------------------------------------------------------------
 // D-4: JWT claims (HS256) for org-scoped tokens
@@ -56,9 +56,14 @@ impl OidcConfig {
         let client_secret = std::env::var("RADAR_OIDC_CLIENT_SECRET").ok()?;
         let redirect_uri = std::env::var("RADAR_OIDC_REDIRECT_URI")
             .unwrap_or_else(|_| "http://localhost:8080/auth/callback".to_string());
-        let org_claim = std::env::var("RADAR_OIDC_ORG_CLAIM")
-            .unwrap_or_else(|_| "hd".to_string());
-        Some(OidcConfig { provider_url, client_id, client_secret, redirect_uri, org_claim })
+        let org_claim = std::env::var("RADAR_OIDC_ORG_CLAIM").unwrap_or_else(|_| "hd".to_string());
+        Some(OidcConfig {
+            provider_url,
+            client_id,
+            client_secret,
+            redirect_uri,
+            org_claim,
+        })
     }
 }
 
@@ -104,13 +109,23 @@ struct OidcState {
 /// Sign a JwtClaims struct into an HS256 JWT string.
 pub(crate) fn sign_jwt(claims: &JwtClaims, secret: &str) -> Option<String> {
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-    encode(&Header::new(Algorithm::HS256), claims, &EncodingKey::from_secret(secret.as_bytes())).ok()
+    encode(
+        &Header::new(Algorithm::HS256),
+        claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .ok()
 }
 
 /// Sign an OidcState into an HS256 JWT string.
 fn sign_state(state: &OidcState, secret: &str) -> Option<String> {
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-    encode(&Header::new(Algorithm::HS256), state, &EncodingKey::from_secret(secret.as_bytes())).ok()
+    encode(
+        &Header::new(Algorithm::HS256),
+        state,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .ok()
 }
 
 /// Validate an OidcState JWT and return the nonce if valid.
@@ -119,7 +134,9 @@ fn validate_state(token: &str, secret: &str) -> Option<String> {
     let key = DecodingKey::from_secret(secret.as_bytes());
     let mut v = Validation::new(Algorithm::HS256);
     v.validate_exp = true;
-    decode::<OidcState>(token, &key, &v).ok().map(|d| d.claims.nonce)
+    decode::<OidcState>(token, &key, &v)
+        .ok()
+        .map(|d| d.claims.nonce)
 }
 
 async fn fetch_discovery(provider_url: &str) -> anyhow::Result<OidcDiscovery> {
@@ -131,7 +148,9 @@ async fn fetch_discovery(provider_url: &str) -> anyhow::Result<OidcDiscovery> {
 pub(crate) fn parse_cookie(header: &str, name: &str) -> Option<String> {
     let prefix = format!("{name}=");
     header.split(';').find_map(|part| {
-        part.trim().strip_prefix(&prefix).map(|v| v.trim().to_string())
+        part.trim()
+            .strip_prefix(&prefix)
+            .map(|v| v.trim().to_string())
     })
 }
 
@@ -147,21 +166,34 @@ fn urlencoding_encode(s: &str) -> String {
     utf8_percent_encode(s, UNRESERVED).to_string()
 }
 
-
 /// GET /auth/login — redirect to OIDC provider authorization endpoint.
 pub(crate) async fn oidc_login() -> Response {
     let Some(cfg) = OidcConfig::from_env() else {
         return (StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error": "OIDC not configured — set RADAR_OIDC_PROVIDER_URL, RADAR_OIDC_CLIENT_ID, RADAR_OIDC_CLIENT_SECRET"}))).into_response();
     };
-    let jwt_secret = match std::env::var("RADAR_JWT_SECRET").ok().filter(|s| !s.is_empty()) {
+    let jwt_secret = match std::env::var("RADAR_JWT_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         Some(s) => s,
-        None => return (StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "RADAR_JWT_SECRET must be set to use OIDC login"}))).into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "RADAR_JWT_SECRET must be set to use OIDC login"})),
+            )
+                .into_response()
+        }
     };
     let disc = match fetch_discovery(&cfg.provider_url).await {
         Ok(d) => d,
-        Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("OIDC discovery failed: {e}")}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("OIDC discovery failed: {e}")})),
+            )
+                .into_response()
+        }
     };
     let nonce = Uuid::new_v4().to_string();
     let state_claims = OidcState {
@@ -170,7 +202,13 @@ pub(crate) async fn oidc_login() -> Response {
     };
     let state_token = match sign_state(&state_claims, &jwt_secret) {
         Some(t) => t,
-        None => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "state signing failed"}))).into_response(),
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "state signing failed"})),
+            )
+                .into_response()
+        }
     };
     let auth_url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope=openid+email+profile&state={}",
@@ -179,42 +217,80 @@ pub(crate) async fn oidc_login() -> Response {
         urlencoding_encode(&cfg.redirect_uri),
         urlencoding_encode(&state_token),
     );
-    let state_cookie = format!(
-        "oidc_state={state_token}; HttpOnly; SameSite=Lax; Max-Age=600; Path=/"
-    );
+    let state_cookie =
+        format!("oidc_state={state_token}; HttpOnly; SameSite=Lax; Max-Age=600; Path=/");
     (
         StatusCode::FOUND,
         [(LOCATION, auth_url), (SET_COOKIE, state_cookie)],
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// GET /auth/callback?code=...&state=... — exchange code, issue session cookie.
-pub(crate) async fn oidc_callback(Query(params): Query<HashMap<String, String>>, req: Request) -> Response {
+pub(crate) async fn oidc_callback(
+    Query(params): Query<HashMap<String, String>>,
+    req: Request,
+) -> Response {
     let Some(cfg) = OidcConfig::from_env() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "OIDC not configured"}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "OIDC not configured"})),
+        )
+            .into_response();
     };
-    let jwt_secret = match std::env::var("RADAR_JWT_SECRET").ok().filter(|s| !s.is_empty()) {
+    let jwt_secret = match std::env::var("RADAR_JWT_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         Some(s) => s,
-        None => return (StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "RADAR_JWT_SECRET must be set to use OIDC"}))).into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "RADAR_JWT_SECRET must be set to use OIDC"})),
+            )
+                .into_response()
+        }
     };
 
     // Verify CSRF state
     let state_param = params.get("state").cloned().unwrap_or_default();
-    let cookie_header = req.headers().get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let cookie_header = req
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let state_cookie_val = parse_cookie(&cookie_header, "oidc_state");
-    if state_cookie_val.as_deref() != Some(state_param.as_str()) || validate_state(&state_param, &jwt_secret).is_none() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid or expired state"}))).into_response();
+    if state_cookie_val.as_deref() != Some(state_param.as_str())
+        || validate_state(&state_param, &jwt_secret).is_none()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid or expired state"})),
+        )
+            .into_response();
     }
 
     let code = match params.get("code") {
         Some(c) => c.clone(),
-        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing code"}))).into_response(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "missing code"})),
+            )
+                .into_response()
+        }
     };
 
     let disc = match fetch_discovery(&cfg.provider_url).await {
         Ok(d) => d,
-        Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("OIDC discovery failed: {e}")}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("OIDC discovery failed: {e}")})),
+            )
+                .into_response()
+        }
     };
 
     // Exchange code for tokens
@@ -233,14 +309,30 @@ pub(crate) async fn oidc_callback(Query(params): Query<HashMap<String, String>>,
     let token_resp: OidcTokenResponse = match token_resp {
         Ok(r) if r.status().is_success() => match r.json().await {
             Ok(t) => t,
-            Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("token parse failed: {e}")}))).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": format!("token parse failed: {e}")})),
+                )
+                    .into_response()
+            }
         },
         Ok(r) => {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
-            return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("token endpoint {status}: {body}")}))).into_response();
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("token endpoint {status}: {body}")})),
+            )
+                .into_response();
         }
-        Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("token request failed: {e}")}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("token request failed: {e}")})),
+            )
+                .into_response()
+        }
     };
 
     // Fetch user info
@@ -259,10 +351,17 @@ pub(crate) async fn oidc_callback(Query(params): Query<HashMap<String, String>>,
         // No userinfo endpoint — must verify id_token signature via JWKS before trusting
         // any claim. Per OIDC Core §3.1.3.7, skipping signature verification allows an
         // attacker to inject arbitrary org_id claims and bypass tenant isolation.
-        let id_token_str = match token_resp.id_token.as_deref().filter(|t| !t.is_empty()) {
-            Some(t) => t,
-            None => return (StatusCode::BAD_GATEWAY, Json(json!({"error": "provider returned no id_token and no userinfo endpoint"}))).into_response(),
-        };
+        let id_token_str =
+            match token_resp.id_token.as_deref().filter(|t| !t.is_empty()) {
+                Some(t) => t,
+                None => return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(
+                        json!({"error": "provider returned no id_token and no userinfo endpoint"}),
+                    ),
+                )
+                    .into_response(),
+            };
         let jwks_uri = match disc.jwks_uri.as_deref().filter(|u| !u.is_empty()) {
             Some(u) => u.to_string(),
             None => return (StatusCode::BAD_GATEWAY, Json(json!({"error": "provider has no userinfo_endpoint and no jwks_uri — cannot verify id_token"}))).into_response(),
@@ -270,27 +369,63 @@ pub(crate) async fn oidc_callback(Query(params): Query<HashMap<String, String>>,
 
         let header = match jsonwebtoken::decode_header(id_token_str) {
             Ok(h) => h,
-            Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("id_token header invalid: {e}")}))).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": format!("id_token header invalid: {e}")})),
+                )
+                    .into_response()
+            }
         };
 
         let jwks: jsonwebtoken::jwk::JwkSet = match client.get(&jwks_uri).send().await {
             Ok(r) if r.status().is_success() => match r.json().await {
                 Ok(j) => j,
-                Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("jwks parse failed: {e}")}))).into_response(),
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({"error": format!("jwks parse failed: {e}")})),
+                    )
+                        .into_response()
+                }
             },
-            Ok(r) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("jwks fetch returned HTTP {}", r.status())}))).into_response(),
-            Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("jwks fetch failed: {e}")}))).into_response(),
+            Ok(r) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": format!("jwks fetch returned HTTP {}", r.status())})),
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": format!("jwks fetch failed: {e}")})),
+                )
+                    .into_response()
+            }
         };
 
         let kid = header.kid.as_deref().unwrap_or("");
         let jwk = match jwks.find(kid) {
             Some(j) => j,
-            None => return (StatusCode::BAD_GATEWAY, Json(json!({"error": "no JWK matching id_token kid"}))).into_response(),
+            None => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": "no JWK matching id_token kid"})),
+                )
+                    .into_response()
+            }
         };
 
         let decoding_key = match jsonwebtoken::DecodingKey::from_jwk(jwk) {
             Ok(k) => k,
-            Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("jwk key load failed: {e}")}))).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": format!("jwk key load failed: {e}")})),
+                )
+                    .into_response()
+            }
         };
 
         let mut validation = jsonwebtoken::Validation::new(header.alg);
@@ -299,7 +434,13 @@ pub(crate) async fn oidc_callback(Query(params): Query<HashMap<String, String>>,
 
         match jsonwebtoken::decode::<OidcUserInfo>(id_token_str, &decoding_key, &validation) {
             Ok(data) => data.claims,
-            Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("id_token verification failed: {e}")}))).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": format!("id_token verification failed: {e}")})),
+                )
+                    .into_response()
+            }
         }
     };
 
@@ -310,7 +451,11 @@ pub(crate) async fn oidc_callback(Query(params): Query<HashMap<String, String>>,
         userinfo.sub.clone()
     };
 
-    let sub = userinfo.email.as_deref().unwrap_or(&userinfo.sub).to_string();
+    let sub = userinfo
+        .email
+        .as_deref()
+        .unwrap_or(&userinfo.sub)
+        .to_string();
     let session_claims = JwtClaims {
         sub,
         org_id,
@@ -318,10 +463,20 @@ pub(crate) async fn oidc_callback(Query(params): Query<HashMap<String, String>>,
     };
     let session_token = match sign_jwt(&session_claims, &jwt_secret) {
         Some(t) => t,
-        None => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "session signing failed"}))).into_response(),
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "session signing failed"})),
+            )
+                .into_response()
+        }
     };
 
-    let secure_flag = if cfg.redirect_uri.starts_with("https") { "; Secure" } else { "" };
+    let secure_flag = if cfg.redirect_uri.starts_with("https") {
+        "; Secure"
+    } else {
+        ""
+    };
     let session_cookie = format!(
         "radar_session={session_token}; HttpOnly; SameSite=Lax; Max-Age=86400; Path=/{secure_flag}"
     );
@@ -343,16 +498,33 @@ pub(crate) async fn oidc_me(req: Request) -> Response {
         .extensions()
         .get::<JwtSecretExt>()
         .and_then(|s| s.0.clone())
-        .or_else(|| std::env::var("RADAR_JWT_SECRET").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("RADAR_JWT_SECRET")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_default();
     if jwt_secret.is_empty() {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "auth not configured"}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "auth not configured"})),
+        )
+            .into_response();
     }
-    let cookie_header = req.headers().get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let cookie_header = req
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let token = parse_cookie(&cookie_header, "radar_session");
     match token.and_then(|t| validate_jwt(&t, &jwt_secret)) {
         Some(claims) => Json(json!({"sub": claims.sub, "org_id": claims.org_id})).into_response(),
-        None => (StatusCode::UNAUTHORIZED, Json(json!({"error": "not authenticated"}))).into_response(),
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "not authenticated"})),
+        )
+            .into_response(),
     }
 }
 
@@ -360,7 +532,12 @@ pub(crate) async fn oidc_me(req: Request) -> Response {
 pub(crate) async fn oidc_logout() -> Response {
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(LOCATION, "/app/login".parse().unwrap());
-    headers.insert(SET_COOKIE, "radar_session=; HttpOnly; SameSite=Lax; Max-Age=0; Path=/".parse().unwrap());
+    headers.insert(
+        SET_COOKIE,
+        "radar_session=; HttpOnly; SameSite=Lax; Max-Age=0; Path=/"
+            .parse()
+            .unwrap(),
+    );
     (StatusCode::FOUND, headers).into_response()
 }
 
@@ -395,7 +572,11 @@ pub(crate) async fn auth_middleware(
         .extensions()
         .get::<JwtSecretExt>()
         .and_then(|s| s.0.clone())
-        .or_else(|| std::env::var("RADAR_JWT_SECRET").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("RADAR_JWT_SECRET")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_default();
     if !jwt_secret.is_empty() {
         // D-4: Also accept session cookie as auth (set by OIDC callback).
@@ -429,7 +610,11 @@ pub(crate) async fn auth_middleware(
     let service_token = std::env::var("RADAR_SERVICE_TOKEN").unwrap_or_default();
     if service_token.is_empty() {
         // require_auth is set at build time (see build_router) to avoid request-time env reads.
-        let require_auth = req.extensions().get::<RequireAuth>().map(|r| r.0).unwrap_or(false);
+        let require_auth = req
+            .extensions()
+            .get::<RequireAuth>()
+            .map(|r| r.0)
+            .unwrap_or(false);
         if require_auth {
             drop(pool);
             return ApiError::Unauthorized.into_response();
@@ -458,7 +643,8 @@ pub(crate) fn assert_org_access(
     caller_org_id: &str,
     resource_desc: &str,
 ) -> Result<(), ApiError> {
-    if !caller_org_id.is_empty() && !resource_org_id.is_empty() && resource_org_id != caller_org_id {
+    if !caller_org_id.is_empty() && !resource_org_id.is_empty() && resource_org_id != caller_org_id
+    {
         Err(ApiError::Forbidden(format!(
             "{resource_desc} belongs to another org"
         )))

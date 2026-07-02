@@ -71,7 +71,11 @@ fn override_version() -> Option<String> {
     let path = dir.join("scalar_override.version");
     let v = std::fs::read_to_string(path).ok()?;
     let trimmed = v.trim().to_string();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -242,11 +246,7 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
 
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
@@ -270,7 +270,12 @@ fn is_newer(candidate: &str, current: &str) -> bool {
             parts[0].parse().ok()?,
             parts[1].parse().ok()?,
             // Strip any pre-release suffix (e.g. "5-alpha.1" → "5")
-            parts[2].split('-').next().unwrap_or(parts[2]).parse().ok()?,
+            parts[2]
+                .split('-')
+                .next()
+                .unwrap_or(parts[2])
+                .parse()
+                .ok()?,
         ))
     }
     match (parse(candidate), parse(current)) {

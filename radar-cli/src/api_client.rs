@@ -305,7 +305,11 @@ pub async fn post_collection_evidence(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_else(|_| "<unreadable>".into());
-        bail!("API error posting collection evidence: {} — {}", status, text);
+        bail!(
+            "API error posting collection evidence: {} — {}",
+            status,
+            text
+        );
     }
 
     let json: serde_json::Value = resp
@@ -408,7 +412,9 @@ pub async fn create_evolution_rule(
         let text = resp.text().await.unwrap_or_else(|_| "<unreadable>".into());
         bail!("API error creating rule: {status} — {text}");
     }
-    resp.json().await.context("failed to parse create rule response")
+    resp.json()
+        .await
+        .context("failed to parse create rule response")
 }
 
 pub async fn list_evolution_rules(

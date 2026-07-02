@@ -65,9 +65,9 @@ fn blast_radius_fixture() -> BlastRadiusResponse {
 #[test]
 fn demo_field_removed_is_breaking() {
     let changes = diff_v1_v2();
-    let phone_change = changes.iter().find(|c| {
-        c.path.contains("phone") && c.kind == ChangeKind::FieldRemoved
-    });
+    let phone_change = changes
+        .iter()
+        .find(|c| c.path.contains("phone") && c.kind == ChangeKind::FieldRemoved);
     assert!(
         phone_change.is_some(),
         "expected a FieldRemoved change for the phone field; got: {changes:?}"
@@ -110,26 +110,61 @@ fn demo_mobile_gateway_has_static_call_site_evidence() {
 fn demo_pr_comment_contains_evidence_and_verdict() {
     let changes = diff_v1_v2();
     let br = blast_radius_fixture();
-    let comment = build_comment_with_suites(&changes, "v1", "v2", Some(&br), "block", "closed", &[]);
+    let comment =
+        build_comment_with_suites(&changes, "v1", "v2", Some(&br), "block", "closed", &[]);
 
-    assert!(comment.contains("BREAKING"), "should contain BREAKING badge");
+    assert!(
+        comment.contains("BREAKING"),
+        "should contain BREAKING badge"
+    );
     assert!(comment.contains("phone"), "should reference phone field");
-    assert!(comment.contains("billing-svc"), "should mention billing-svc");
-    assert!(comment.contains("mobile-gateway"), "should mention mobile-gateway");
-    assert!(comment.contains("runtime_usage"), "should show runtime_usage source");
-    assert!(comment.contains("static_call_site"), "should show static_call_site source");
-    assert!(comment.contains("BLOCKED"), "should show BLOCKED verdict for fail_mode=closed");
+    assert!(
+        comment.contains("billing-svc"),
+        "should mention billing-svc"
+    );
+    assert!(
+        comment.contains("mobile-gateway"),
+        "should mention mobile-gateway"
+    );
+    assert!(
+        comment.contains("runtime_usage"),
+        "should show runtime_usage source"
+    );
+    assert!(
+        comment.contains("static_call_site"),
+        "should show static_call_site source"
+    );
+    assert!(
+        comment.contains("BLOCKED"),
+        "should show BLOCKED verdict for fail_mode=closed"
+    );
 }
 
 #[test]
 fn demo_pr_comment_structural_sections() {
     let changes = diff_v1_v2();
     let br = blast_radius_fixture();
-    let comment = build_comment_with_suites(&changes, "v1", "v2", Some(&br), "block", "closed", &[]);
+    let comment =
+        build_comment_with_suites(&changes, "v1", "v2", Some(&br), "block", "closed", &[]);
 
-    assert!(comment.contains("Radar Monitor"), "should have Radar Monitor header");
-    assert!(comment.contains("| Severity |"), "should have changes table");
-    assert!(comment.contains("### Evidence"), "should have Evidence section");
-    assert!(comment.contains("### Policy Verdict"), "should have Policy Verdict section");
-    assert!(comment.contains("fail_mode: closed"), "should show fail_mode");
+    assert!(
+        comment.contains("Radar Monitor"),
+        "should have Radar Monitor header"
+    );
+    assert!(
+        comment.contains("| Severity |"),
+        "should have changes table"
+    );
+    assert!(
+        comment.contains("### Evidence"),
+        "should have Evidence section"
+    );
+    assert!(
+        comment.contains("### Policy Verdict"),
+        "should have Policy Verdict section"
+    );
+    assert!(
+        comment.contains("fail_mode: closed"),
+        "should show fail_mode"
+    );
 }

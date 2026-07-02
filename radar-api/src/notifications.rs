@@ -1,9 +1,8 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
 use chrono::{Datelike, Timelike, Utc};
 use lettre::{
-    message::header::ContentType,
-    transport::smtp::authentication::Credentials,
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    message::header::ContentType, transport::smtp::authentication::Credentials, AsyncSmtpTransport,
+    AsyncTransport, Message, Tokio1Executor,
 };
 use serde_json::json;
 use sqlx::Row;
@@ -24,15 +23,16 @@ struct SmtpConfig {
 }
 
 fn smtp_config() -> Option<SmtpConfig> {
-    let host = std::env::var("RADAR_SMTP_HOST").ok().filter(|s| !s.is_empty())?;
+    let host = std::env::var("RADAR_SMTP_HOST")
+        .ok()
+        .filter(|s| !s.is_empty())?;
     let port: u16 = std::env::var("RADAR_SMTP_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(587);
     let user = std::env::var("RADAR_SMTP_USER").unwrap_or_default();
     let password = std::env::var("RADAR_SMTP_PASSWORD").unwrap_or_default();
-    let from = std::env::var("RADAR_SMTP_FROM")
-        .unwrap_or_else(|_| format!("noreply@{host}"));
+    let from = std::env::var("RADAR_SMTP_FROM").unwrap_or_else(|_| format!("noreply@{host}"));
     let recipients_raw = std::env::var("RADAR_DIGEST_RECIPIENTS").unwrap_or_default();
     let recipients: Vec<String> = recipients_raw
         .split(',')
@@ -44,7 +44,14 @@ fn smtp_config() -> Option<SmtpConfig> {
         return None;
     }
 
-    Some(SmtpConfig { host, port, user, password, from, recipients })
+    Some(SmtpConfig {
+        host,
+        port,
+        user,
+        password,
+        from,
+        recipients,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -117,7 +124,11 @@ async fn aggregate_digest(pool: &sqlx::AnyPool, org_id: &str) -> anyhow::Result<
         })
         .collect();
 
-    Ok(DigestData { total_diffs, breaking_diffs, top_services })
+    Ok(DigestData {
+        total_diffs,
+        breaking_diffs,
+        top_services,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -184,9 +195,9 @@ pub(crate) async fn preview_digest(
     org: Option<axum::extract::Extension<crate::auth::JwtClaims>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
-    let data = aggregate_digest(&pool, &org_id).await.map_err(|_| {
-        ApiError::BadRequest("failed to aggregate digest data".into())
-    })?;
+    let data = aggregate_digest(&pool, &org_id)
+        .await
+        .map_err(|_| ApiError::BadRequest("failed to aggregate digest data".into()))?;
 
     let html = render_digest_html(&data);
 
@@ -211,14 +222,12 @@ pub(crate) fn start_digest_scheduler(pool: sqlx::AnyPool) {
             if now.weekday() == chrono::Weekday::Mon && now.hour() == 8 {
                 // ISO year-week key prevents duplicate sends across restarts.
                 let week_key = format!("digest_sent_{}", now.format("%G-W%V"));
-                let already_sent = sqlx::query(
-                    "SELECT 1 FROM settings WHERE key = ?",
-                )
-                .bind(&week_key)
-                .fetch_optional(&pool)
-                .await
-                .map(|r| r.is_some())
-                .unwrap_or(false);
+                let already_sent = sqlx::query("SELECT 1 FROM settings WHERE key = ?")
+                    .bind(&week_key)
+                    .fetch_optional(&pool)
+                    .await
+                    .map(|r| r.is_some())
+                    .unwrap_or(false);
 
                 if already_sent {
                     tracing::info!("digest: already sent for {week_key}, skipping");
@@ -263,7 +272,10 @@ async fn send_digest(pool: &sqlx::AnyPool) {
     let mailer = match AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.host) {
         Ok(b) => b
             .port(config.port)
-            .credentials(Credentials::new(config.user.clone(), config.password.clone()))
+            .credentials(Credentials::new(
+                config.user.clone(),
+                config.password.clone(),
+            ))
             .build(),
         Err(e) => {
             tracing::warn!("digest: SMTP relay setup failed: {e}");
@@ -391,7 +403,10 @@ mod tests {
         DigestData {
             total_diffs: 42,
             breaking_diffs: 7,
-            top_services: services.into_iter().map(|(n, c)| (n.to_string(), c)).collect(),
+            top_services: services
+                .into_iter()
+                .map(|(n, c)| (n.to_string(), c))
+                .collect(),
         }
     }
 

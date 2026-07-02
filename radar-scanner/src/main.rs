@@ -22,7 +22,10 @@ async fn main() -> Result<()> {
         let records = radar_scanner::scan_directory(path);
         info!("found {} call site records", records.len());
         for rec in &records {
-            info!("  {}:{} → {}", rec.file_path, rec.line_number, rec.field_path);
+            info!(
+                "  {}:{} → {}",
+                rec.file_path, rec.line_number, rec.field_path
+            );
         }
     } else {
         loop {

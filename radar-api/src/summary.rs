@@ -1,13 +1,8 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
-use chrono::{Duration, Utc};
-use serde_json::json;
 use crate::auth::JwtClaims;
 use crate::errors::ApiError;
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use chrono::{Duration, Utc};
+use serde_json::json;
 
 // GET /v1/summary — KPI stats for the dashboard home page
 pub(crate) async fn get_summary(
@@ -62,13 +57,12 @@ pub(crate) async fn get_summary(
     .await?;
     let consumers_at_risk: i64 = consumers_row.try_get("cnt").unwrap_or(0);
 
-    let services_row = sqlx::query(
-        "SELECT COUNT(*) AS cnt FROM service WHERE (? = '' OR org_id = ?)",
-    )
-    .bind(&org_id)
-    .bind(&org_id)
-    .fetch_one(&pool)
-    .await?;
+    let services_row =
+        sqlx::query("SELECT COUNT(*) AS cnt FROM service WHERE (? = '' OR org_id = ?)")
+            .bind(&org_id)
+            .bind(&org_id)
+            .fetch_one(&pool)
+            .await?;
     let services_count: i64 = services_row.try_get("cnt").unwrap_or(0);
 
     Ok((

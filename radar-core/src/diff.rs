@@ -149,9 +149,7 @@ fn is_request_context(prefix: &str) -> bool {
 /// Collect all (method + path) → Operation pairs from a spec, keyed by the
 /// normalised string "METHOD /path" (template variables collapsed), with the
 /// original human-readable "METHOD /path" retained as the display value.
-fn collect_operations(
-    spec: &OpenAPI,
-) -> IndexMap<String, (String, openapiv3::Operation)> {
+fn collect_operations(spec: &OpenAPI) -> IndexMap<String, (String, openapiv3::Operation)> {
     let mut map = IndexMap::new();
 
     for (path_str, path_ref) in spec.paths.paths.iter() {
@@ -232,9 +230,7 @@ fn param_key(p: &Parameter) -> ParamKey {
         Parameter::Query { parameter_data, .. } => {
             (parameter_data.name.clone(), "query".to_string())
         }
-        Parameter::Path { parameter_data, .. } => {
-            (parameter_data.name.clone(), "path".to_string())
-        }
+        Parameter::Path { parameter_data, .. } => (parameter_data.name.clone(), "path".to_string()),
         Parameter::Header { parameter_data, .. } => {
             (parameter_data.name.clone(), "header".to_string())
         }
@@ -306,12 +302,18 @@ fn diff_parameters(
             let (severity, description) = if param_required(base_p) {
                 (
                     Severity::Breaking,
-                    format!("Required {} parameter '{}' was removed", key.location, key.name),
+                    format!(
+                        "Required {} parameter '{}' was removed",
+                        key.location, key.name
+                    ),
                 )
             } else {
                 (
                     Severity::NonBreakingRisky,
-                    format!("Optional {} parameter '{}' was removed", key.location, key.name),
+                    format!(
+                        "Optional {} parameter '{}' was removed",
+                        key.location, key.name
+                    ),
                 )
             };
             changes.push(DiffChange {
@@ -444,7 +446,11 @@ fn diff_request_body(
             });
         }
         (None, Some(head)) => {
-            let severity = if head.required { Severity::Breaking } else { Severity::Safe };
+            let severity = if head.required {
+                Severity::Breaking
+            } else {
+                Severity::Safe
+            };
             changes.push(DiffChange {
                 path: format!("{} \u{2192} request_body", op_path),
                 kind: ChangeKind::RequestBodyAdded,
@@ -464,18 +470,14 @@ fn diff_request_body(
                     path: format!("{} \u{2192} request_body", op_path),
                     kind: ChangeKind::RequiredChanged,
                     severity: Severity::Breaking,
-                    description: Some(
-                        "Request body changed from optional to required".to_string(),
-                    ),
+                    description: Some("Request body changed from optional to required".to_string()),
                 });
             } else if base.required && !head.required {
                 changes.push(DiffChange {
                     path: format!("{} \u{2192} request_body", op_path),
                     kind: ChangeKind::RequiredChanged,
                     severity: Severity::Safe,
-                    description: Some(
-                        "Request body changed from required to optional".to_string(),
-                    ),
+                    description: Some("Request body changed from required to optional".to_string()),
                 });
             }
 
@@ -672,7 +674,13 @@ fn diff_responses(
                 };
 
                 diff_schema_properties(
-                    op_path, "response", base_schema, head_schema, base_spec, head_spec, changes,
+                    op_path,
+                    "response",
+                    base_schema,
+                    head_schema,
+                    base_spec,
+                    head_spec,
+                    changes,
                 );
             }
         }
@@ -724,8 +732,16 @@ fn diff_schema_properties(
             description: Some(format!(
                 "'{}' changed from {} to {}",
                 prefix,
-                if base_nullable { "nullable" } else { "non-nullable" },
-                if head_nullable { "nullable" } else { "non-nullable" },
+                if base_nullable {
+                    "nullable"
+                } else {
+                    "non-nullable"
+                },
+                if head_nullable {
+                    "nullable"
+                } else {
+                    "non-nullable"
+                },
             )),
         });
     }
@@ -842,7 +858,11 @@ fn diff_schema_properties(
                 },
                 description: Some(format!(
                     "{} '{}' changed from optional to required",
-                    if request_ctx { "Request field" } else { "Response field" },
+                    if request_ctx {
+                        "Request field"
+                    } else {
+                        "Response field"
+                    },
                     prop_name
                 )),
             });
@@ -858,7 +878,11 @@ fn diff_schema_properties(
                 },
                 description: Some(format!(
                     "{} '{}' changed from required to optional",
-                    if request_ctx { "Request field" } else { "Response field" },
+                    if request_ctx {
+                        "Request field"
+                    } else {
+                        "Response field"
+                    },
                     prop_name
                 )),
             });
@@ -922,9 +946,12 @@ fn extract_enum_values(schema: &Schema) -> Vec<String> {
             .iter()
             .filter_map(|v| v.as_deref().map(String::from))
             .collect(),
-        SchemaKind::Type(Type::Integer(i)) => {
-            i.enumeration.iter().filter_map(|v| *v).map(|v| v.to_string()).collect()
-        }
+        SchemaKind::Type(Type::Integer(i)) => i
+            .enumeration
+            .iter()
+            .filter_map(|v| *v)
+            .map(|v| v.to_string())
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -1024,7 +1051,12 @@ paths: {}
         let head = parse(head_yaml);
         let changes = diff_openapi(&base, &head);
 
-        assert_eq!(changes.len(), 1, "Expected exactly 1 change, got: {:?}", changes);
+        assert_eq!(
+            changes.len(),
+            1,
+            "Expected exactly 1 change, got: {:?}",
+            changes
+        );
         let c = &changes[0];
         assert_eq!(c.kind, ChangeKind::OperationRemoved);
         assert_eq!(c.severity, Severity::Breaking);
@@ -1059,7 +1091,12 @@ paths:
         let head = parse(head_yaml);
         let changes = diff_openapi(&base, &head);
 
-        assert_eq!(changes.len(), 1, "Expected exactly 1 change, got: {:?}", changes);
+        assert_eq!(
+            changes.len(),
+            1,
+            "Expected exactly 1 change, got: {:?}",
+            changes
+        );
         let c = &changes[0];
         assert_eq!(c.kind, ChangeKind::OperationAdded);
         assert_eq!(c.severity, Severity::Safe);
@@ -1239,9 +1276,7 @@ paths:
 
         let required_changed: Vec<_> = changes
             .iter()
-            .filter(|c| {
-                c.kind == ChangeKind::RequiredChanged && c.severity == Severity::Breaking
-            })
+            .filter(|c| c.kind == ChangeKind::RequiredChanged && c.severity == Severity::Breaking)
             .collect();
         assert_eq!(
             required_changed.len(),
@@ -1298,7 +1333,12 @@ paths:
             .iter()
             .filter(|c| c.kind == ChangeKind::ParameterRemoved && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(removed.len(), 1, "Expected 1 ParameterRemoved/Breaking, got: {:?}", changes);
+        assert_eq!(
+            removed.len(),
+            1,
+            "Expected 1 ParameterRemoved/Breaking, got: {:?}",
+            changes
+        );
         assert!(removed[0].path.contains("filter"));
     }
 
@@ -1343,8 +1383,7 @@ paths:
         let removed: Vec<_> = changes
             .iter()
             .filter(|c| {
-                c.kind == ChangeKind::ParameterRemoved
-                    && c.severity == Severity::NonBreakingRisky
+                c.kind == ChangeKind::ParameterRemoved && c.severity == Severity::NonBreakingRisky
             })
             .collect();
         assert_eq!(
@@ -1394,7 +1433,12 @@ paths:
             .iter()
             .filter(|c| c.kind == ChangeKind::ResponseRemoved && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(removed.len(), 1, "Expected 1 ResponseRemoved/Breaking, got: {:?}", changes);
+        assert_eq!(
+            removed.len(),
+            1,
+            "Expected 1 ResponseRemoved/Breaking, got: {:?}",
+            changes
+        );
         assert!(
             removed[0].path.contains("201"),
             "Expected path to mention '201', got: {}",
@@ -1444,7 +1488,12 @@ paths:
             .iter()
             .filter(|c| c.kind == ChangeKind::RequestBodyAdded && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(added.len(), 1, "Expected 1 RequestBodyAdded/Breaking, got: {:?}", changes);
+        assert_eq!(
+            added.len(),
+            1,
+            "Expected 1 RequestBodyAdded/Breaking, got: {:?}",
+            changes
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1489,7 +1538,12 @@ paths:
             .iter()
             .filter(|c| c.kind == ChangeKind::RequestBodyAdded && c.severity == Severity::Safe)
             .collect();
-        assert_eq!(added.len(), 1, "Expected 1 RequestBodyAdded/Safe, got: {:?}", changes);
+        assert_eq!(
+            added.len(),
+            1,
+            "Expected 1 RequestBodyAdded/Safe, got: {:?}",
+            changes
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1539,7 +1593,12 @@ paths:
                 c.kind == ChangeKind::RequestBodyRemoved && c.severity == Severity::Breaking
             })
             .collect();
-        assert_eq!(removed.len(), 1, "Expected 1 RequestBodyRemoved/Breaking, got: {:?}", changes);
+        assert_eq!(
+            removed.len(),
+            1,
+            "Expected 1 RequestBodyRemoved/Breaking, got: {:?}",
+            changes
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1598,7 +1657,12 @@ paths:
             .iter()
             .filter(|c| c.kind == ChangeKind::FieldRemoved && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(removed.len(), 1, "Expected 1 FieldRemoved/Breaking, got: {:?}", changes);
+        assert_eq!(
+            removed.len(),
+            1,
+            "Expected 1 FieldRemoved/Breaking, got: {:?}",
+            changes
+        );
         assert!(
             removed[0].path.contains("tags"),
             "Expected path to mention 'tags', got: {}",
@@ -1658,7 +1722,12 @@ paths:
             .iter()
             .filter(|c| c.kind == ChangeKind::EnumValueRemoved && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(removed.len(), 1, "Expected 1 EnumValueRemoved/Breaking, got: {:?}", changes);
+        assert_eq!(
+            removed.len(),
+            1,
+            "Expected 1 EnumValueRemoved/Breaking, got: {:?}",
+            changes
+        );
         assert!(
             removed[0]
                 .description
@@ -1724,7 +1793,12 @@ paths:
                 c.kind == ChangeKind::EnumValueAdded && c.severity == Severity::NonBreakingRisky
             })
             .collect();
-        assert_eq!(added.len(), 1, "Expected 1 EnumValueAdded/NonBreakingRisky, got: {:?}", changes);
+        assert_eq!(
+            added.len(),
+            1,
+            "Expected 1 EnumValueAdded/NonBreakingRisky, got: {:?}",
+            changes
+        );
         assert!(
             added[0]
                 .description
@@ -1849,7 +1923,12 @@ paths:
             .iter()
             .filter(|c| c.kind == ChangeKind::NullabilityChanged && c.severity == Severity::Safe)
             .collect();
-        assert_eq!(changed.len(), 1, "Expected 1 NullabilityChanged/Safe, got: {:?}", changes);
+        assert_eq!(
+            changed.len(),
+            1,
+            "Expected 1 NullabilityChanged/Safe, got: {:?}",
+            changes
+        );
         assert!(changed[0].path.contains("nickname"));
     }
 
@@ -1907,7 +1986,12 @@ paths:
             .iter()
             .filter(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(type_changed.len(), 1, "Expected 1 TypeChanged/Breaking, got: {:?}", changes);
+        assert_eq!(
+            type_changed.len(),
+            1,
+            "Expected 1 TypeChanged/Breaking, got: {:?}",
+            changes
+        );
         assert!(type_changed[0].path.contains("ids"));
     }
 
@@ -1975,7 +2059,12 @@ components:
             .iter()
             .filter(|c| c.kind == ChangeKind::FieldRemoved && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(removed.len(), 1, "Expected 1 FieldRemoved through $ref, got: {:?}", changes);
+        assert_eq!(
+            removed.len(),
+            1,
+            "Expected 1 FieldRemoved through $ref, got: {:?}",
+            changes
+        );
         assert!(
             removed[0].path.contains("phone"),
             "Expected path to mention 'phone', got: {}",
@@ -2233,7 +2322,12 @@ paths:
             .iter()
             .filter(|c| c.kind == ChangeKind::RequiredChanged && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(breaking.len(), 1, "param optional→required must be Breaking, got: {:?}", changes);
+        assert_eq!(
+            breaking.len(),
+            1,
+            "param optional→required must be Breaking, got: {:?}",
+            changes
+        );
         assert!(breaking[0].path.contains("filter"));
     }
 
@@ -2275,7 +2369,12 @@ paths:
             .iter()
             .filter(|c| c.kind == ChangeKind::RequiredChanged && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(breaking.len(), 1, "requestBody.required flip must be Breaking, got: {:?}", changes);
+        assert_eq!(
+            breaking.len(),
+            1,
+            "requestBody.required flip must be Breaking, got: {:?}",
+            changes
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2314,7 +2413,12 @@ paths:
             .iter()
             .filter(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(breaking.len(), 1, "dropping JSON response must be Breaking, got: {:?}", changes);
+        assert_eq!(
+            breaking.len(),
+            1,
+            "dropping JSON response must be Breaking, got: {:?}",
+            changes
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2381,7 +2485,12 @@ paths:
             .iter()
             .filter(|c| c.kind == ChangeKind::ParameterRemoved && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(removed.len(), 1, "path-level required param removal must be Breaking, got: {:?}", changes);
+        assert_eq!(
+            removed.len(),
+            1,
+            "path-level required param removal must be Breaking, got: {:?}",
+            changes
+        );
         assert!(removed[0].path.contains("tenant"));
     }
 }

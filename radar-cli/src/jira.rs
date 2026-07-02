@@ -29,10 +29,7 @@ pub async fn fetch_ticket(
     let body: serde_json::Value = resp.json().await?;
     let fields = &body["fields"];
 
-    let description = fields["description"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let description = fields["description"].as_str().unwrap_or("").to_string();
 
     Ok(JiraTicket {
         summary: fields["summary"].as_str().unwrap_or("").to_string(),

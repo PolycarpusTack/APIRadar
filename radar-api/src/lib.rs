@@ -1,47 +1,48 @@
-mod errors;
-mod auth;
-mod ai;
-pub(crate) mod utils;
-pub(crate) mod playground;
-pub(crate) mod settings;
-pub(crate) mod decisions;
 pub(crate) mod acknowledgements;
-pub(crate) mod catalog;
-pub(crate) mod evolution;
-pub(crate) mod services;
-pub(crate) mod consumers;
-pub(crate) mod sampling;
-pub(crate) mod diffs;
-pub(crate) mod ingestion;
+mod ai;
 pub(crate) mod ai_tests;
-pub(crate) mod release_notes;
-pub(crate) mod summary;
-pub(crate) mod webhooks;
-pub(crate) mod scans;
-pub(crate) mod notifications;
-pub(crate) mod csv_runner;
 pub(crate) mod audit;
+mod auth;
+pub(crate) mod catalog;
+pub(crate) mod consumers;
+pub(crate) mod csv_runner;
+pub(crate) mod decisions;
+pub(crate) mod diffs;
+mod errors;
+pub(crate) mod evolution;
+pub(crate) mod ingestion;
+pub(crate) mod notifications;
+pub(crate) mod playground;
 pub(crate) mod readiness;
+pub(crate) mod release_notes;
+pub(crate) mod sampling;
 pub(crate) mod scalar_update;
+pub(crate) mod scans;
+pub(crate) mod services;
+pub(crate) mod settings;
+pub(crate) mod summary;
+pub(crate) mod utils;
+pub(crate) mod webhooks;
 
-pub(crate) use errors::get_prometheus_handle;
-pub(crate) use auth::{
-    RequireAuth, JwtSecretExt,
-    auth_middleware,
-    oidc_login, oidc_callback, oidc_me, oidc_logout,
-};
-pub use settings::{purge_old_usage_events, expire_old_evidence};
-pub use csv_runner::purge_old_csv_runs;
-#[cfg(test)]
-pub(crate) use chrono::{Duration, Utc};
-#[cfg(test)]
-pub(crate) use serde_json::Value;
-#[cfg(test)]
-pub(crate) use utils::{apply_evolution_rules, field_in_deny_list, is_severity_downgrade, normalise_path, parse_codeowners, path_matches};
-#[cfg(test)]
-pub(crate) use auth::{JwtClaims, sign_jwt};
 #[cfg(test)]
 pub(crate) use ai_tests::templates_from_changes;
+pub(crate) use auth::{
+    auth_middleware, oidc_callback, oidc_login, oidc_logout, oidc_me, JwtSecretExt, RequireAuth,
+};
+#[cfg(test)]
+pub(crate) use auth::{sign_jwt, JwtClaims};
+#[cfg(test)]
+pub(crate) use chrono::{Duration, Utc};
+pub use csv_runner::purge_old_csv_runs;
+pub(crate) use errors::get_prometheus_handle;
+#[cfg(test)]
+pub(crate) use serde_json::Value;
+pub use settings::{expire_old_evidence, purge_old_usage_events};
+#[cfg(test)]
+pub(crate) use utils::{
+    apply_evolution_rules, field_in_deny_list, is_severity_downgrade, normalise_path,
+    parse_codeowners, path_matches,
+};
 
 use anyhow::Result;
 use axum::{
@@ -57,7 +58,12 @@ use serde_json::json;
 use sqlx::any::AnyPoolOptions;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tower_http::{cors::{AllowOrigin, Any, CorsLayer}, services::ServeDir, timeout::TimeoutLayer, trace::TraceLayer};
+use tower_http::{
+    cors::{AllowOrigin, Any, CorsLayer},
+    services::ServeDir,
+    timeout::TimeoutLayer,
+    trace::TraceLayer,
+};
 use tracing::info;
 use uuid::Uuid;
 
@@ -145,8 +151,6 @@ fn client_key(req: &Request, trust_proxy: bool) -> String {
     "unknown".to_string()
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Request-ID middleware
 // ---------------------------------------------------------------------------
@@ -207,9 +211,9 @@ pub fn resolve_db_url(db_url: &str) -> String {
     let s = abs.to_string_lossy().replace('\\', "/");
     // Unix absolute paths start with '/'; Windows drive letters do not.
     if s.starts_with('/') {
-        format!("sqlite://{s}")   // → sqlite:///unix/path
+        format!("sqlite://{s}") // → sqlite:///unix/path
     } else {
-        format!("sqlite:///{s}")  // → sqlite:///C:/win/path
+        format!("sqlite:///{s}") // → sqlite:///C:/win/path
     }
 }
 
@@ -277,7 +281,9 @@ pub async fn run(
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(false);
 
-    let jwt_secret = std::env::var("RADAR_JWT_SECRET").ok().filter(|s| !s.is_empty());
+    let jwt_secret = std::env::var("RADAR_JWT_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     let limiter = Arc::new(RateLimiter::new(rate_limit_per_minute));
 
@@ -334,72 +340,181 @@ pub async fn run(
     Ok(())
 }
 
-
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
-pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_bytes: usize, require_auth: bool, jwt_secret: Option<String>) -> Router {
-
+pub fn build_router(
+    pool: sqlx::AnyPool,
+    static_dir: Option<&str>,
+    max_body_bytes: usize,
+    require_auth: bool,
+    jwt_secret: Option<String>,
+) -> Router {
     let v1 = Router::new()
-        .route("/services", get(services::list_services).post(services::create_service))
+        .route(
+            "/services",
+            get(services::list_services).post(services::create_service),
+        )
         .route("/services/:id", get(services::get_service))
-        .route("/services/:id/diffs", get(diffs::list_diffs).post(diffs::create_diff))
+        .route(
+            "/services/:id/diffs",
+            get(diffs::list_diffs).post(diffs::create_diff),
+        )
         .route("/services/:id/diffs/compare", post(diffs::compare_specs))
         .route("/compare/batch", post(diffs::batch_compare))
         .route("/services/:id/consumers", get(consumers::list_consumers))
-        .route("/services/:id/subscriptions", post(consumers::create_subscription))
-        .route("/consumers", get(consumers::list_all_consumers).post(consumers::create_consumer))
-        .route("/consumers/upsert", post(consumers::upsert_consumer_by_name))
-        .route("/evidence/collection", post(consumers::ingest_collection_evidence))
+        .route(
+            "/services/:id/subscriptions",
+            post(consumers::create_subscription),
+        )
+        .route(
+            "/consumers",
+            get(consumers::list_all_consumers).post(consumers::create_consumer),
+        )
+        .route(
+            "/consumers/upsert",
+            post(consumers::upsert_consumer_by_name),
+        )
+        .route(
+            "/evidence/collection",
+            post(consumers::ingest_collection_evidence),
+        )
         .route("/diffs", get(diffs::list_all_diffs))
         .route("/diffs/:id", get(diffs::get_diff))
         .route("/diffs/:id/blast-radius", get(diffs::blast_radius))
         .route("/usage/events", post(ingestion::ingest_usage_event))
         .route("/otlp/v1/traces", post(ingestion::ingest_otlp_traces))
         .route("/gateway/logs", post(ingestion::ingest_gateway_logs))
-        .route("/services/:id/sampling", get(sampling::get_sampling).put(sampling::put_sampling))
+        .route(
+            "/services/:id/sampling",
+            get(sampling::get_sampling).put(sampling::put_sampling),
+        )
         .route("/evidence/coverage", get(sampling::evidence_coverage))
         .route("/call-sites", post(ingestion::upsert_call_sites))
         .route("/summary", get(summary::get_summary))
         .route("/generate-tests", post(ai_tests::generate_tests))
         .route("/generate-tests", get(ai_tests::list_test_suites))
         .route("/generate-tests/:id", get(ai_tests::get_test_suite))
-        .route("/sandbox-envs", get(playground::list_sandbox_envs).post(playground::create_sandbox_env))
-        .route("/sandbox-envs/:id", axum::routing::put(playground::update_sandbox_env).delete(playground::delete_sandbox_env))
+        .route(
+            "/sandbox-envs",
+            get(playground::list_sandbox_envs).post(playground::create_sandbox_env),
+        )
+        .route(
+            "/sandbox-envs/:id",
+            axum::routing::put(playground::update_sandbox_env)
+                .delete(playground::delete_sandbox_env),
+        )
         .route("/spec-versions", get(playground::list_spec_versions))
-        .route("/spec-versions/:id/raw", get(playground::get_spec_version_raw))
-        .route("/settings", get(settings::get_settings).put(settings::update_settings))
+        .route(
+            "/spec-versions/:id/raw",
+            get(playground::get_spec_version_raw),
+        )
+        .route(
+            "/settings",
+            get(settings::get_settings).put(settings::update_settings),
+        )
         .route("/settings/integrations", get(settings::get_integrations))
         .route("/release-notes", get(release_notes::list_release_notes))
         .route("/release-notes/:id", get(release_notes::get_release_note))
-        .route("/release-notes/:id/status", axum::routing::patch(release_notes::patch_release_note_status))
-        .route("/release-notes/:id/generate-status", get(release_notes::get_generate_status))
-        .route("/diffs/:id/release-notes", post(release_notes::create_release_note))
-        .route("/diffs/:id/release-notes/generate", post(release_notes::generate_release_note))
-        .route("/diffs/:id/migration-guide", get(release_notes::get_migration_guide))
-        .route("/diffs/:id/test-suites", get(ai_tests::list_diff_test_suites))
-        .route("/policy-decisions", get(decisions::list_policy_decisions).post(decisions::create_policy_decision))
-        .route("/acknowledgements", get(acknowledgements::list_acknowledgements).post(acknowledgements::create_acknowledgement))
-        .route("/diffs/:id/acknowledgements", get(acknowledgements::list_diff_acknowledgements))
-        .route("/catalog-sources", get(catalog::list_catalog_sources).post(catalog::create_catalog_source))
-        .route("/catalog-sources/:id/sync", post(catalog::sync_catalog_source))
-        .route("/evolution-rules", get(evolution::list_evolution_rules).post(evolution::create_evolution_rule))
-        .route("/evolution-rules/:id", axum::routing::delete(evolution::delete_evolution_rule).patch(evolution::toggle_evolution_rule))
-        .route("/webhooks", get(webhooks::list_webhooks).post(webhooks::create_webhook))
-        .route("/webhooks/:id", axum::routing::delete(webhooks::delete_webhook))
+        .route(
+            "/release-notes/:id/status",
+            axum::routing::patch(release_notes::patch_release_note_status),
+        )
+        .route(
+            "/release-notes/:id/generate-status",
+            get(release_notes::get_generate_status),
+        )
+        .route(
+            "/diffs/:id/release-notes",
+            post(release_notes::create_release_note),
+        )
+        .route(
+            "/diffs/:id/release-notes/generate",
+            post(release_notes::generate_release_note),
+        )
+        .route(
+            "/diffs/:id/migration-guide",
+            get(release_notes::get_migration_guide),
+        )
+        .route(
+            "/diffs/:id/test-suites",
+            get(ai_tests::list_diff_test_suites),
+        )
+        .route(
+            "/policy-decisions",
+            get(decisions::list_policy_decisions).post(decisions::create_policy_decision),
+        )
+        .route(
+            "/acknowledgements",
+            get(acknowledgements::list_acknowledgements)
+                .post(acknowledgements::create_acknowledgement),
+        )
+        .route(
+            "/diffs/:id/acknowledgements",
+            get(acknowledgements::list_diff_acknowledgements),
+        )
+        .route(
+            "/catalog-sources",
+            get(catalog::list_catalog_sources).post(catalog::create_catalog_source),
+        )
+        .route(
+            "/catalog-sources/:id/sync",
+            post(catalog::sync_catalog_source),
+        )
+        .route(
+            "/evolution-rules",
+            get(evolution::list_evolution_rules).post(evolution::create_evolution_rule),
+        )
+        .route(
+            "/evolution-rules/:id",
+            axum::routing::delete(evolution::delete_evolution_rule)
+                .patch(evolution::toggle_evolution_rule),
+        )
+        .route(
+            "/webhooks",
+            get(webhooks::list_webhooks).post(webhooks::create_webhook),
+        )
+        .route(
+            "/webhooks/:id",
+            axum::routing::delete(webhooks::delete_webhook),
+        )
         .route("/webhooks/:id/test", post(webhooks::test_webhook))
         .route("/webhooks/:id/deliveries", get(webhooks::list_deliveries))
-        .route("/scheduled-scans", get(scans::list_scans).post(scans::create_scan))
-        .route("/scheduled-scans/:id", axum::routing::delete(scans::delete_scan))
+        .route(
+            "/scheduled-scans",
+            get(scans::list_scans).post(scans::create_scan),
+        )
+        .route(
+            "/scheduled-scans/:id",
+            axum::routing::delete(scans::delete_scan),
+        )
         .route("/scheduled-scans/history", get(scans::run_history))
-        .route("/notifications/digest/preview", post(notifications::preview_digest))
-        .route("/csv-runs", get(csv_runner::list_csv_runs).post(csv_runner::create_csv_run))
-        .route("/csv-runs/:id", get(csv_runner::get_csv_run).delete(csv_runner::cancel_csv_run))
-        .route("/csv-runs/:id/results", get(csv_runner::get_csv_run_results))
-        .route("/audit-events", get(audit::list_audit_events).post(audit::create_audit_event))
+        .route(
+            "/notifications/digest/preview",
+            post(notifications::preview_digest),
+        )
+        .route(
+            "/csv-runs",
+            get(csv_runner::list_csv_runs).post(csv_runner::create_csv_run),
+        )
+        .route(
+            "/csv-runs/:id",
+            get(csv_runner::get_csv_run).delete(csv_runner::cancel_csv_run),
+        )
+        .route(
+            "/csv-runs/:id/results",
+            get(csv_runner::get_csv_run_results),
+        )
+        .route(
+            "/audit-events",
+            get(audit::list_audit_events).post(audit::create_audit_event),
+        )
         .route("/readiness", get(readiness::get_readiness))
-        .layer(middleware::from_fn_with_state(pool.clone(), auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            pool.clone(),
+            auth_middleware,
+        ))
         // Outermost layer: inject RequireAuth + JwtSecretExt before auth_middleware runs.
         .layer(middleware::from_fn({
             let jwt_secret = jwt_secret.clone();
@@ -455,23 +570,23 @@ pub fn build_router(pool: sqlx::AnyPool, static_dir: Option<&str>, max_body_byte
         .route("/share/:token", get(diffs::get_shared_diff))
         .nest("/v1", v1)
         .with_state(pool.clone())
-        .layer(TimeoutLayer::new(std::time::Duration::from_secs(timeout_secs)))
+        .layer(TimeoutLayer::new(std::time::Duration::from_secs(
+            timeout_secs,
+        )))
         .layer(DefaultBodyLimit::max(max_body_bytes))
-        .layer(
-            TraceLayer::new_for_http().make_span_with(|req: &Request| {
-                let id = req
-                    .extensions()
-                    .get::<RequestId>()
-                    .map(|r| r.0.clone())
-                    .unwrap_or_else(|| Uuid::new_v4().to_string());
-                tracing::info_span!(
-                    "request",
-                    method = %req.method(),
-                    uri = %req.uri(),
-                    request_id = %id,
-                )
-            }),
-        )
+        .layer(TraceLayer::new_for_http().make_span_with(|req: &Request| {
+            let id = req
+                .extensions()
+                .get::<RequestId>()
+                .map(|r| r.0.clone())
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            tracing::info_span!(
+                "request",
+                method = %req.method(),
+                uri = %req.uri(),
+                request_id = %id,
+            )
+        }))
         .layer(middleware::from_fn(request_id_middleware))
         .layer(middleware::from_fn(move |mut req: Request, next: Next| {
             let s = jwt_secret.clone();
@@ -530,7 +645,10 @@ async fn serve_scalar_js() -> impl IntoResponse {
     (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
             (header::CACHE_CONTROL, cache_control),
         ],
         bytes,
@@ -568,12 +686,14 @@ async fn metrics_handler(headers: axum::http::HeaderMap) -> impl IntoResponse {
     }
     let body = get_prometheus_handle().render();
     (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
     )
         .into_response()
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -585,10 +705,7 @@ mod test_helpers;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        body::Body,
-        http::Request as HttpRequest,
-    };
+    use axum::{body::Body, http::Request as HttpRequest};
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
 
@@ -596,8 +713,7 @@ mod tests {
         sqlx::any::install_default_drivers();
         // When DATABASE_URL points at Postgres (set in the rust-postgres CI job), run
         // the full test suite against a real Postgres instance to catch SQL dialect gaps.
-        let url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "sqlite::memory:".to_string());
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite::memory:".to_string());
         let is_sqlite = url.starts_with("sqlite");
 
         let pool = sqlx::any::AnyPoolOptions::new()
@@ -776,7 +892,10 @@ mod tests {
 
         // Purge rows older than 30 days — should delete the 100-day-old row.
         let deleted = purge_old_usage_events(&pool, 30).await.unwrap();
-        assert!(deleted >= 1, "expected at least 1 deleted row, got {deleted}");
+        assert!(
+            deleted >= 1,
+            "expected at least 1 deleted row, got {deleted}"
+        );
 
         // Insert a fresh event (recorded_at = now).
         let fresh_id = Uuid::new_v4().to_string();
@@ -795,7 +914,10 @@ mod tests {
 
         // Purge again — fresh event should NOT be deleted.
         let deleted2 = purge_old_usage_events(&pool, 30).await.unwrap();
-        assert_eq!(deleted2, 0, "fresh event should not be purged, but got {deleted2} deletions");
+        assert_eq!(
+            deleted2, 0,
+            "fresh event should not be purged, but got {deleted2} deletions"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -910,7 +1032,11 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["diff_id"], diff_id);
         let entries = json["entries"].as_array().unwrap();
-        assert!(entries.is_empty(), "expected empty entries, got: {:?}", entries);
+        assert!(
+            entries.is_empty(),
+            "expected empty entries, got: {:?}",
+            entries
+        );
     }
 
     #[tokio::test]
@@ -1305,7 +1431,10 @@ mod tests {
         let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let req = HttpRequest::builder()
-            .method("GET").uri("/v1/diffs").body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/v1/diffs")
+            .body(Body::empty())
+            .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1316,7 +1445,9 @@ mod tests {
         // Find our specific diff in the response — don't assert arr.len() == 1 since a
         // shared Postgres DB (used in the rust-postgres CI job) may contain diffs from
         // other parallel tests.
-        let our_diff = arr.iter().find(|e| e["id"] == diff_id)
+        let our_diff = arr
+            .iter()
+            .find(|e| e["id"] == diff_id)
             .expect("diff should appear in list_all_diffs response");
         assert_eq!(our_diff["service_name"], "list-api");
         assert_eq!(our_diff["breaking_count"], 1);
@@ -1356,7 +1487,10 @@ mod tests {
         let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let req = HttpRequest::builder()
-            .method("GET").uri("/v1/summary").body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/v1/summary")
+            .body(Body::empty())
+            .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1588,8 +1722,14 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         let masked = json["bearer_token"].as_str().unwrap();
-        assert!(masked.starts_with("***"), "expected masked token, got: {masked}");
-        assert!(masked.ends_with("n123"), "expected last-4 suffix, got: {masked}");
+        assert!(
+            masked.starts_with("***"),
+            "expected masked token, got: {masked}"
+        );
+        assert!(
+            masked.ends_with("n123"),
+            "expected last-4 suffix, got: {masked}"
+        );
         assert_eq!(json["bearer_token_set"], true);
     }
 
@@ -1629,15 +1769,25 @@ mod tests {
         let items = json.as_array().unwrap();
         assert_eq!(items.len(), 1);
         let masked = items[0]["bearer_token"].as_str().unwrap();
-        assert!(masked.starts_with("***"), "expected masked token, got: {masked}");
-        assert!(masked.ends_with("oken"), "expected last-4 suffix, got: {masked}");
+        assert!(
+            masked.starts_with("***"),
+            "expected masked token, got: {masked}"
+        );
+        assert!(
+            masked.ends_with("oken"),
+            "expected last-4 suffix, got: {masked}"
+        );
         assert_eq!(items[0]["bearer_token_set"], true);
     }
 
     #[tokio::test]
     async fn test_create_service_writes_org_id() {
         let pool = test_pool().await;
-        let claims = JwtClaims { sub: "u1".into(), org_id: "acme-corp".into(), exp: usize::MAX };
+        let claims = JwtClaims {
+            sub: "u1".into(),
+            org_id: "acme-corp".into(),
+            exp: usize::MAX,
+        };
         let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None).layer(
             axum::middleware::from_fn(
                 move |mut req: axum::extract::Request, next: axum::middleware::Next| {
@@ -1686,7 +1836,11 @@ mod tests {
         .bind("svc-beta").bind("beta-api").bind("").bind("team-b").bind("openapi").bind("org-beta")
         .execute(&pool).await.unwrap();
 
-        let claims = JwtClaims { sub: "u1".into(), org_id: "org-alpha".into(), exp: usize::MAX };
+        let claims = JwtClaims {
+            sub: "u1".into(),
+            org_id: "org-alpha".into(),
+            exp: usize::MAX,
+        };
         let app = build_router(pool, None, 4 * 1024 * 1024, false, None).layer(
             axum::middleware::from_fn(
                 move |mut req: axum::extract::Request, next: axum::middleware::Next| {
@@ -1731,8 +1885,14 @@ mod tests {
         sqlx::query(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
-        .bind(&consumer_id).bind("evidence-consumer").bind("").bind("team").bind("e@t.com")
-        .execute(&pool).await.unwrap();
+        .bind(&consumer_id)
+        .bind("evidence-consumer")
+        .bind("")
+        .bind("team")
+        .bind("e@t.com")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let sub_id = Uuid::new_v4().to_string();
         sqlx::query(
@@ -1820,8 +1980,14 @@ mod tests {
         sqlx::query(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
-        .bind(&consumer_id).bind("ev-write-consumer").bind("").bind("team").bind("e@t.com")
-        .execute(&pool).await.unwrap();
+        .bind(&consumer_id)
+        .bind("ev-write-consumer")
+        .bind("")
+        .bind("team")
+        .bind("e@t.com")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         sqlx::query(
             "INSERT INTO subscription (id, service_id, consumer_id, opted_in_at) VALUES (?, ?, ?, ?)",
@@ -1877,14 +2043,16 @@ mod tests {
         assert_eq!(json["entries"].as_array().unwrap().len(), 1);
 
         // Core assertion: impact_evidence must have at least one row for this diff.
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?",
-        )
-        .bind(&diff_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(count > 0, "impact_evidence must have rows after blast_radius call");
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?")
+                .bind(&diff_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            count > 0,
+            "impact_evidence must have rows after blast_radius call"
+        );
     }
 
     // M-17-T1: a GET must be idempotent — repeat calls for unchanged evidence must
@@ -1905,8 +2073,14 @@ mod tests {
         sqlx::query(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
-        .bind(&consumer_id).bind("idem-consumer").bind("").bind("team").bind("e@t.com")
-        .execute(&pool).await.unwrap();
+        .bind(&consumer_id)
+        .bind("idem-consumer")
+        .bind("")
+        .bind("team")
+        .bind("e@t.com")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         sqlx::query(
             "INSERT INTO subscription (id, service_id, consumer_id, opted_in_at) VALUES (?, ?, ?, ?)",
@@ -1960,24 +2134,22 @@ mod tests {
 
         // First GET seeds evidence.
         call(app.clone(), diff_id.clone()).await;
-        let count_after_first: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?",
-        )
-        .bind(&diff_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let count_after_first: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?")
+                .bind(&diff_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert!(count_after_first > 0, "first GET must write evidence");
 
         // Second GET must NOT grow the append-only table.
         call(app.clone(), diff_id.clone()).await;
-        let count_after_second: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?",
-        )
-        .bind(&diff_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let count_after_second: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM impact_evidence WHERE diff_id = ?")
+                .bind(&diff_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             count_after_first, count_after_second,
             "repeat blast-radius GET must be idempotent (no new impact_evidence rows)"
@@ -2002,8 +2174,14 @@ mod tests {
         sqlx::query(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
-        .bind(&consumer_id).bind("old-consumer").bind("").bind("team").bind("e@t.com")
-        .execute(&pool).await.unwrap();
+        .bind(&consumer_id)
+        .bind("old-consumer")
+        .bind("")
+        .bind("team")
+        .bind("e@t.com")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         sqlx::query(
             "INSERT INTO subscription (id, service_id, consumer_id, opted_in_at) VALUES (?, ?, ?, ?)",
@@ -2160,7 +2338,13 @@ mod tests {
         let pool = test_pool().await;
         let (_, _, _, diff_id) = setup_beta_service(&pool).await;
         let token = make_org_jwt("org-alpha");
-        let app = build_router(pool, None, 4 * 1024 * 1024, false, Some(E2_SECRET.to_string()));
+        let app = build_router(
+            pool,
+            None,
+            4 * 1024 * 1024,
+            false,
+            Some(E2_SECRET.to_string()),
+        );
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2169,7 +2353,11 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org GET /v1/diffs/:id must return 403");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org GET /v1/diffs/:id must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2177,7 +2365,13 @@ mod tests {
         let pool = test_pool().await;
         let (service_id, _, _, _) = setup_beta_service(&pool).await;
         let token = make_org_jwt("org-alpha");
-        let app = build_router(pool, None, 4 * 1024 * 1024, false, Some(E2_SECRET.to_string()));
+        let app = build_router(
+            pool,
+            None,
+            4 * 1024 * 1024,
+            false,
+            Some(E2_SECRET.to_string()),
+        );
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2186,7 +2380,11 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org GET /v1/services/:id must return 403");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org GET /v1/services/:id must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2194,7 +2392,13 @@ mod tests {
         let pool = test_pool().await;
         let (_, _, _, diff_id) = setup_beta_service(&pool).await;
         let token = make_org_jwt("org-alpha");
-        let app = build_router(pool, None, 4 * 1024 * 1024, false, Some(E2_SECRET.to_string()));
+        let app = build_router(
+            pool,
+            None,
+            4 * 1024 * 1024,
+            false,
+            Some(E2_SECRET.to_string()),
+        );
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2203,7 +2407,11 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org GET /v1/diffs/:id/blast-radius must return 403");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org GET /v1/diffs/:id/blast-radius must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2211,7 +2419,13 @@ mod tests {
         let pool = test_pool().await;
         let (_, _, to_sv, _) = setup_beta_service(&pool).await;
         let token = make_org_jwt("org-alpha");
-        let app = build_router(pool, None, 4 * 1024 * 1024, false, Some(E2_SECRET.to_string()));
+        let app = build_router(
+            pool,
+            None,
+            4 * 1024 * 1024,
+            false,
+            Some(E2_SECRET.to_string()),
+        );
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2220,7 +2434,11 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org GET /v1/spec-versions/:id/raw must return 403");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org GET /v1/spec-versions/:id/raw must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2237,7 +2455,13 @@ mod tests {
         .execute(&pool).await.unwrap();
 
         let token = make_org_jwt("org-alpha");
-        let app = build_router(pool, None, 4 * 1024 * 1024, false, Some(E2_SECRET.to_string()));
+        let app = build_router(
+            pool,
+            None,
+            4 * 1024 * 1024,
+            false,
+            Some(E2_SECRET.to_string()),
+        );
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2246,7 +2470,11 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org GET /v1/generate-tests/:id must return 403");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org GET /v1/generate-tests/:id must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2254,7 +2482,13 @@ mod tests {
         let pool = test_pool().await;
         let (service_id, _, _, _) = setup_beta_service(&pool).await;
         let token = make_org_jwt("org-alpha");
-        let app = build_router(pool, None, 4 * 1024 * 1024, false, Some(E2_SECRET.to_string()));
+        let app = build_router(
+            pool,
+            None,
+            4 * 1024 * 1024,
+            false,
+            Some(E2_SECRET.to_string()),
+        );
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2263,7 +2497,11 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org GET /v1/services/:id/diffs must return 403");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org GET /v1/services/:id/diffs must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2271,7 +2509,13 @@ mod tests {
         let pool = test_pool().await;
         let (service_id, _, _, _) = setup_beta_service(&pool).await;
         let token = make_org_jwt("org-alpha");
-        let app = build_router(pool, None, 4 * 1024 * 1024, false, Some(E2_SECRET.to_string()));
+        let app = build_router(
+            pool,
+            None,
+            4 * 1024 * 1024,
+            false,
+            Some(E2_SECRET.to_string()),
+        );
 
         let req = HttpRequest::builder()
             .method("GET")
@@ -2280,7 +2524,11 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org GET /v1/services/:id/consumers must return 403");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org GET /v1/services/:id/consumers must return 403"
+        );
     }
 
     // ── M-8: Org isolation sweep — cross-org 403 matrix for the handlers that
@@ -2294,8 +2542,13 @@ mod tests {
         sqlx::query(
             "INSERT INTO release_note (id, diff_id, content, created_at) VALUES (?, ?, ?, ?)",
         )
-        .bind(&note_id).bind(diff_id).bind("beta content").bind(&now)
-        .execute(pool).await.unwrap();
+        .bind(&note_id)
+        .bind(diff_id)
+        .bind("beta content")
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
         note_id
     }
 
@@ -2311,7 +2564,13 @@ mod tests {
     }
 
     fn alpha_app(pool: sqlx::AnyPool) -> Router {
-        build_router(pool, None, 4 * 1024 * 1024, false, Some(E2_SECRET.to_string()))
+        build_router(
+            pool,
+            None,
+            4 * 1024 * 1024,
+            false,
+            Some(E2_SECRET.to_string()),
+        )
     }
 
     fn alpha_req(method: &str, uri: String, body: Option<serde_json::Value>) -> HttpRequest<Body> {
@@ -2335,9 +2594,18 @@ mod tests {
         let (_, _, _, diff_id) = setup_beta_service(&pool).await;
         let note_id = insert_beta_release_note(&pool, &diff_id).await;
         let resp = alpha_app(pool)
-            .oneshot(alpha_req("GET", format!("/v1/release-notes/{note_id}"), None))
-            .await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org GET /v1/release-notes/:id must return 403");
+            .oneshot(alpha_req(
+                "GET",
+                format!("/v1/release-notes/{note_id}"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org GET /v1/release-notes/:id must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2346,10 +2614,18 @@ mod tests {
         let (_, _, _, diff_id) = setup_beta_service(&pool).await;
         let note_id = insert_beta_release_note(&pool, &diff_id).await;
         let resp = alpha_app(pool)
-            .oneshot(alpha_req("PATCH", format!("/v1/release-notes/{note_id}/status"),
-                Some(serde_json::json!({"status": "reviewed"}))))
-            .await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org PATCH release-note status must return 403");
+            .oneshot(alpha_req(
+                "PATCH",
+                format!("/v1/release-notes/{note_id}/status"),
+                Some(serde_json::json!({"status": "reviewed"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org PATCH release-note status must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2358,9 +2634,18 @@ mod tests {
         let (_, _, _, diff_id) = setup_beta_service(&pool).await;
         let note_id = insert_beta_release_note(&pool, &diff_id).await;
         let resp = alpha_app(pool)
-            .oneshot(alpha_req("GET", format!("/v1/release-notes/{note_id}/generate-status"), None))
-            .await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org GET generate-status must return 403");
+            .oneshot(alpha_req(
+                "GET",
+                format!("/v1/release-notes/{note_id}/generate-status"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org GET generate-status must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2368,10 +2653,18 @@ mod tests {
         let pool = test_pool().await;
         let (_, _, _, diff_id) = setup_beta_service(&pool).await;
         let resp = alpha_app(pool)
-            .oneshot(alpha_req("POST", format!("/v1/diffs/{diff_id}/release-notes"),
-                Some(serde_json::json!({"content": "x"}))))
-            .await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org POST release-notes must return 403");
+            .oneshot(alpha_req(
+                "POST",
+                format!("/v1/diffs/{diff_id}/release-notes"),
+                Some(serde_json::json!({"content": "x"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org POST release-notes must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2379,10 +2672,18 @@ mod tests {
         let pool = test_pool().await;
         let (_, _, _, diff_id) = setup_beta_service(&pool).await;
         let resp = alpha_app(pool)
-            .oneshot(alpha_req("POST", format!("/v1/diffs/{diff_id}/release-notes/generate"),
-                Some(serde_json::json!({}))))
-            .await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org generate release-note must return 403");
+            .oneshot(alpha_req(
+                "POST",
+                format!("/v1/diffs/{diff_id}/release-notes/generate"),
+                Some(serde_json::json!({})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org generate release-note must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2390,9 +2691,18 @@ mod tests {
         let pool = test_pool().await;
         let (_, _, _, diff_id) = setup_beta_service(&pool).await;
         let resp = alpha_app(pool)
-            .oneshot(alpha_req("GET", format!("/v1/diffs/{diff_id}/migration-guide"), None))
-            .await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org migration-guide must return 403");
+            .oneshot(alpha_req(
+                "GET",
+                format!("/v1/diffs/{diff_id}/migration-guide"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org migration-guide must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2400,10 +2710,18 @@ mod tests {
         let pool = test_pool().await;
         let (_, _, _, diff_id) = setup_beta_service(&pool).await;
         let resp = alpha_app(pool)
-            .oneshot(alpha_req("POST", "/v1/acknowledgements".into(),
-                Some(serde_json::json!({"diff_id": diff_id, "acknowledged_by": "mallory"}))))
-            .await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org acknowledgement must return 403");
+            .oneshot(alpha_req(
+                "POST",
+                "/v1/acknowledgements".into(),
+                Some(serde_json::json!({"diff_id": diff_id, "acknowledged_by": "mallory"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org acknowledgement must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2411,14 +2729,22 @@ mod tests {
         let pool = test_pool().await;
         let (service_id, _, _, _) = setup_beta_service(&pool).await;
         let resp = alpha_app(pool)
-            .oneshot(alpha_req("POST", "/v1/scheduled-scans".into(),
+            .oneshot(alpha_req(
+                "POST",
+                "/v1/scheduled-scans".into(),
                 Some(serde_json::json!({
                     "service_id": service_id,
                     "spec_url": "https://example.com/openapi.yaml",
                     "interval_minutes": 60
-                }))))
-            .await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org create scan must return 403");
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org create scan must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2427,10 +2753,18 @@ mod tests {
         let (service_id, _, _, _) = setup_beta_service(&pool).await;
         let consumer_id = insert_beta_consumer(&pool).await;
         let resp = alpha_app(pool)
-            .oneshot(alpha_req("POST", format!("/v1/services/{service_id}/subscriptions"),
-                Some(serde_json::json!({"consumer_id": consumer_id}))))
-            .await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org create subscription must return 403");
+            .oneshot(alpha_req(
+                "POST",
+                format!("/v1/services/{service_id}/subscriptions"),
+                Some(serde_json::json!({"consumer_id": consumer_id})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org create subscription must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2438,10 +2772,18 @@ mod tests {
         let pool = test_pool().await;
         let (_, _, _, diff_id) = setup_beta_service(&pool).await;
         let resp = alpha_app(pool)
-            .oneshot(alpha_req("POST", "/v1/generate-tests".into(),
-                Some(serde_json::json!({"diff_id": diff_id}))))
-            .await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org generate-tests must return 403");
+            .oneshot(alpha_req(
+                "POST",
+                "/v1/generate-tests".into(),
+                Some(serde_json::json!({"diff_id": diff_id})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org generate-tests must return 403"
+        );
     }
 
     #[tokio::test]
@@ -2449,9 +2791,18 @@ mod tests {
         let pool = test_pool().await;
         let (_, _, _, diff_id) = setup_beta_service(&pool).await;
         let resp = alpha_app(pool)
-            .oneshot(alpha_req("GET", format!("/v1/diffs/{diff_id}/test-suites"), None))
-            .await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cross-org list diff test-suites must return 403");
+            .oneshot(alpha_req(
+                "GET",
+                format!("/v1/diffs/{diff_id}/test-suites"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-org list diff test-suites must return 403"
+        );
     }
 
     // Desktop / no-auth single-tenant path: empty caller org must NOT trigger a
@@ -2466,9 +2817,14 @@ mod tests {
         let req = HttpRequest::builder()
             .method("GET")
             .uri(format!("/v1/release-notes/{note_id}"))
-            .body(Body::empty()).unwrap();
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "desktop/no-auth must still read the note (single-tenant)");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "desktop/no-auth must still read the note (single-tenant)"
+        );
     }
 
     #[tokio::test]
@@ -2493,7 +2849,9 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["sub"], "alice@example.com");
         assert_eq!(json["org_id"], "example.com");
@@ -2618,7 +2976,10 @@ mod tests {
         assert_eq!(resp2.status(), StatusCode::OK);
         let bytes2 = resp2.into_body().collect().await.unwrap().to_bytes();
         let json2: serde_json::Value = serde_json::from_slice(&bytes2).unwrap();
-        assert_eq!(json2["id"], first_id, "same consumer id must be returned on second upsert");
+        assert_eq!(
+            json2["id"], first_id,
+            "same consumer id must be returned on second upsert"
+        );
         assert_eq!(json2["created"], false);
     }
 
@@ -2701,8 +3062,17 @@ mod tests {
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let r1: serde_json::Value = serde_json::from_slice(
-            &app.clone().oneshot(req1).await.unwrap().into_body().collect().await.unwrap().to_bytes()
-        ).unwrap();
+            &app.clone()
+                .oneshot(req1)
+                .await
+                .unwrap()
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
         assert_eq!(r1["inserted"], 1);
 
         // Second POST — same body → no new rows
@@ -2713,9 +3083,21 @@ mod tests {
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let r2: serde_json::Value = serde_json::from_slice(
-            &app.clone().oneshot(req2).await.unwrap().into_body().collect().await.unwrap().to_bytes()
-        ).unwrap();
-        assert_eq!(r2["inserted"], 0, "second POST must not insert duplicate evidence rows");
+            &app.clone()
+                .oneshot(req2)
+                .await
+                .unwrap()
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            r2["inserted"], 0,
+            "second POST must not insert duplicate evidence rows"
+        );
 
         // Verify only 1 row in impact_evidence
         let count: i64 = sqlx::query_scalar(
@@ -2725,7 +3107,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(count, 1, "exactly 1 evidence row should exist after two identical scans");
+        assert_eq!(
+            count, 1,
+            "exactly 1 evidence row should exist after two identical scans"
+        );
     }
 
     // ── F-3: Acknowledgement workflow ─────────────────────────────────────────
@@ -2844,7 +3229,11 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let entries = json["entries"].as_array().unwrap();
-        assert_eq!(entries.len(), 0, "expired acknowledgements must not be returned");
+        assert_eq!(
+            entries.len(),
+            0,
+            "expired acknowledgements must not be returned"
+        );
     }
 
     // ── F-4: Catalog source CRUD ───────────────────────────────────────────────
@@ -2984,9 +3373,17 @@ mod tests {
         let pool = test_pool().await;
 
         // Register a consumer and service so sampling config lookup doesn't fail.
-        sqlx::query("INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)")
-            .bind("c-otlp").bind("otlp-consumer").bind("").bind("").bind("")
-            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("c-otlp")
+        .bind("otlp-consumer")
+        .bind("")
+        .bind("")
+        .bind("")
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
             .bind("s-otlp").bind("otlp-service").bind("").bind("").bind("openapi")
             .execute(&pool).await.unwrap();
@@ -3010,9 +3407,11 @@ mod tests {
             }]
         });
         let req = HttpRequest::builder()
-            .method("POST").uri("/v1/otlp/v1/traces")
+            .method("POST")
+            .uri("/v1/otlp/v1/traces")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
 
@@ -3043,9 +3442,11 @@ mod tests {
             }]
         });
         let req = HttpRequest::builder()
-            .method("POST").uri("/v1/otlp/v1/traces")
+            .method("POST")
+            .uri("/v1/otlp/v1/traces")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -3058,7 +3459,10 @@ mod tests {
     #[test]
     fn normalise_path_replaces_numeric_segments() {
         assert_eq!(normalise_path("/users/123"), "/users/{id}");
-        assert_eq!(normalise_path("/orders/456/items/7"), "/orders/{id}/items/{id}");
+        assert_eq!(
+            normalise_path("/orders/456/items/7"),
+            "/orders/{id}/items/{id}"
+        );
         assert_eq!(normalise_path("/users/{id}"), "/users/{id}"); // already normalised
         assert_eq!(normalise_path("/health"), "/health");
     }
@@ -3074,9 +3478,11 @@ mod tests {
             { "method": "GET",  "path": "/users/99",  "consumer_id": "c1", "service_id": "s1" }
         ]);
         let req = HttpRequest::builder()
-            .method("POST").uri("/v1/gateway/logs")
+            .method("POST")
+            .uri("/v1/gateway/logs")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -3097,8 +3503,14 @@ mod tests {
         sqlx::query(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
-        .bind("c-norm").bind("c-norm").bind("").bind("").bind("")
-        .execute(&pool).await.unwrap();
+        .bind("c-norm")
+        .bind("c-norm")
+        .bind("")
+        .bind("")
+        .bind("")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Insert a usage event via gateway log and verify the stored operation is normalised.
         let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None);
@@ -3106,9 +3518,11 @@ mod tests {
             { "method": "GET", "path": "/users/42", "consumer_id": "c-norm", "service_id": "s-norm" }
         ]);
         let req = HttpRequest::builder()
-            .method("POST").uri("/v1/gateway/logs")
+            .method("POST")
+            .uri("/v1/gateway/logs")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let _ = app.oneshot(req).await.unwrap();
 
         let stored: Option<String> = sqlx::query_scalar(
@@ -3128,16 +3542,21 @@ mod tests {
         let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
 
         let put_req = HttpRequest::builder()
-            .method("PUT").uri("/v1/services/my-svc/sampling")
+            .method("PUT")
+            .uri("/v1/services/my-svc/sampling")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"sample_rate":0.5,"field_deny_list":["password","secret"]}"#))
+            .body(Body::from(
+                r#"{"sample_rate":0.5,"field_deny_list":["password","secret"]}"#,
+            ))
             .unwrap();
         let put_resp = app.clone().oneshot(put_req).await.unwrap();
         assert_eq!(put_resp.status(), StatusCode::OK);
 
         let get_req = HttpRequest::builder()
-            .method("GET").uri("/v1/services/my-svc/sampling")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/v1/services/my-svc/sampling")
+            .body(Body::empty())
+            .unwrap();
         let get_resp = app.oneshot(get_req).await.unwrap();
         assert_eq!(get_resp.status(), StatusCode::OK);
         let bytes = get_resp.into_body().collect().await.unwrap().to_bytes();
@@ -3152,9 +3571,11 @@ mod tests {
         let pool = test_pool().await;
         let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
         let req = HttpRequest::builder()
-            .method("PUT").uri("/v1/services/svc/sampling")
+            .method("PUT")
+            .uri("/v1/services/svc/sampling")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"sample_rate":1.5}"#)).unwrap();
+            .body(Body::from(r#"{"sample_rate":1.5}"#))
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -3171,7 +3592,10 @@ mod tests {
     #[test]
     fn field_in_deny_list_supports_glob() {
         assert!(field_in_deny_list("user.token", "**.token"));
-        assert!(!field_in_deny_list("auth.refresh_token", "**.token,password"));
+        assert!(!field_in_deny_list(
+            "auth.refresh_token",
+            "**.token,password"
+        ));
         assert!(!field_in_deny_list("user.name", "**.token"));
     }
 
@@ -3200,8 +3624,10 @@ mod tests {
 
         let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
         let req = HttpRequest::builder()
-            .method("GET").uri("/v1/evidence/coverage")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/v1/evidence/coverage")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -3453,7 +3879,9 @@ mod tests {
         let suite = templates_from_changes(&changes, &[]);
         let cases = suite["test_cases"].as_array().unwrap();
         assert!(!cases.is_empty());
-        assert!(cases.iter().any(|c| c["name"].as_str().unwrap_or("").contains("email")));
+        assert!(cases
+            .iter()
+            .any(|c| c["name"].as_str().unwrap_or("").contains("email")));
     }
 
     #[tokio::test]
@@ -3480,9 +3908,9 @@ mod tests {
         })];
         let suite = templates_from_changes(&changes, &[]);
         let cases = suite["test_cases"].as_array().unwrap();
-        assert!(cases.iter().any(|c| {
-            c["expected_status"].as_u64() == Some(404)
-        }));
+        assert!(cases
+            .iter()
+            .any(|c| { c["expected_status"].as_u64() == Some(404) }));
     }
 
     #[tokio::test]
@@ -3534,16 +3962,21 @@ mod tests {
         sqlx::query(
             "INSERT INTO change (id, diff_id, path, kind, severity) VALUES (?, ?, ?, ?, ?)",
         )
-        .bind("chg-h1").bind("diff-h1")
+        .bind("chg-h1")
+        .bind("diff-h1")
         .bind("GET /items/{id} \u{2192} response.price")
-        .bind("field_removed").bind("breaking")
-        .execute(&pool).await.unwrap();
+        .bind("field_removed")
+        .bind("breaking")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
         let body = serde_json::to_vec(&json!({
             "diff_id": "diff-h1",
             "use_templates": true,
-        })).unwrap();
+        }))
+        .unwrap();
         let req = HttpRequest::builder()
             .method("POST")
             .uri("/v1/generate-tests")
@@ -3696,10 +4129,14 @@ mod tests {
         sqlx::query(
             "INSERT INTO change (id, diff_id, path, kind, severity) VALUES (?, ?, ?, ?, ?)",
         )
-        .bind("chg-mg").bind("diff-mg")
+        .bind("chg-mg")
+        .bind("diff-mg")
         .bind("GET /charges/{id} \u{2192} response.amount")
-        .bind("field_removed").bind("breaking")
-        .execute(&pool).await.unwrap();
+        .bind("field_removed")
+        .bind("breaking")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
         let req = HttpRequest::builder()
@@ -3724,7 +4161,9 @@ mod tests {
         let entries: Vec<serde_json::Value> = (0..5001)
             .map(|i| serde_json::json!({"consumer_id": format!("c{i}"), "service_id": format!("s{i}"), "method": "GET", "path": "/ping"}))
             .collect();
-        let resp = client.post_json("/v1/gateway/logs", &serde_json::Value::Array(entries)).await;
+        let resp = client
+            .post_json("/v1/gateway/logs", &serde_json::Value::Array(entries))
+            .await;
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(resp.json()["error"], "batch too large, max 5000");
     }
@@ -3737,8 +4176,14 @@ mod tests {
         sqlx::query(
             "INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)",
         )
-        .bind("c-svc-name").bind("payments-svc").bind("").bind("").bind("")
-        .execute(&pool).await.unwrap();
+        .bind("c-svc-name")
+        .bind("payments-svc")
+        .bind("")
+        .bind("")
+        .bind("")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         sqlx::query(
             "INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)",
@@ -3866,13 +4311,23 @@ mod tests {
         let client = test_helpers::TestClient::new(pool.clone());
 
         // POST → should return 201 with generation_status pending.
-        let resp = client.post_json("/v1/diffs/diff-rn/release-notes/generate", &serde_json::json!({})).await;
+        let resp = client
+            .post_json(
+                "/v1/diffs/diff-rn/release-notes/generate",
+                &serde_json::json!({}),
+            )
+            .await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = resp.json();
         let note_id = body["id"].as_str().expect("id must be present").to_owned();
         assert_eq!(body["generation_status"], "pending");
-        assert!(body.get("content").and_then(|v| v.as_str()).map(|s| s.is_empty()).unwrap_or(true),
-                "content should not be returned in pending state");
+        assert!(
+            body.get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.is_empty())
+                .unwrap_or(true),
+            "content should not be returned in pending state"
+        );
 
         // Background task completes almost instantly (template, no I/O).
         // Poll up to 1 s to be safe.
@@ -3881,10 +4336,15 @@ mod tests {
         let mut final_content = String::new();
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
-            let status_resp = client.get(&format!("/v1/release-notes/{note_id}/generate-status")).await;
+            let status_resp = client
+                .get(&format!("/v1/release-notes/{note_id}/generate-status"))
+                .await;
             assert_eq!(status_resp.status(), StatusCode::OK);
             let status_body = status_resp.json();
-            let status = status_body["generation_status"].as_str().unwrap_or("").to_owned();
+            let status = status_body["generation_status"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
             if status == "completed" {
                 final_content = status_body["content"].as_str().unwrap_or("").to_owned();
                 gen_status = status;
@@ -3895,9 +4355,14 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(gen_status, "completed", "generation did not complete in time");
-        assert!(final_content.contains("field_removed"),
-                "expected generated content to mention field_removed, got: {final_content}");
+        assert_eq!(
+            gen_status, "completed",
+            "generation did not complete in time"
+        );
+        assert!(
+            final_content.contains("field_removed"),
+            "expected generated content to mention field_removed, got: {final_content}"
+        );
     }
 
     // Phase-4 / STRIDE: SQL injection attempt in path param does not cause 500
@@ -3907,8 +4372,11 @@ mod tests {
         let client = test_helpers::TestClient::new(pool);
         // A typical SQL injection string as a path parameter.
         let resp = client.get("/v1/diffs/1%27%20OR%20%271%27%3D%271").await;
-        assert_ne!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR,
-                   "SQL injection attempt must not cause 500");
+        assert_ne!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SQL injection attempt must not cause 500"
+        );
     }
 
     // Phase-4 / STRIDE: unauthenticated request when JWT_SECRET is configured returns 401
@@ -3916,15 +4384,24 @@ mod tests {
     async fn test_stride_unauthenticated_request_returns_401_when_jwt_required() {
         let pool = test_pool().await;
         // Build a router with JWT enabled (non-empty secret).
-        let app = build_router(pool, None, 4 * 1024 * 1024, false, Some("test-secret".into()));
+        let app = build_router(
+            pool,
+            None,
+            4 * 1024 * 1024,
+            false,
+            Some("test-secret".into()),
+        );
         let req = HttpRequest::builder()
             .method("GET")
             .uri("/v1/services")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED,
-                   "unauthenticated requests must be rejected with 401 when JWT is enabled");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated requests must be rejected with 401 when JWT is enabled"
+        );
     }
 
     // Phase-4 / STRIDE: error responses do not leak internal details (DB path, connection string)
@@ -3935,10 +4412,22 @@ mod tests {
         // Force a 404 on a non-existent resource — error body must not contain DB internals.
         let resp = client.get("/v1/diffs/nonexistent-diff-id-xyz").await;
         let body_text = resp.text().to_lowercase();
-        assert!(!body_text.contains("sqlite"),           "error must not reveal DB engine");
-        assert!(!body_text.contains("drift.db"),         "error must not reveal DB file path");
-        assert!(!body_text.contains("sqlx"),             "error must not reveal ORM details");
-        assert!(!body_text.contains("connection string"), "error must not reveal DB credentials");
+        assert!(
+            !body_text.contains("sqlite"),
+            "error must not reveal DB engine"
+        );
+        assert!(
+            !body_text.contains("drift.db"),
+            "error must not reveal DB file path"
+        );
+        assert!(
+            !body_text.contains("sqlx"),
+            "error must not reveal ORM details"
+        );
+        assert!(
+            !body_text.contains("connection string"),
+            "error must not reveal DB credentials"
+        );
     }
 
     // Phase-4 / STRIDE: SSRF — redirect to private IP from a 3xx response is blocked
@@ -3949,12 +4438,17 @@ mod tests {
         // Redirect bypass at delivery time is prevented by Policy::none() (verified in unit tests).
         let pool = test_pool().await;
         let client = test_helpers::TestClient::new(pool);
-        let resp = client.post_json(
-            "/v1/webhooks",
-            &serde_json::json!({ "url": "https://10.0.0.1/hook", "events": ["diff.created"] }),
-        ).await;
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY,
-                   "webhook to private IP must be rejected");
+        let resp = client
+            .post_json(
+                "/v1/webhooks",
+                &serde_json::json!({ "url": "https://10.0.0.1/hook", "events": ["diff.created"] }),
+            )
+            .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "webhook to private IP must be rejected"
+        );
     }
 
     // Phase-5 / Story 3: org isolation — data inserted for one org is not visible to another
@@ -3975,8 +4469,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.json();
         let entries = body["entries"].as_array().unwrap();
-        assert!(entries.is_empty(),
-                "audit events for org-a must not be visible to the default empty-org session");
+        assert!(
+            entries.is_empty(),
+            "audit events for org-a must not be visible to the default empty-org session"
+        );
     }
 
     // Phase-5 / Story 3: CSV run state machine — cancelling a completed run returns 404
@@ -3995,8 +4491,11 @@ mod tests {
         // DELETE on a completed job must return 404 (the WHERE status IN ('pending','running') guard).
         let client = test_helpers::TestClient::new(pool);
         let resp = client.delete("/v1/csv-runs/job-done").await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND,
-                   "cancelling a completed job must return 404 (state machine guard)");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "cancelling a completed job must return 404 (state machine guard)"
+        );
     }
 
     // Phase-5 / Story 3: JWT-required endpoints return 401, not 500, without credentials
@@ -4004,16 +4503,28 @@ mod tests {
     async fn test_jwt_required_endpoints_return_401() {
         let pool = test_pool().await;
         // require_auth=true enforces JWT validation on every /v1 request.
-        let app = build_router(pool, None, 4 * 1024 * 1024, true, Some("test-secret".to_string()));
+        let app = build_router(
+            pool,
+            None,
+            4 * 1024 * 1024,
+            true,
+            Some("test-secret".to_string()),
+        );
         // POST /v1/consumers without a token must be rejected.
         let req = HttpRequest::builder()
-            .method("POST").uri("/v1/consumers")
+            .method("POST")
+            .uri("/v1/consumers")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"name":"Test","repo_url":"","owner_team":"t","contact":"t@t"}"#))
+            .body(Body::from(
+                r#"{"name":"Test","repo_url":"","owner_team":"t","contact":"t@t"}"#,
+            ))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED,
-                   "protected endpoint without JWT must return 401, not 500");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "protected endpoint without JWT must return 401, not 500"
+        );
     }
 
     // J-2: creating a consumer without repo_url must succeed (repo_url is optional)
@@ -4103,8 +4614,14 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(json["diff_id"].is_string(), "diff_id must be a string");
-        assert!(json["changes_count"].as_i64().unwrap_or(0) > 0, "must detect changes");
-        assert!(json["breaking_count"].as_i64().unwrap_or(0) > 0, "must detect breaking changes");
+        assert!(
+            json["changes_count"].as_i64().unwrap_or(0) > 0,
+            "must detect changes"
+        );
+        assert!(
+            json["breaking_count"].as_i64().unwrap_or(0) > 0,
+            "must detect breaking changes"
+        );
     }
 
     #[tokio::test]
@@ -4157,7 +4674,10 @@ mod tests {
         let pool = test_pool().await;
         let client = test_helpers::TestClient::new(pool);
         let resp = client
-            .post_json("/v1/webhooks", &serde_json::json!({"url": "http://example.com/hook"}))
+            .post_json(
+                "/v1/webhooks",
+                &serde_json::json!({"url": "http://example.com/hook"}),
+            )
             .await;
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -4167,7 +4687,10 @@ mod tests {
         let pool = test_pool().await;
         let client = test_helpers::TestClient::new(pool);
         let resp = client
-            .post_json("/v1/webhooks", &serde_json::json!({"url": "https://192.168.1.100/hook"}))
+            .post_json(
+                "/v1/webhooks",
+                &serde_json::json!({"url": "https://192.168.1.100/hook"}),
+            )
             .await;
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -4177,7 +4700,10 @@ mod tests {
         let pool = test_pool().await;
         let client = test_helpers::TestClient::new(pool);
         let resp = client
-            .post_json("/v1/webhooks", &serde_json::json!({"url": "https://127.0.0.1/hook"}))
+            .post_json(
+                "/v1/webhooks",
+                &serde_json::json!({"url": "https://127.0.0.1/hook"}),
+            )
             .await;
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -4417,16 +4943,22 @@ mod tests {
         // For this test we bypass registration and insert the webhook directly so the
         // delivery path is tested without interference from the input-validation guard.
         let pool = test_pool().await;
-        let wh_id  = uuid::Uuid::new_v4().to_string();
+        let wh_id = uuid::Uuid::new_v4().to_string();
         let secret = uuid::Uuid::new_v4().to_string();
-        let now    = Utc::now().to_rfc3339();
+        let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO webhook (id, org_id, url, events, secret, active, created_at) \
              VALUES (?, ?, ?, ?, ?, 1, ?)",
         )
-        .bind(&wh_id).bind("").bind(&url)
-        .bind("diff.created").bind(&secret).bind(&now)
-        .execute(&pool).await.unwrap();
+        .bind(&wh_id)
+        .bind("")
+        .bind(&url)
+        .bind("diff.created")
+        .bind(&secret)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Insert a diff to trigger webhook dispatch.
         sqlx::query("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
@@ -4440,34 +4972,52 @@ mod tests {
             .execute(&pool).await.unwrap();
 
         let client = test_helpers::TestClient::new(pool.clone());
-        let diff_resp = client.post_json(
-            "/v1/services/svc-wh/diffs",
-            &serde_json::json!({
-                "service_name": "WH Svc",
-                "repo_url": "",
-                "owner_team": "team",
-                "from_git_ref": "v1",
-                "to_git_ref": "v2",
-                "spec_format": "openapi",
-                "changes": []
-            }),
-        ).await;
-        assert_eq!(diff_resp.status(), StatusCode::CREATED,
-                   "diff creation failed: {}", diff_resp.text());
+        let diff_resp = client
+            .post_json(
+                "/v1/services/svc-wh/diffs",
+                &serde_json::json!({
+                    "service_name": "WH Svc",
+                    "repo_url": "",
+                    "owner_team": "team",
+                    "from_git_ref": "v1",
+                    "to_git_ref": "v2",
+                    "spec_format": "openapi",
+                    "changes": []
+                }),
+            )
+            .await;
+        assert_eq!(
+            diff_resp.status(),
+            StatusCode::CREATED,
+            "diff creation failed: {}",
+            diff_resp.text()
+        );
 
         // Dispatch is in a spawned task — wait up to 3 s for the delivery.
         echo.wait_for_requests(1, 3000).await;
 
         let reqs = echo.requests.lock().await;
-        assert_eq!(reqs.len(), 1, "expected exactly one delivery, got {}", reqs.len());
+        assert_eq!(
+            reqs.len(),
+            1,
+            "expected exactly one delivery, got {}",
+            reqs.len()
+        );
         let r = &reqs[0];
         assert_eq!(r.method, "POST");
         assert!(r.path.starts_with("/hook"));
         // Payload must include diff_id and breaking_count.
-        let payload: serde_json::Value = serde_json::from_str(&r.body).expect("delivery body must be JSON");
-        assert!(payload["diff_id"].is_string(), "payload must contain diff_id");
+        let payload: serde_json::Value =
+            serde_json::from_str(&r.body).expect("delivery body must be JSON");
+        assert!(
+            payload["diff_id"].is_string(),
+            "payload must contain diff_id"
+        );
         // HMAC signature header must be present.
-        let has_sig = r.headers.iter().any(|(k, _)| k.to_lowercase() == "x-radar-signature-256");
+        let has_sig = r
+            .headers
+            .iter()
+            .any(|(k, _)| k.to_lowercase() == "x-radar-signature-256");
         assert!(has_sig, "delivery must carry X-Radar-Signature-256 header");
     }
 
@@ -4566,9 +5116,18 @@ mod tests {
             .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.text();
-        assert!(body.contains("<!DOCTYPE html>"), "response must be an HTML document");
-        assert!(body.contains("API Radar"), "response must contain product branding");
-        assert!(body.contains("Weekly Digest"), "response must contain digest heading");
+        assert!(
+            body.contains("<!DOCTYPE html>"),
+            "response must be an HTML document"
+        );
+        assert!(
+            body.contains("API Radar"),
+            "response must contain product branding"
+        );
+        assert!(
+            body.contains("Weekly Digest"),
+            "response must contain digest heading"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4588,7 +5147,10 @@ mod tests {
         let db_item = items.iter().find(|i| i["name"] == "db_connected").unwrap();
         assert_eq!(db_item["status"], "ok");
         // service_registered is missing on empty DB
-        let svc_item = items.iter().find(|i| i["name"] == "service_registered").unwrap();
+        let svc_item = items
+            .iter()
+            .find(|i| i["name"] == "service_registered")
+            .unwrap();
         assert_eq!(svc_item["status"], "missing");
     }
 
@@ -4639,7 +5201,9 @@ mod tests {
             &serde_json::json!({ "name": "pag-svc", "repo_url": "", "owner_team": "", "spec_format": "openapi" }),
         ).await;
         let svc_id = serde_json::from_str::<Value>(svc.text()).unwrap()["id"]
-            .as_str().unwrap().to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
 
         for i in 0..3u32 {
             client.post_json(
@@ -4651,7 +5215,10 @@ mod tests {
         let resp = client.get("/v1/diffs?limit=2").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body: Value = serde_json::from_str(resp.text()).unwrap();
-        assert!(body.as_array().unwrap().len() <= 2, "limit=2 must return at most 2 diffs");
+        assert!(
+            body.as_array().unwrap().len() <= 2,
+            "limit=2 must return at most 2 diffs"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4671,7 +5238,9 @@ mod tests {
         ).await;
         assert_eq!(svc.status(), StatusCode::CREATED);
         let svc_id = serde_json::from_str::<Value>(svc.text()).unwrap()["id"]
-            .as_str().unwrap().to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
 
         client_a.post_json(
             &format!("/v1/services/{svc_id}/diffs"),
@@ -4682,7 +5251,9 @@ mod tests {
         let resp = client_b.get("/v1/diffs").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let diffs: Vec<Value> = serde_json::from_str(resp.text()).unwrap();
-        let found = diffs.iter().any(|d| d["service_id"].as_str() == Some(&svc_id));
+        let found = diffs
+            .iter()
+            .any(|d| d["service_id"].as_str() == Some(&svc_id));
         assert!(!found, "org-beta must not see org-alpha's diffs");
     }
 
@@ -4695,23 +5266,34 @@ mod tests {
         let pool = test_pool().await;
         let client = test_helpers::TestClient::new(pool);
 
-        let first = client.post_json(
-            "/v1/consumers/upsert",
-            &serde_json::json!({ "name": "upsert-consumer", "catalog_source": "test" }),
-        ).await;
+        let first = client
+            .post_json(
+                "/v1/consumers/upsert",
+                &serde_json::json!({ "name": "upsert-consumer", "catalog_source": "test" }),
+            )
+            .await;
         assert_eq!(first.status(), StatusCode::CREATED);
         let id1 = serde_json::from_str::<Value>(first.text()).unwrap()["id"]
-            .as_str().unwrap().to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
 
-        let second = client.post_json(
-            "/v1/consumers/upsert",
-            &serde_json::json!({ "name": "upsert-consumer", "catalog_source": "test" }),
-        ).await;
+        let second = client
+            .post_json(
+                "/v1/consumers/upsert",
+                &serde_json::json!({ "name": "upsert-consumer", "catalog_source": "test" }),
+            )
+            .await;
         assert_eq!(second.status(), StatusCode::OK);
         let id2 = serde_json::from_str::<Value>(second.text()).unwrap()["id"]
-            .as_str().unwrap().to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
 
-        assert_eq!(id1, id2, "upsert with same name must return the same consumer id");
+        assert_eq!(
+            id1, id2,
+            "upsert with same name must return the same consumer id"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4727,15 +5309,25 @@ mod tests {
         let first = client.post_json("/v1/services", &body).await;
         assert_eq!(first.status(), StatusCode::CREATED);
         let id1 = serde_json::from_str::<Value>(first.text()).unwrap()["id"]
-            .as_str().unwrap().to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let second = client.post_json("/v1/services", &body).await;
-        assert_eq!(second.status(), StatusCode::CREATED,
-            "same-name services are allowed; uniqueness is enforced on id only");
+        assert_eq!(
+            second.status(),
+            StatusCode::CREATED,
+            "same-name services are allowed; uniqueness is enforced on id only"
+        );
         let id2 = serde_json::from_str::<Value>(second.text()).unwrap()["id"]
-            .as_str().unwrap().to_string();
+            .as_str()
+            .unwrap()
+            .to_string();
 
-        assert_ne!(id1, id2, "two services with the same name must get distinct ids");
+        assert_ne!(
+            id1, id2,
+            "two services with the same name must get distinct ids"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4747,25 +5339,34 @@ mod tests {
         let pool = test_pool().await;
         let client = test_helpers::TestClient::new(pool);
 
-        let post = client.post_json(
-            "/v1/audit-events",
-            &serde_json::json!({
-                "actor": "ci-bot",
-                "action": "secret.redact.test",
-                "meta": { "api_key": "super-secret-key", "label": "visible" }
-            }),
-        ).await;
+        let post = client
+            .post_json(
+                "/v1/audit-events",
+                &serde_json::json!({
+                    "actor": "ci-bot",
+                    "action": "secret.redact.test",
+                    "meta": { "api_key": "super-secret-key", "label": "visible" }
+                }),
+            )
+            .await;
         assert_eq!(post.status(), StatusCode::CREATED);
 
         // POST returns {"ok": true}; retrieve the stored event via the list endpoint.
-        let list = client.get("/v1/audit-events?action=secret.redact.test").await;
+        let list = client
+            .get("/v1/audit-events?action=secret.redact.test")
+            .await;
         assert_eq!(list.status(), StatusCode::OK);
         let body: Value = serde_json::from_str(list.text()).unwrap();
         let entry = &body["entries"][0];
         let meta = &entry["meta"];
-        assert_ne!(meta["api_key"], "super-secret-key",
-            "api_key must be redacted in stored audit event");
-        assert_eq!(meta["label"], "visible", "non-secret field must be preserved");
+        assert_ne!(
+            meta["api_key"], "super-secret-key",
+            "api_key must be redacted in stored audit event"
+        );
+        assert_eq!(
+            meta["label"], "visible",
+            "non-secret field must be preserved"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4780,7 +5381,9 @@ mod tests {
         let resp = client.get("/v1/evidence/coverage").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body: Value = serde_json::from_str(resp.text()).unwrap();
-        assert!(body.is_array(), "evidence/coverage must return a JSON array");
+        assert!(
+            body.is_array(),
+            "evidence/coverage must return a JSON array"
+        );
     }
 }
-

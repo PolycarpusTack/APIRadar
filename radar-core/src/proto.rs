@@ -234,9 +234,7 @@ fn read_message_body(bytes: &[u8], start: usize) -> (Vec<ProtoField>, usize) {
                 // `oneof <name> { <fields> }` — its members share the message's
                 // field-number space, so parse them as fields of this message
                 // rather than skipping the nested block.
-                if pos < bytes.len()
-                    && bytes[pos] == b'{'
-                    && stmt.trim_start().starts_with("oneof")
+                if pos < bytes.len() && bytes[pos] == b'{' && stmt.trim_start().starts_with("oneof")
                 {
                     pos += 1; // consume '{'
                     read_oneof_fields(bytes, &mut pos, &mut fields);
@@ -362,7 +360,11 @@ fn parse_field_stmt(stmt: &str) -> Option<ProtoField> {
             return None;
         }
         let num_raw = parts.next()?;
-        let num_str = num_raw.split('[').next().unwrap_or(num_raw).trim_end_matches(';');
+        let num_str = num_raw
+            .split('[')
+            .next()
+            .unwrap_or(num_raw)
+            .trim_end_matches(';');
         let number: u32 = num_str.parse().ok()?;
         return Some(ProtoField {
             name: field_name,
@@ -397,7 +399,11 @@ fn parse_field_stmt(stmt: &str) -> Option<ProtoField> {
 
     // Field number (may be followed by `[...options...]`)
     let num_raw = parts.next()?;
-    let num_str = num_raw.split('[').next().unwrap_or(num_raw).trim_end_matches(';');
+    let num_str = num_raw
+        .split('[')
+        .next()
+        .unwrap_or(num_raw)
+        .trim_end_matches(';');
     let number: u32 = num_str.parse().ok()?;
 
     Some(ProtoField {
@@ -424,7 +430,11 @@ fn parse_enum_value_stmt(stmt: &str) -> Option<(String, i32)> {
         return None;
     }
     let num_raw = parts.next()?;
-    let num_str = num_raw.split('[').next().unwrap_or(num_raw).trim_end_matches(';');
+    let num_str = num_raw
+        .split('[')
+        .next()
+        .unwrap_or(num_raw)
+        .trim_end_matches(';');
     let number: i32 = num_str.parse().ok()?;
     Some((name, number))
 }
@@ -645,7 +655,8 @@ mod tests {
 
     #[test]
     fn test_enum_value_removed_is_breaking() {
-        let base = parse(r#"syntax="proto3"; enum Status { ACTIVE = 0; INACTIVE = 1; PENDING = 2; }"#);
+        let base =
+            parse(r#"syntax="proto3"; enum Status { ACTIVE = 0; INACTIVE = 1; PENDING = 2; }"#);
         let head = parse(r#"syntax="proto3"; enum Status { ACTIVE = 0; INACTIVE = 1; }"#);
         let changes = diff_proto(&base, &head);
         let removed: Vec<_> = changes
@@ -659,7 +670,9 @@ mod tests {
     #[test]
     fn test_repeated_field_added_is_safe() {
         let base = parse(r#"syntax="proto3"; message User { string name = 1; }"#);
-        let head = parse(r#"syntax="proto3"; message User { string name = 1; repeated string tags = 2; }"#);
+        let head = parse(
+            r#"syntax="proto3"; message User { string name = 1; repeated string tags = 2; }"#,
+        );
         let changes = diff_proto(&base, &head);
         assert!(
             changes.iter().all(|c| c.severity == Severity::Safe),
@@ -691,16 +704,19 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_oneof_member_removed_is_breaking() {
-        let base = parse(
-            r#"syntax="proto3"; message M { oneof choice { string a = 1; int32 b = 2; } }"#,
-        );
+        let base =
+            parse(r#"syntax="proto3"; message M { oneof choice { string a = 1; int32 b = 2; } }"#);
         let head = parse(r#"syntax="proto3"; message M { oneof choice { string a = 1; } }"#);
         let changes = diff_proto(&base, &head);
         let removed: Vec<_> = changes
             .iter()
             .filter(|c| c.kind == ChangeKind::FieldRemoved && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(removed.len(), 1, "oneof member removal must be detected, got: {changes:?}");
+        assert_eq!(
+            removed.len(),
+            1,
+            "oneof member removal must be detected, got: {changes:?}"
+        );
         assert!(removed[0].path.contains('b'));
     }
 
@@ -718,7 +734,11 @@ mod tests {
             .iter()
             .filter(|c| c.kind == ChangeKind::FieldRemoved && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(removed.len(), 1, "map field removal must be detected, got: {changes:?}");
+        assert_eq!(
+            removed.len(),
+            1,
+            "map field removal must be detected, got: {changes:?}"
+        );
         assert!(removed[0].path.contains("labels"));
     }
 
@@ -731,6 +751,10 @@ mod tests {
             .iter()
             .filter(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(changed.len(), 1, "map value type change must be detected, got: {changes:?}");
+        assert_eq!(
+            changed.len(),
+            1,
+            "map value type change must be detected, got: {changes:?}"
+        );
     }
 }

@@ -1,3 +1,7 @@
+use crate::ai::{build_both_formats, detect_provider};
+use crate::auth::{assert_org_access, require_org_owned, JwtClaims, OrgResource};
+use crate::errors::ApiError;
+use crate::PaginationParams;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -7,10 +11,6 @@ use axum::{
 use chrono::Utc;
 use serde_json::{json, Value};
 use uuid::Uuid;
-use crate::auth::{JwtClaims, OrgResource, assert_org_access, require_org_owned};
-use crate::errors::ApiError;
-use crate::ai::{detect_provider, build_both_formats};
-use crate::PaginationParams;
 
 #[derive(serde::Deserialize)]
 pub(crate) struct GenerateTestsBody {
@@ -61,22 +61,25 @@ pub(crate) async fn generate_tests(
 
     if has_diff && !has_jira {
         let diff_id = body.diff_id.as_deref().unwrap();
-        let changes_rows = sqlx::query(
-            "SELECT path, kind, severity FROM change WHERE diff_id = ?",
-        )
-        .bind(diff_id)
-        .fetch_all(&pool)
-        .await?;
+        let changes_rows = sqlx::query("SELECT path, kind, severity FROM change WHERE diff_id = ?")
+            .bind(diff_id)
+            .fetch_all(&pool)
+            .await?;
 
         if changes_rows.is_empty() {
             return Err(ApiError::NotFound(format!("diff {diff_id} has no changes")));
         }
 
-        let changes: Vec<Value> = changes_rows.iter().map(|r| json!({
-            "path":     r.try_get::<String, _>("path").unwrap_or_default(),
-            "kind":     r.try_get::<String, _>("kind").unwrap_or_default(),
-            "severity": r.try_get::<String, _>("severity").unwrap_or_default(),
-        })).collect();
+        let changes: Vec<Value> = changes_rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "path":     r.try_get::<String, _>("path").unwrap_or_default(),
+                    "kind":     r.try_get::<String, _>("kind").unwrap_or_default(),
+                    "severity": r.try_get::<String, _>("severity").unwrap_or_default(),
+                })
+            })
+            .collect();
 
         let evidence = load_diff_evidence(&pool, diff_id, body.consumer_id.as_deref()).await?;
 
@@ -86,7 +89,8 @@ pub(crate) async fn generate_tests(
             templates_from_changes(&changes, &evidence)
         } else {
             let context = format_diff_test_context(&changes, &evidence);
-            let spec_yaml = resolve_spec_yaml(&pool, Some(diff_id), body.spec_yaml.as_deref()).await?;
+            let spec_yaml =
+                resolve_spec_yaml(&pool, Some(diff_id), body.spec_yaml.as_deref()).await?;
             call_ai_for_tests_from_diff(&context, &spec_yaml)
                 .await
                 .map_err(|e| ApiError::BadRequest(format!("test generation failed: {e}")))?
@@ -96,7 +100,11 @@ pub(crate) async fn generate_tests(
         let items = collection_json["item"].as_array();
         let test_count = items.map(|a| a.len()).unwrap_or(0) as i64;
         let happy_count = items
-            .map(|a| a.iter().filter(|i| i["name"].as_str().unwrap_or("").starts_with("[HAPPY")).count())
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["name"].as_str().unwrap_or("").starts_with("[HAPPY"))
+                    .count()
+            })
             .unwrap_or(0) as i64;
         let negative_count = test_count - happy_count;
         let collection_name = collection_json["info"]["name"]
@@ -177,22 +185,29 @@ pub(crate) async fn generate_tests(
         },
     };
 
-    let spec_yaml = resolve_spec_yaml(&pool, body.diff_id.as_deref(), body.spec_yaml.as_deref()).await?;
+    let spec_yaml =
+        resolve_spec_yaml(&pool, body.diff_id.as_deref(), body.spec_yaml.as_deref()).await?;
 
-    let suite_raw =
-        call_ai_for_tests(&jira_summary, &jira_description, &spec_yaml)
-            .await
-            .map_err(|e| ApiError::BadRequest(format!("test generation failed: {e}")))?;
+    let suite_raw = call_ai_for_tests(&jira_summary, &jira_description, &spec_yaml)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("test generation failed: {e}")))?;
 
     let (collection_json, apitesting_yaml) = build_both_formats(suite_raw, &body.base_url);
 
     let items = collection_json["item"].as_array();
     let test_count = items.map(|a| a.len()).unwrap_or(0) as i64;
     let happy_count = items
-        .map(|a| a.iter().filter(|i| i["name"].as_str().unwrap_or("").starts_with("[HAPPY")).count())
+        .map(|a| {
+            a.iter()
+                .filter(|i| i["name"].as_str().unwrap_or("").starts_with("[HAPPY"))
+                .count()
+        })
         .unwrap_or(0) as i64;
     let negative_count = test_count - happy_count;
-    let collection_name = collection_json["info"]["name"].as_str().unwrap_or("Generated Tests").to_string();
+    let collection_name = collection_json["info"]["name"]
+        .as_str()
+        .unwrap_or("Generated Tests")
+        .to_string();
 
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
@@ -319,15 +334,20 @@ pub(crate) async fn list_diff_test_suites(
     .fetch_all(&pool)
     .await?;
 
-    let items: Vec<Value> = rows.iter().map(|r| json!({
-        "id":              r.get::<String, _>("id"),
-        "collection_name": r.get::<String, _>("collection_name"),
-        "test_count":      r.try_get::<i64, _>("test_count").unwrap_or(0),
-        "happy_count":     r.try_get::<i64, _>("happy_count").unwrap_or(0),
-        "negative_count":  r.try_get::<i64, _>("negative_count").unwrap_or(0),
-        "consumer_id":     r.try_get::<Option<String>, _>("consumer_id").unwrap_or(None),
-        "created_at":      r.get::<String, _>("created_at"),
-    })).collect();
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id":              r.get::<String, _>("id"),
+                "collection_name": r.get::<String, _>("collection_name"),
+                "test_count":      r.try_get::<i64, _>("test_count").unwrap_or(0),
+                "happy_count":     r.try_get::<i64, _>("happy_count").unwrap_or(0),
+                "negative_count":  r.try_get::<i64, _>("negative_count").unwrap_or(0),
+                "consumer_id":     r.try_get::<Option<String>, _>("consumer_id").unwrap_or(None),
+                "created_at":      r.get::<String, _>("created_at"),
+            })
+        })
+        .collect();
 
     Ok(Json(json!(items)))
 }
@@ -355,16 +375,24 @@ pub(crate) async fn get_test_suite(
     .await?;
 
     match row {
-        None => Err(ApiError::NotFound(format!("test suite {suite_id} not found"))),
+        None => Err(ApiError::NotFound(format!(
+            "test suite {suite_id} not found"
+        ))),
         Some(r) => {
             let row_org_id: String = r.try_get("service_org_id").unwrap_or_default();
-            assert_org_access(&row_org_id, &caller_org_id, &format!("test suite {suite_id}"))?;
+            assert_org_access(
+                &row_org_id,
+                &caller_org_id,
+                &format!("test suite {suite_id}"),
+            )?;
             let collection_json: Value = r
                 .try_get::<String, _>("collection_json")
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or(Value::Null);
-            let apitesting_yaml = r.try_get::<Option<String>, _>("apitesting_yaml").unwrap_or(None);
+            let apitesting_yaml = r
+                .try_get::<Option<String>, _>("apitesting_yaml")
+                .unwrap_or(None);
             Ok((
                 StatusCode::OK,
                 Json(json!({
@@ -406,24 +434,27 @@ pub(crate) async fn load_diff_evidence(
         qb = qb.bind(cid);
     }
     let rows = qb.fetch_all(pool).await?;
-    Ok(rows.iter().map(|r| json!({
-        "consumer_id":   r.try_get::<String, _>("consumer_id").unwrap_or_default(),
-        "consumer_name": r.try_get::<Option<String>, _>("consumer_name").unwrap_or(None),
-        "source_type":   r.try_get::<String, _>("source_type").unwrap_or_default(),
-        "operation":     r.try_get::<Option<String>, _>("operation").unwrap_or(None),
-        "field_path":    r.try_get::<Option<String>, _>("field_path").unwrap_or(None),
-        "confidence":    r.try_get::<String, _>("confidence").unwrap_or_default(),
-        "observed_at":   r.try_get::<String, _>("observed_at").unwrap_or_default(),
-    })).collect())
+    Ok(rows
+        .iter()
+        .map(|r| {
+            json!({
+                "consumer_id":   r.try_get::<String, _>("consumer_id").unwrap_or_default(),
+                "consumer_name": r.try_get::<Option<String>, _>("consumer_name").unwrap_or(None),
+                "source_type":   r.try_get::<String, _>("source_type").unwrap_or_default(),
+                "operation":     r.try_get::<Option<String>, _>("operation").unwrap_or(None),
+                "field_path":    r.try_get::<Option<String>, _>("field_path").unwrap_or(None),
+                "confidence":    r.try_get::<String, _>("confidence").unwrap_or_default(),
+                "observed_at":   r.try_get::<String, _>("observed_at").unwrap_or_default(),
+            })
+        })
+        .collect())
 }
 
 async fn fetch_jira_ticket(key: &str) -> anyhow::Result<(String, String)> {
-    let base = std::env::var("JIRA_BASE_URL")
-        .map_err(|_| anyhow::anyhow!("JIRA_BASE_URL not set"))?;
-    let email = std::env::var("JIRA_EMAIL")
-        .map_err(|_| anyhow::anyhow!("JIRA_EMAIL not set"))?;
-    let token = std::env::var("JIRA_TOKEN")
-        .map_err(|_| anyhow::anyhow!("JIRA_TOKEN not set"))?;
+    let base =
+        std::env::var("JIRA_BASE_URL").map_err(|_| anyhow::anyhow!("JIRA_BASE_URL not set"))?;
+    let email = std::env::var("JIRA_EMAIL").map_err(|_| anyhow::anyhow!("JIRA_EMAIL not set"))?;
+    let token = std::env::var("JIRA_TOKEN").map_err(|_| anyhow::anyhow!("JIRA_TOKEN not set"))?;
 
     let url = format!("{}/rest/api/2/issue/{}", base.trim_end_matches('/'), key);
     let resp = reqwest::Client::new()
@@ -440,7 +471,11 @@ async fn fetch_jira_ticket(key: &str) -> anyhow::Result<(String, String)> {
     Ok((summary, description))
 }
 
-async fn resolve_spec_yaml(pool: &sqlx::AnyPool, diff_id: Option<&str>, explicit: Option<&str>) -> Result<String, ApiError> {
+async fn resolve_spec_yaml(
+    pool: &sqlx::AnyPool,
+    diff_id: Option<&str>,
+    explicit: Option<&str>,
+) -> Result<String, ApiError> {
     use sqlx::Row;
     if let Some(s) = explicit {
         return Ok(s.to_string());
@@ -455,7 +490,9 @@ async fn resolve_spec_yaml(pool: &sqlx::AnyPool, diff_id: Option<&str>, explicit
     .fetch_optional(pool)
     .await?;
     row.and_then(|r| r.try_get::<Option<String>, _>("spec_yaml").ok().flatten())
-        .ok_or_else(|| ApiError::BadRequest("No stored spec for this diff; supply spec_yaml directly.".into()))
+        .ok_or_else(|| {
+            ApiError::BadRequest("No stored spec for this diff; supply spec_yaml directly.".into())
+        })
 }
 
 fn format_diff_test_context(changes: &[Value], evidence: &[Value]) -> String {
@@ -463,22 +500,26 @@ fn format_diff_test_context(changes: &[Value], evidence: &[Value]) -> String {
     for c in changes {
         let path = c["path"].as_str().unwrap_or("?");
         let kind = c["kind"].as_str().unwrap_or("?");
-        let sev  = c["severity"].as_str().unwrap_or("?");
+        let sev = c["severity"].as_str().unwrap_or("?");
         out.push_str(&format!("- [{sev}] {kind}: {path}\n"));
     }
     if !evidence.is_empty() {
         out.push_str("\n## Active Consumer Evidence\n\n");
         for ev in evidence.iter().take(20) {
-            let consumer = ev["consumer_name"].as_str()
-                .or_else(|| ev["consumer_id"].as_str()).unwrap_or("?");
-            let op  = ev["operation"].as_str().unwrap_or("?");
-            let fp  = ev["field_path"].as_str().unwrap_or("");
+            let consumer = ev["consumer_name"]
+                .as_str()
+                .or_else(|| ev["consumer_id"].as_str())
+                .unwrap_or("?");
+            let op = ev["operation"].as_str().unwrap_or("?");
+            let fp = ev["field_path"].as_str().unwrap_or("");
             let src = ev["source_type"].as_str().unwrap_or("?");
             let conf = ev["confidence"].as_str().unwrap_or("?");
             if fp.is_empty() {
                 out.push_str(&format!("- {consumer} calls {op} ({src}, {conf})\n"));
             } else {
-                out.push_str(&format!("- {consumer} accesses {op} → {fp} ({src}, {conf})\n"));
+                out.push_str(&format!(
+                    "- {consumer} accesses {op} → {fp} ({src}, {conf})\n"
+                ));
             }
         }
     }
@@ -488,7 +529,8 @@ fn format_diff_test_context(changes: &[Value], evidence: &[Value]) -> String {
 pub(crate) fn templates_from_changes(changes: &[Value], evidence: &[Value]) -> Value {
     let mut test_cases: Vec<Value> = Vec::new();
 
-    let evidence_ops: Vec<&str> = evidence.iter()
+    let evidence_ops: Vec<&str> = evidence
+        .iter()
         .filter_map(|e| e["operation"].as_str())
         .collect();
 
@@ -497,7 +539,7 @@ pub(crate) fn templates_from_changes(changes: &[Value], evidence: &[Value]) -> V
         let raw_path = change["path"].as_str().unwrap_or("/unknown");
 
         let (operation, field_hint) = if let Some(idx) = raw_path.find(" \u{2192} ") {
-            let op  = &raw_path[..idx];
+            let op = &raw_path[..idx];
             let fld = &raw_path[idx + " \u{2192} ".len()..];
             (op.trim(), fld.trim())
         } else {
@@ -510,7 +552,11 @@ pub(crate) fn templates_from_changes(changes: &[Value], evidence: &[Value]) -> V
 
         match kind {
             "field_removed" => {
-                let field = if field_hint.is_empty() { "removedField" } else { field_hint };
+                let field = if field_hint.is_empty() {
+                    "removedField"
+                } else {
+                    field_hint
+                };
                 test_cases.push(json!({
                     "name": format!("[HAPPY] {method} {route} — response omits `{field}`{evidence_tag}"),
                     "category": "happy_path",
@@ -539,7 +585,11 @@ pub(crate) fn templates_from_changes(changes: &[Value], evidence: &[Value]) -> V
                 }));
             }
             "required_changed" => {
-                let field = if field_hint.is_empty() { "requiredField" } else { field_hint };
+                let field = if field_hint.is_empty() {
+                    "requiredField"
+                } else {
+                    field_hint
+                };
                 test_cases.push(json!({
                     "name": format!("[NEGATIVE] {method} {route} — missing required `{field}` → 422{evidence_tag}"),
                     "category": "negative",
@@ -568,7 +618,11 @@ pub(crate) fn templates_from_changes(changes: &[Value], evidence: &[Value]) -> V
                 }));
             }
             "enum_value_removed" => {
-                let field = if field_hint.is_empty() { "enumField" } else { field_hint };
+                let field = if field_hint.is_empty() {
+                    "enumField"
+                } else {
+                    field_hint
+                };
                 test_cases.push(json!({
                     "name": format!("[NEGATIVE] {method} {route} — removed enum value for `{field}` → 422{evidence_tag}"),
                     "category": "negative",
@@ -599,7 +653,11 @@ pub(crate) fn templates_from_changes(changes: &[Value], evidence: &[Value]) -> V
                 }));
             }
             "type_changed" | "nullability_changed" => {
-                let field = if field_hint.is_empty() { "changedField" } else { field_hint };
+                let field = if field_hint.is_empty() {
+                    "changedField"
+                } else {
+                    field_hint
+                };
                 test_cases.push(json!({
                     "name": format!("[NEGATIVE] {method} {route} — wrong type for `{field}` → 422{evidence_tag}"),
                     "category": "negative",
@@ -652,7 +710,11 @@ pub(crate) fn templates_from_changes(changes: &[Value], evidence: &[Value]) -> V
 }
 
 async fn call_ai_for_tests_from_diff(context: &str, spec_yaml: &str) -> anyhow::Result<Value> {
-    let spec_excerpt = if spec_yaml.len() > 30_000 { &spec_yaml[..30_000] } else { spec_yaml };
+    let spec_excerpt = if spec_yaml.len() > 30_000 {
+        &spec_yaml[..30_000]
+    } else {
+        spec_yaml
+    };
 
     let prompt = format!(
         r#"You are a QA engineer generating Postman API tests from an API contract diff.
@@ -701,8 +763,12 @@ Required JSON format:
         .await
         .ok_or_else(|| anyhow::anyhow!("AI provider call failed"))?;
 
-    let start = raw_text.find('{').ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
-    let end = raw_text.rfind('}').ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
+    let start = raw_text
+        .find('{')
+        .ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
+    let end = raw_text
+        .rfind('}')
+        .ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
     Ok(serde_json::from_str(&raw_text[start..=end])?)
 }
 
@@ -711,7 +777,11 @@ async fn call_ai_for_tests(
     jira_description: &str,
     spec_yaml: &str,
 ) -> anyhow::Result<Value> {
-    let spec_excerpt = if spec_yaml.len() > 40_000 { &spec_yaml[..40_000] } else { spec_yaml };
+    let spec_excerpt = if spec_yaml.len() > 40_000 {
+        &spec_yaml[..40_000]
+    } else {
+        spec_yaml
+    };
 
     let prompt = format!(
         r#"You are a QA engineer generating Postman API tests from a Jira ticket and an OpenAPI spec.
@@ -764,8 +834,12 @@ Required JSON format:
         .await
         .ok_or_else(|| anyhow::anyhow!("AI provider call failed"))?;
 
-    let start = raw_text.find('{').ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
-    let end = raw_text.rfind('}').ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
+    let start = raw_text
+        .find('{')
+        .ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
+    let end = raw_text
+        .rfind('}')
+        .ok_or_else(|| anyhow::anyhow!("no JSON in response"))?;
     let suite: Value = serde_json::from_str(&raw_text[start..=end])?;
     Ok(suite)
 }

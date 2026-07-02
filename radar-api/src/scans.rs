@@ -30,8 +30,12 @@ pub(crate) struct CreateScanBody {
     interval_minutes: i32,
 }
 
-fn default_format() -> String { "openapi".to_string() }
-fn default_interval() -> i32 { 60 }
+fn default_format() -> String {
+    "openapi".to_string()
+}
+fn default_interval() -> i32 {
+    60
+}
 
 #[derive(Serialize)]
 struct ScanResponse {
@@ -59,11 +63,13 @@ fn row_to_response(row: &sqlx::any::AnyRow) -> ScanResponse {
         last_run_at: row.try_get("last_run_at").ok().flatten(),
         last_run_status: row.try_get("last_run_status").ok().flatten(),
         last_run_error: row.try_get("last_run_error").ok().flatten(),
-        active: { let v: i32 = row.get("active"); v != 0 },
+        active: {
+            let v: i32 = row.get("active");
+            v != 0
+        },
         created_at: row.get("created_at"),
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // POST /v1/scheduled-scans
@@ -77,7 +83,9 @@ pub(crate) async fn create_scan(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
     if body.interval_minutes < 15 {
-        return Err(ApiError::BadRequest("interval_minutes must be at least 15".into()));
+        return Err(ApiError::BadRequest(
+            "interval_minutes must be at least 15".into(),
+        ));
     }
     if body.service_id.is_empty() {
         return Err(ApiError::BadRequest("service_id is required".into()));
@@ -112,13 +120,11 @@ pub(crate) async fn create_scan(
 
     if let Some(row) = existing {
         let id: String = row.get("id");
-        sqlx::query(
-            "UPDATE scheduled_scan SET interval_minutes = ?, active = 1 WHERE id = ?",
-        )
-        .bind(body.interval_minutes)
-        .bind(&id)
-        .execute(&pool)
-        .await?;
+        sqlx::query("UPDATE scheduled_scan SET interval_minutes = ?, active = 1 WHERE id = ?")
+            .bind(body.interval_minutes)
+            .bind(&id)
+            .execute(&pool)
+            .await?;
         let updated = sqlx::query(
             "SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_run_at, last_run_status, last_run_error, active, created_at FROM scheduled_scan WHERE id = ?",
         )
@@ -281,7 +287,14 @@ async fn execute_scan(
     // Defense-in-depth SSRF + allowlist check.
     if is_ssrf_blocked(&spec_url) || !is_host_allowed(&spec_url) {
         tracing::warn!("scan {scan_id}: SSRF-blocked or disallowed spec_url — skipping execution");
-        set_scan_status(&pool, &scan_id, &now, "skipped", Some("SSRF-blocked or disallowed spec_url")).await;
+        set_scan_status(
+            &pool,
+            &scan_id,
+            &now,
+            "skipped",
+            Some("SSRF-blocked or disallowed spec_url"),
+        )
+        .await;
         return;
     }
 
@@ -314,7 +327,16 @@ async fn execute_scan(
                 let msg = format!("failed to read response body: {e}");
                 tracing::warn!("scan {scan_id}: {msg}");
                 set_scan_status(&pool, &scan_id, &now, "failed", Some(&msg)).await;
-                crate::audit::record_event(&pool, &org_id, "system", "scan.run.failed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "error": msg }))).await;
+                crate::audit::record_event(
+                    &pool,
+                    &org_id,
+                    "system",
+                    "scan.run.failed",
+                    Some("scheduled_scan"),
+                    Some(&scan_id),
+                    Some(&serde_json::json!({ "error": msg })),
+                )
+                .await;
                 return;
             }
         },
@@ -322,14 +344,32 @@ async fn execute_scan(
             let msg = format!("HTTP {}", resp.status().as_u16());
             tracing::warn!("scan {scan_id}: fetch returned {msg}");
             set_scan_status(&pool, &scan_id, &now, "failed", Some(&msg)).await;
-            crate::audit::record_event(&pool, &org_id, "system", "scan.run.failed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "error": msg }))).await;
+            crate::audit::record_event(
+                &pool,
+                &org_id,
+                "system",
+                "scan.run.failed",
+                Some("scheduled_scan"),
+                Some(&scan_id),
+                Some(&serde_json::json!({ "error": msg })),
+            )
+            .await;
             return;
         }
         Err(e) => {
             let msg = format!("fetch error: {e}");
             tracing::warn!("scan {scan_id}: {msg}");
             set_scan_status(&pool, &scan_id, &now, "failed", Some(&msg)).await;
-            crate::audit::record_event(&pool, &org_id, "system", "scan.run.failed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "error": msg }))).await;
+            crate::audit::record_event(
+                &pool,
+                &org_id,
+                "system",
+                "scan.run.failed",
+                Some("scheduled_scan"),
+                Some(&scan_id),
+                Some(&serde_json::json!({ "error": msg })),
+            )
+            .await;
             return;
         }
     };
@@ -339,7 +379,16 @@ async fn execute_scan(
     // No change — mark ok and done.
     if last_spec_hash.as_deref() == Some(hash.as_str()) {
         set_scan_status(&pool, &scan_id, &now, "ok", None).await;
-        crate::audit::record_event(&pool, &org_id, "system", "scan.run.completed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "changed": false }))).await;
+        crate::audit::record_event(
+            &pool,
+            &org_id,
+            "system",
+            "scan.run.completed",
+            Some("scheduled_scan"),
+            Some(&scan_id),
+            Some(&serde_json::json!({ "changed": false })),
+        )
+        .await;
         return;
     }
 
@@ -356,14 +405,41 @@ async fn execute_scan(
             .bind(&scan_id)
             .execute(&pool)
             .await;
-        store_scan_spec(&pool, &service_id, &org_id, &spec_url, &format, &spec_text, &now).await;
+        store_scan_spec(
+            &pool,
+            &service_id,
+            &org_id,
+            &spec_url,
+            &format,
+            &spec_text,
+            &now,
+        )
+        .await;
         set_scan_status(&pool, &scan_id, &now, "ok", None).await;
-        crate::audit::record_event(&pool, &org_id, "system", "scan.run.completed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "changed": false, "first_run": true }))).await;
+        crate::audit::record_event(
+            &pool,
+            &org_id,
+            "system",
+            "scan.run.completed",
+            Some("scheduled_scan"),
+            Some(&scan_id),
+            Some(&serde_json::json!({ "changed": false, "first_run": true })),
+        )
+        .await;
         return;
     };
 
     // Store new spec version.
-    store_scan_spec(&pool, &service_id, &org_id, &spec_url, &format, &spec_text, &now).await;
+    store_scan_spec(
+        &pool,
+        &service_id,
+        &org_id,
+        &spec_url,
+        &format,
+        &spec_text,
+        &now,
+    )
+    .await;
 
     // Run diff.
     if let Some(diff_id) = create_scan_diff(
@@ -383,7 +459,16 @@ async fn execute_scan(
             .execute(&pool)
             .await;
         set_scan_status(&pool, &scan_id, &now, "ok", None).await;
-        crate::audit::record_event(&pool, &org_id, "system", "scan.run.completed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "changed": true, "diff_id": diff_id }))).await;
+        crate::audit::record_event(
+            &pool,
+            &org_id,
+            "system",
+            "scan.run.completed",
+            Some("scheduled_scan"),
+            Some(&scan_id),
+            Some(&serde_json::json!({ "changed": true, "diff_id": diff_id })),
+        )
+        .await;
         dispatch_diff_event(pool, diff_id, org_id).await;
     } else {
         let _ = sqlx::query("UPDATE scheduled_scan SET last_spec_hash = ? WHERE id = ?")
@@ -392,7 +477,16 @@ async fn execute_scan(
             .execute(&pool)
             .await;
         set_scan_status(&pool, &scan_id, &now, "ok", None).await;
-        crate::audit::record_event(&pool, &org_id, "system", "scan.run.completed", Some("scheduled_scan"), Some(&scan_id), Some(&serde_json::json!({ "changed": false }))).await;
+        crate::audit::record_event(
+            &pool,
+            &org_id,
+            "system",
+            "scan.run.completed",
+            Some("scheduled_scan"),
+            Some(&scan_id),
+            Some(&serde_json::json!({ "changed": false })),
+        )
+        .await;
     }
 }
 
@@ -413,7 +507,13 @@ async fn fetch_previous_spec(pool: &sqlx::AnyPool, service_id: &str) -> String {
         .unwrap_or_default()
 }
 
-async fn set_scan_status(pool: &sqlx::AnyPool, scan_id: &str, run_at: &str, status: &str, error: Option<&str>) {
+async fn set_scan_status(
+    pool: &sqlx::AnyPool,
+    scan_id: &str,
+    run_at: &str,
+    status: &str,
+    error: Option<&str>,
+) {
     let _ = sqlx::query(
         "UPDATE scheduled_scan SET last_run_at = ?, last_run_status = ?, last_run_error = ? WHERE id = ?",
     )
@@ -579,15 +679,20 @@ pub(crate) async fn run_history(
     .fetch_all(&pool)
     .await?;
 
-    let history: Vec<Value> = rows.iter().map(|r| json!({
-        "id": r.get::<String,_>("id"),
-        "service_id": r.get::<String,_>("service_id"),
-        "spec_url": r.get::<String,_>("spec_url"),
-        "last_run_at": r.try_get::<Option<String>,_>("last_run_at").ok().flatten(),
-        "last_run_status": r.try_get::<Option<String>,_>("last_run_status").ok().flatten(),
-        "last_run_error": r.try_get::<Option<String>,_>("last_run_error").ok().flatten(),
-        "last_spec_hash": r.try_get::<Option<String>,_>("last_spec_hash").ok().flatten(),
-    })).collect();
+    let history: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<String,_>("id"),
+                "service_id": r.get::<String,_>("service_id"),
+                "spec_url": r.get::<String,_>("spec_url"),
+                "last_run_at": r.try_get::<Option<String>,_>("last_run_at").ok().flatten(),
+                "last_run_status": r.try_get::<Option<String>,_>("last_run_status").ok().flatten(),
+                "last_run_error": r.try_get::<Option<String>,_>("last_run_error").ok().flatten(),
+                "last_spec_hash": r.try_get::<Option<String>,_>("last_spec_hash").ok().flatten(),
+            })
+        })
+        .collect();
 
     Ok(Json(history))
 }
@@ -608,14 +713,26 @@ mod tests {
             .connect(&url)
             .await
             .expect("pool");
-        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
         if url.starts_with("sqlite") {
-            sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.unwrap();
+            sqlx::query("PRAGMA foreign_keys = OFF")
+                .execute(&pool)
+                .await
+                .unwrap();
         }
         pool
     }
 
-    async fn insert_spec(pool: &sqlx::AnyPool, id: &str, service_id: &str, captured_at: &str, yaml: &str) {
+    async fn insert_spec(
+        pool: &sqlx::AnyPool,
+        id: &str,
+        service_id: &str,
+        captured_at: &str,
+        yaml: &str,
+    ) {
         sqlx::query(
             "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
              VALUES (?, ?, 'test', ?, 'openapi', ?)",
@@ -636,11 +753,28 @@ mod tests {
     async fn fetch_previous_spec_returns_most_recent_stored() {
         let pool = test_pool().await;
         let svc = "svc-m6";
-        insert_spec(&pool, "v1", svc, "2026-07-01T10:00:00.000000000+00:00", "spec-v1").await;
-        insert_spec(&pool, "v2", svc, "2026-07-02T10:00:00.000000000+00:00", "spec-v2").await;
+        insert_spec(
+            &pool,
+            "v1",
+            svc,
+            "2026-07-01T10:00:00.000000000+00:00",
+            "spec-v1",
+        )
+        .await;
+        insert_spec(
+            &pool,
+            "v2",
+            svc,
+            "2026-07-02T10:00:00.000000000+00:00",
+            "spec-v2",
+        )
+        .await;
 
         let base = fetch_previous_spec(&pool, svc).await;
-        assert_eq!(base, "spec-v2", "must diff against the immediately previous spec, not an older one");
+        assert_eq!(
+            base, "spec-v2",
+            "must diff against the immediately previous spec, not an older one"
+        );
     }
 
     #[tokio::test]

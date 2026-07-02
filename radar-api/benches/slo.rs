@@ -254,8 +254,7 @@ fn bench_usage_ingest(c: &mut Criterion) {
                 })
             })
             .collect();
-        let body_bytes =
-            axum::body::Bytes::from(serde_json::to_vec(&body).unwrap());
+        let body_bytes = axum::body::Bytes::from(serde_json::to_vec(&body).unwrap());
 
         group.bench_with_input(
             BenchmarkId::new("batch", batch_size),

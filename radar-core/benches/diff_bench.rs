@@ -116,9 +116,7 @@ fn bench_diff(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("diff_openapi");
 
-    group.bench_function("payments_v1_v2", |b| {
-        b.iter(|| diff_openapi(&v1, &v2))
-    });
+    group.bench_function("payments_v1_v2", |b| b.iter(|| diff_openapi(&v1, &v2)));
 
     group.bench_with_input(
         BenchmarkId::new("wide_spec", "2_fields_removed"),
@@ -126,9 +124,7 @@ fn bench_diff(c: &mut Criterion) {
         |b, (base, head)| b.iter(|| diff_openapi(base, head)),
     );
 
-    group.bench_function("identical_spec", |b| {
-        b.iter(|| diff_openapi(&v1, &v1))
-    });
+    group.bench_function("identical_spec", |b| b.iter(|| diff_openapi(&v1, &v1)));
 
     group.finish();
 }

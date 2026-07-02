@@ -327,7 +327,7 @@ fn render_policy_verdict_section(verdict: &str, fail_mode: &str, consumer_count:
 
 fn severity_emoji(severity: &Severity) -> &'static str {
     match severity {
-        Severity::Breaking => "\u{1f534}",        // 🔴
+        Severity::Breaking => "\u{1f534}",         // 🔴
         Severity::NonBreakingRisky => "\u{1f7e1}", // 🟡
         Severity::Safe => "\u{1f7e2}",             // 🟢
     }
@@ -422,10 +422,7 @@ async fn find_existing_comment(
 /// Returns the comment URL on success.
 pub async fn post_or_update_comment(ctx: &GithubContext, body: &str) -> Result<String> {
     let mut default_headers = HeaderMap::new();
-    default_headers.insert(
-        USER_AGENT,
-        HeaderValue::from_static("radar-monitor/0.1"),
-    );
+    default_headers.insert(USER_AGENT, HeaderValue::from_static("radar-monitor/0.1"));
 
     let client = reqwest::Client::builder()
         .default_headers(default_headers)
@@ -435,8 +432,7 @@ pub async fn post_or_update_comment(ctx: &GithubContext, body: &str) -> Result<S
         .context("failed to build HTTP client")?;
 
     let auth_value = format!("Bearer {}", ctx.token);
-    let auth_header =
-        HeaderValue::from_str(&auth_value).context("invalid GITHUB_TOKEN value")?;
+    let auth_header = HeaderValue::from_str(&auth_value).context("invalid GITHUB_TOKEN value")?;
 
     // List existing comments on the PR, paginating until we find the marker
     // comment or run out of pages.  Looking only at the first page would post a
@@ -593,8 +589,7 @@ pub async fn post_release(
         .context("failed to build HTTP client")?;
 
     let auth_value = format!("Bearer {}", ctx.token);
-    let auth_header =
-        HeaderValue::from_str(&auth_value).context("invalid GITHUB_TOKEN value")?;
+    let auth_header = HeaderValue::from_str(&auth_value).context("invalid GITHUB_TOKEN value")?;
 
     let url = format!(
         "https://api.github.com/repos/{}/{}/releases",
@@ -696,7 +691,8 @@ mod tests {
 
     #[test]
     fn comment_contains_marker() {
-        let body = build_comment_with_suites(&sample_changes(), "abc", "def", None, "pass", "closed", &[]);
+        let body =
+            build_comment_with_suites(&sample_changes(), "abc", "def", None, "pass", "closed", &[]);
         assert!(body.starts_with(COMMENT_MARKER));
     }
 
@@ -708,7 +704,15 @@ mod tests {
 
     #[test]
     fn comment_contains_breaking_emoji() {
-        let body = build_comment_with_suites(&sample_changes(), "abc", "def", None, "block", "closed", &[]);
+        let body = build_comment_with_suites(
+            &sample_changes(),
+            "abc",
+            "def",
+            None,
+            "block",
+            "closed",
+            &[],
+        );
         assert!(body.contains("\u{1f534}")); // 🔴
     }
 
@@ -788,7 +792,10 @@ mod tests {
         let section = render_evidence_section(&entries);
         let high_pos = section.find("high-svc").unwrap();
         let low_pos = section.find("low-svc").unwrap();
-        assert!(high_pos < low_pos, "high confidence row must precede low confidence row");
+        assert!(
+            high_pos < low_pos,
+            "high confidence row must precede low confidence row"
+        );
     }
 
     #[test]
@@ -864,20 +871,46 @@ mod tests {
         let br = make_blast_radius(vec![make_entry(
             "billing-svc",
             "high",
-            vec![make_ev("runtime_usage", "GET /users/{id}", Some("response.user.phone"))],
+            vec![make_ev(
+                "runtime_usage",
+                "GET /users/{id}",
+                Some("response.user.phone"),
+            )],
         )]);
-        let body = build_comment_with_suites(&sample_changes(), "abc", "def", Some(&br), "block", "closed", &[]);
+        let body = build_comment_with_suites(
+            &sample_changes(),
+            "abc",
+            "def",
+            Some(&br),
+            "block",
+            "closed",
+            &[],
+        );
         assert!(body.contains("### Evidence"), "evidence section missing");
-        assert!(body.contains("### Policy Verdict"), "verdict section missing");
+        assert!(
+            body.contains("### Policy Verdict"),
+            "verdict section missing"
+        );
         assert!(body.contains("BLOCKED"));
         assert!(body.contains("billing-svc"));
     }
 
     #[test]
     fn build_comment_without_blast_radius_still_shows_verdict() {
-        let body = build_comment_with_suites(&sample_changes(), "abc", "def", None, "block", "closed", &[]);
+        let body = build_comment_with_suites(
+            &sample_changes(),
+            "abc",
+            "def",
+            None,
+            "block",
+            "closed",
+            &[],
+        );
         assert!(body.contains("### Policy Verdict"));
-        assert!(!body.contains("### Evidence"), "evidence section must be absent");
+        assert!(
+            !body.contains("### Evidence"),
+            "evidence section must be absent"
+        );
     }
 
     #[test]
@@ -887,8 +920,19 @@ mod tests {
             collection_name: "Contract Compliance Tests".into(),
             test_count: 6,
         }];
-        let body = build_comment_with_suites(&sample_changes(), "abc", "def", None, "pass", "open", &suites);
-        assert!(body.contains("### Generated Test Suites"), "test suite section missing");
+        let body = build_comment_with_suites(
+            &sample_changes(),
+            "abc",
+            "def",
+            None,
+            "pass",
+            "open",
+            &suites,
+        );
+        assert!(
+            body.contains("### Generated Test Suites"),
+            "test suite section missing"
+        );
         assert!(body.contains("Contract Compliance Tests"));
         assert!(body.contains("6 test(s)"));
         assert!(body.contains("suite-abc123"));

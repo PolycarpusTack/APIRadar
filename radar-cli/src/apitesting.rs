@@ -79,7 +79,9 @@ pub fn assemble_suite(
         name: collection_name.to_string(),
         api: base_url.to_string(),
         param,
-        spec: SuiteSpec { kind: "openapi".into() },
+        spec: SuiteSpec {
+            kind: "openapi".into(),
+        },
         items,
     };
 
@@ -112,10 +114,7 @@ fn build_test_case(tc: &GeneratedTestCase) -> TestCase {
 
     // Build headers — auth always present; Content-Type when body is set.
     let mut header = HashMap::new();
-    header.insert(
-        "Authorization".into(),
-        "Bearer {{.param.authToken}}".into(),
-    );
+    header.insert("Authorization".into(), "Bearer {{.param.authToken}}".into());
     let body_str = tc.body.as_ref().map(|b| {
         header.insert("Content-Type".into(), "application/json".into());
         serde_json::to_string_pretty(b).unwrap_or_default()
@@ -222,17 +221,12 @@ fn postman_to_verify(assertion: &str) -> Option<String> {
 
 /// Returns true if the field name is safe to embed directly in an expr expression.
 fn is_safe_field(field: &str) -> bool {
-    !field.is_empty()
-        && field
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    !field.is_empty() && field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// For happy-path tests, build bodyFieldsExpect entries from top-level body
 /// fields that have simple scalar values — useful as additional contract pins.
-fn extract_body_fields(
-    body: &Option<serde_json::Value>,
-) -> HashMap<String, serde_json::Value> {
+fn extract_body_fields(body: &Option<serde_json::Value>) -> HashMap<String, serde_json::Value> {
     let mut out = HashMap::new();
     if let Some(serde_json::Value::Object(map)) = body {
         for (k, v) in map {

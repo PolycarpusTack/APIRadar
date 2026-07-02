@@ -161,7 +161,16 @@ pub(crate) async fn create_csv_run(
         let jid = id.clone();
         let n = total_rows;
         tokio::spawn(async move {
-            crate::audit::record_event(&pool2, &oid, "system", "csv_run.started", Some("csv_run_job"), Some(&jid), Some(&serde_json::json!({ "total_rows": n }))).await;
+            crate::audit::record_event(
+                &pool2,
+                &oid,
+                "system",
+                "csv_run.started",
+                Some("csv_run_job"),
+                Some(&jid),
+                Some(&serde_json::json!({ "total_rows": n })),
+            )
+            .await;
         });
     }
 
@@ -243,7 +252,9 @@ pub(crate) async fn cancel_csv_run(
     .await?;
 
     if result.rows_affected() == 0 {
-        return Err(ApiError::NotFound("csv run not found or already complete".into()));
+        return Err(ApiError::NotFound(
+            "csv run not found or already complete".into(),
+        ));
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -317,13 +328,11 @@ pub(crate) async fn execute_csv_run(
 
 async fn set_job_running(pool: &sqlx::AnyPool, job_id: &str) {
     let started_at = Utc::now().to_rfc3339();
-    let _ = sqlx::query(
-        "UPDATE csv_run_job SET status = 'running', started_at = ? WHERE id = ?",
-    )
-    .bind(&started_at)
-    .bind(job_id)
-    .execute(pool)
-    .await;
+    let _ = sqlx::query("UPDATE csv_run_job SET status = 'running', started_at = ? WHERE id = ?")
+        .bind(&started_at)
+        .bind(job_id)
+        .execute(pool)
+        .await;
 }
 
 fn build_http_client() -> reqwest::Client {
@@ -359,7 +368,10 @@ async fn run_rows(
         }
         insert_result(pool, job_id, &outcome).await;
         completed += 1;
-        if update_progress(pool, job_id, completed, error_count).await.is_err() {
+        if update_progress(pool, job_id, completed, error_count)
+            .await
+            .is_err()
+        {
             tracing::warn!(job_id = %job_id, "failed to update job progress, aborting executor");
             return (completed, error_count, true);
         }
@@ -414,9 +426,13 @@ async fn dispatch_row(
         Some(o) => o,
         None => {
             return RowOutcome {
-                row_number, http_status: None, duration_ms: 0,
-                error: Some("row is not an object".into()), url: String::new(),
-                response_body: None, row_data,
+                row_number,
+                http_status: None,
+                duration_ms: 0,
+                error: Some("row is not an object".into()),
+                url: String::new(),
+                response_body: None,
+                row_data,
             }
         }
     };
@@ -430,9 +446,13 @@ async fn dispatch_row(
     let ssrf_bypass = SSRF_BYPASS.with(|v| v.get());
     if !ssrf_bypass && (is_ssrf_blocked(&resolved_url) || !is_host_allowed(&resolved_url)) {
         return RowOutcome {
-            row_number, http_status: None, duration_ms: 0,
-            error: Some("URL blocked by SSRF policy".into()), url: resolved_url,
-            response_body: None, row_data,
+            row_number,
+            http_status: None,
+            duration_ms: 0,
+            error: Some("URL blocked by SSRF policy".into()),
+            url: resolved_url,
+            response_body: None,
+            row_data,
         };
     }
 
@@ -440,15 +460,23 @@ async fn dispatch_row(
     let method_upper = template.method.to_uppercase();
     if !ALLOWED_METHODS.contains(&method_upper.as_str()) {
         return RowOutcome {
-            row_number, http_status: None, duration_ms: 0,
+            row_number,
+            http_status: None,
+            duration_ms: 0,
             error: Some(format!("unsupported HTTP method: {}", template.method)),
-            url: resolved_url, response_body: None, row_data,
+            url: resolved_url,
+            response_body: None,
+            row_data,
         };
     }
 
     // Safe methods (GET, HEAD) always retry; other methods only if opted in.
     let is_safe_method = matches!(method_upper.as_str(), "GET" | "HEAD");
-    let max_attempts = if is_safe_method || template.enable_retry { CSV_ROW_MAX_ATTEMPTS } else { 1 };
+    let max_attempts = if is_safe_method || template.enable_retry {
+        CSV_ROW_MAX_ATTEMPTS
+    } else {
+        1
+    };
 
     let resolved_body = resolve_vars(&template.body, row_obj);
     let start = std::time::Instant::now();
@@ -467,8 +495,13 @@ async fn dispatch_row(
             .await;
         }
         match build_and_send(
-            client, &template.method, &resolved_url,
-            &template.headers, row_obj, &resolved_body, template.capture_body,
+            client,
+            &template.method,
+            &resolved_url,
+            &template.headers,
+            row_obj,
+            &resolved_body,
+            template.capture_body,
         )
         .await
         {
@@ -541,12 +574,12 @@ fn build_request(
 ) -> reqwest::RequestBuilder {
     let m = method.to_uppercase();
     let mut builder = match m.as_str() {
-        "POST"   => client.post(url),
-        "PUT"    => client.put(url),
-        "PATCH"  => client.patch(url),
+        "POST" => client.post(url),
+        "PUT" => client.put(url),
+        "PATCH" => client.patch(url),
         "DELETE" => client.delete(url),
-        "HEAD"   => client.head(url),
-        _        => client.get(url), // unreachable after dispatch_row method guard
+        "HEAD" => client.head(url),
+        _ => client.get(url), // unreachable after dispatch_row method guard
     };
     for h in headers {
         let key = resolve_vars(&h.key, row);
@@ -653,14 +686,12 @@ async fn update_progress(
     completed: i64,
     error_count: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE csv_run_job SET completed_rows = ?, error_count = ? WHERE id = ?",
-    )
-    .bind(completed)
-    .bind(error_count)
-    .bind(job_id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE csv_run_job SET completed_rows = ?, error_count = ? WHERE id = ?")
+        .bind(completed)
+        .bind(error_count)
+        .bind(job_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -711,14 +742,16 @@ mod tests {
 
     async fn test_pool() -> sqlx::AnyPool {
         sqlx::any::install_default_drivers();
-        let url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "sqlite::memory:".to_string());
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite::memory:".to_string());
         let pool = sqlx::any::AnyPoolOptions::new()
             .max_connections(1)
             .connect(&url)
             .await
             .expect("pool");
-        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
         if url.starts_with("sqlite") {
             sqlx::query("PRAGMA foreign_keys = OFF")
                 .execute(&pool)
@@ -743,9 +776,11 @@ mod tests {
             "rows": []
         });
         let req = HttpRequest::builder()
-            .method("POST").uri("/v1/csv-runs")
+            .method("POST")
+            .uri("/v1/csv-runs")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -753,15 +788,18 @@ mod tests {
     #[tokio::test]
     async fn post_csv_runs_too_many_rows_returns_422() {
         let app = test_app().await;
-        let rows: Vec<serde_json::Value> = (0..501).map(|i| serde_json::json!({ "id": i })).collect();
+        let rows: Vec<serde_json::Value> =
+            (0..501).map(|i| serde_json::json!({ "id": i })).collect();
         let body = serde_json::json!({
             "request": { "url": "https://httpbin.org/get", "method": "GET", "headers": [], "body": "" },
             "rows": rows
         });
         let req = HttpRequest::builder()
-            .method("POST").uri("/v1/csv-runs")
+            .method("POST")
+            .uri("/v1/csv-runs")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -774,9 +812,11 @@ mod tests {
             "rows": [{ "id": "1" }]
         });
         let req = HttpRequest::builder()
-            .method("POST").uri("/v1/csv-runs")
+            .method("POST")
+            .uri("/v1/csv-runs")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -791,9 +831,11 @@ mod tests {
             "rows": [{ "hostname": "api.example.com" }]
         });
         let req = HttpRequest::builder()
-            .method("POST").uri("/v1/csv-runs")
+            .method("POST")
+            .uri("/v1/csv-runs")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
     }
@@ -802,8 +844,10 @@ mod tests {
     async fn get_csv_run_unknown_id_returns_404() {
         let app = test_app().await;
         let req = HttpRequest::builder()
-            .method("GET").uri("/v1/csv-runs/nonexistent-id")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/v1/csv-runs/nonexistent-id")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
     }
@@ -812,8 +856,10 @@ mod tests {
     async fn list_csv_runs_returns_empty_array() {
         let app = test_app().await;
         let req = HttpRequest::builder()
-            .method("GET").uri("/v1/csv-runs")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/v1/csv-runs")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -825,8 +871,10 @@ mod tests {
     async fn delete_csv_run_unknown_id_returns_404() {
         let app = test_app().await;
         let req = HttpRequest::builder()
-            .method("DELETE").uri("/v1/csv-runs/nonexistent-id")
-            .body(Body::empty()).unwrap();
+            .method("DELETE")
+            .uri("/v1/csv-runs/nonexistent-id")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
     }
@@ -846,9 +894,11 @@ mod tests {
             "rows": [{ "host": "api.example.com" }]
         });
         let req = HttpRequest::builder()
-            .method("POST").uri("/v1/csv-runs")
+            .method("POST")
+            .uri("/v1/csv-runs")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
     }
@@ -870,7 +920,10 @@ mod tests {
         .unwrap();
 
         let deleted = purge_old_csv_runs(&pool, 90).await.unwrap();
-        assert!(deleted >= 1, "expected at least 1 deleted row, got {deleted}");
+        assert!(
+            deleted >= 1,
+            "expected at least 1 deleted row, got {deleted}"
+        );
     }
 
     #[tokio::test]
@@ -936,8 +989,13 @@ mod tests {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
         loop {
             let s: String = sqlx::query_scalar("SELECT status FROM csv_run_job WHERE id = ?")
-                .bind(job_id).fetch_one(pool).await.unwrap();
-            if s != "pending" && s != "running" { return s; }
+                .bind(job_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            if s != "pending" && s != "running" {
+                return s;
+            }
             if tokio::time::Instant::now() >= deadline {
                 panic!("job {job_id} did not finish within {timeout_ms}ms (status={s})");
             }
@@ -953,8 +1011,18 @@ mod tests {
         let pool = test_pool().await;
         let job_id = "job-echo-ok";
 
-        insert_job_and_run(&pool, job_id, &url, "GET", false,
-            vec![serde_json::json!({"id":"r1"}), serde_json::json!({"id":"r2"})]).await;
+        insert_job_and_run(
+            &pool,
+            job_id,
+            &url,
+            "GET",
+            false,
+            vec![
+                serde_json::json!({"id":"r1"}),
+                serde_json::json!({"id":"r2"}),
+            ],
+        )
+        .await;
 
         echo.wait_for_requests(2, 3000).await;
         assert_eq!(wait_for_status(&pool, job_id, 1000).await, "completed");
@@ -962,7 +1030,10 @@ mod tests {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM csv_run_result WHERE job_id = ? AND http_status = 200",
         )
-        .bind(job_id).fetch_one(&pool).await.unwrap();
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(count, 2, "both rows must record http_status=200");
         super::SSRF_BYPASS.with(|v| v.set(false));
     }
@@ -975,17 +1046,30 @@ mod tests {
         let pool = test_pool().await;
         let job_id = "job-echo-capture";
 
-        insert_job_and_run(&pool, job_id, &url, "POST", true,
-            vec![serde_json::json!({"id":"abc"})]).await;
+        insert_job_and_run(
+            &pool,
+            job_id,
+            &url,
+            "POST",
+            true,
+            vec![serde_json::json!({"id":"abc"})],
+        )
+        .await;
 
         echo.wait_for_requests(1, 3000).await;
         wait_for_status(&pool, job_id, 1000).await;
 
-        let resp_body: Option<String> = sqlx::query_scalar(
-            "SELECT response_body FROM csv_run_result WHERE job_id = ?",
-        )
-        .bind(job_id).fetch_optional(&pool).await.unwrap().flatten();
-        assert!(resp_body.is_some(), "response_body must be captured when capture_body=true");
+        let resp_body: Option<String> =
+            sqlx::query_scalar("SELECT response_body FROM csv_run_result WHERE job_id = ?")
+                .bind(job_id)
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+                .flatten();
+        assert!(
+            resp_body.is_some(),
+            "response_body must be captured when capture_body=true"
+        );
         super::SSRF_BYPASS.with(|v| v.set(false));
     }
 
@@ -998,12 +1082,22 @@ mod tests {
         let pool = test_pool().await;
         let job_id = "job-echo-5xx";
 
-        insert_job_and_run(&pool, job_id, &url, "GET", false,
-            vec![serde_json::json!({"id":"row1"})]).await;
+        insert_job_and_run(
+            &pool,
+            job_id,
+            &url,
+            "GET",
+            false,
+            vec![serde_json::json!({"id":"row1"})],
+        )
+        .await;
 
         // GET gets 3 retry attempts (0 s, 1 s, 4 s) — wait up to 8 s.
-        assert_eq!(wait_for_status(&pool, job_id, 8000).await, "completed_with_failures",
-                   "all rows failed with 5xx → completed_with_failures");
+        assert_eq!(
+            wait_for_status(&pool, job_id, 8000).await,
+            "completed_with_failures",
+            "all rows failed with 5xx → completed_with_failures"
+        );
         super::SSRF_BYPASS.with(|v| v.set(false));
     }
 }

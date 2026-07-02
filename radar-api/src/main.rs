@@ -119,21 +119,22 @@ async fn main() -> Result<()> {
         loop {
             interval.tick().await;
             // Read retention_days from settings each tick so UI changes take effect.
-            let days: u32 = sqlx::query_scalar(
-                "SELECT value FROM settings WHERE key = 'retention.days'",
-            )
-            .fetch_optional(&pool_for_retention)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|v: String| v.parse().ok())
-            .unwrap_or(RETENTION_DEFAULT_DAYS);
+            let days: u32 =
+                sqlx::query_scalar("SELECT value FROM settings WHERE key = 'retention.days'")
+                    .fetch_optional(&pool_for_retention)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|v: String| v.parse().ok())
+                    .unwrap_or(RETENTION_DEFAULT_DAYS);
             match radar_api::purge_old_usage_events(&pool_for_retention, days).await {
                 Ok(n) => tracing::info!("retention: purged {n} old usage events (window={days}d)"),
                 Err(e) => tracing::warn!("retention job failed: {e}"),
             }
             match radar_api::expire_old_evidence(&pool_for_retention).await {
-                Ok(n) => tracing::info!("evidence expiry: removed {n} expired impact_evidence rows"),
+                Ok(n) => {
+                    tracing::info!("evidence expiry: removed {n} expired impact_evidence rows")
+                }
                 Err(e) => tracing::warn!("evidence expiry job failed: {e}"),
             }
             match radar_api::purge_old_csv_runs(&pool_for_retention, days).await {
@@ -144,5 +145,12 @@ async fn main() -> Result<()> {
     });
 
     let max_body_bytes = args.max_body_size_mb as usize * 1024 * 1024;
-    radar_api::run(db_url, static_dir, bind_addr, args.rate_limit, max_body_bytes).await
+    radar_api::run(
+        db_url,
+        static_dir,
+        bind_addr,
+        args.rate_limit,
+        max_body_bytes,
+    )
+    .await
 }

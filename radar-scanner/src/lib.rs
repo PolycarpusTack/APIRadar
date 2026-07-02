@@ -298,7 +298,8 @@ fn collect_api_calls_s2(
                     .and_then(|n| n.utf8_text(source).ok())
                     .unwrap_or("");
                 if lang.is_api_object(obj_name) {
-                    if let Some(op) = method_name_to_operation(&normalise_method_name(method_name)) {
+                    if let Some(op) = method_name_to_operation(&normalise_method_name(method_name))
+                    {
                         out.push(op);
                     }
                 }
@@ -346,7 +347,8 @@ fn collect_scoped_api_ops(
                     .and_then(|n| n.utf8_text(source).ok())
                     .unwrap_or("");
                 if lang.is_api_object(obj_name) {
-                    if let Some(op) = method_name_to_operation(&normalise_method_name(method_name)) {
+                    if let Some(op) = method_name_to_operation(&normalise_method_name(method_name))
+                    {
                         let scope_id = enclosing_scope(*node, lang).id();
                         out.entry(scope_id).or_insert(op);
                     }
@@ -490,7 +492,9 @@ pub struct CollectionRequest {
 /// Parse a Postman Collection v2.1 file at `path`.
 /// Returns `(collection_name, requests)` on success.
 /// Returns an error for malformed or non-v2.1 JSON; never panics.
-pub fn parse_collection(path: &std::path::Path) -> anyhow::Result<(String, Vec<CollectionRequest>)> {
+pub fn parse_collection(
+    path: &std::path::Path,
+) -> anyhow::Result<(String, Vec<CollectionRequest>)> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
     parse_collection_str(&content)
@@ -502,8 +506,8 @@ pub fn parse_collection_str(content: &str) -> anyhow::Result<(String, Vec<Collec
     // Strip a leading UTF-8 BOM so a BOM-prefixed collection isn't rejected.
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
 
-    let root: serde_json::Value = serde_json::from_str(content)
-        .map_err(|e| anyhow::anyhow!("JSON parse error: {e}"))?;
+    let root: serde_json::Value =
+        serde_json::from_str(content).map_err(|e| anyhow::anyhow!("JSON parse error: {e}"))?;
 
     let name = root
         .pointer("/info/name")
@@ -589,15 +593,16 @@ fn extract_operation(req: &serde_json::Value) -> Option<String> {
     let path_part = strip_url_prefix(&raw_url);
 
     // Drop query string / fragment (everything from the first '?' or '#').
-    let path_part = path_part
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(path_part);
+    let path_part = path_part.split(['?', '#']).next().unwrap_or(path_part);
 
     // Trim a trailing slash (but never reduce below "/").
     let path_part = {
         let trimmed = path_part.trim_end_matches('/');
-        if trimmed.is_empty() { "/" } else { trimmed }
+        if trimmed.is_empty() {
+            "/"
+        } else {
+            trimmed
+        }
     };
 
     // Ensure it starts with /
@@ -708,11 +713,7 @@ fn extract_field_paths_from_events(events: &[serde_json::Value]) -> Vec<String> 
         let exec_lines: Vec<&str> = event
             .pointer("/script/exec")
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|l| l.as_str())
-                    .collect()
-            })
+            .map(|arr| arr.iter().filter_map(|l| l.as_str()).collect())
             .unwrap_or_default();
 
         for line in exec_lines {
@@ -974,7 +975,10 @@ async function getPhone(usersApi, userId) {
         let op = s2[0].operation.as_deref().unwrap();
         assert_eq!(op, "GET /users/{id}");
         let has_phone = s2.iter().any(|r| r.field_path == "phone");
-        assert!(has_phone, "field_path 'phone' should be present in S2 records");
+        assert!(
+            has_phone,
+            "field_path 'phone' should be present in S2 records"
+        );
     }
 
     #[test]
@@ -1009,20 +1013,22 @@ function extractPhone(response) {
         let src2 = b"UsersApi.listUsers();";
         for src in [src1.as_ref(), src2.as_ref()] {
             let records = scan_typescript_s2(src);
-            let has_op = records.iter().any(|r| r.operation.is_some())
-                || {
-                    // scan_typescript_s2 on bare expressions may return 0 field records
-                    // but the API call detection must still succeed; test that directly
-                    let mut ops = Vec::new();
-                    let mut parser = Parser::new();
-                    parser
-                        .set_language(&Lang::TypeScript.ts_language())
-                        .unwrap();
-                    let tree = parser.parse(src, None).unwrap();
-                    collect_api_calls_s2(&tree.root_node(), src, &Lang::TypeScript, &mut ops);
-                    !ops.is_empty()
-                };
-            assert!(has_op, "api-suffix object should produce operation detection");
+            let has_op = records.iter().any(|r| r.operation.is_some()) || {
+                // scan_typescript_s2 on bare expressions may return 0 field records
+                // but the API call detection must still succeed; test that directly
+                let mut ops = Vec::new();
+                let mut parser = Parser::new();
+                parser
+                    .set_language(&Lang::TypeScript.ts_language())
+                    .unwrap();
+                let tree = parser.parse(src, None).unwrap();
+                collect_api_calls_s2(&tree.root_node(), src, &Lang::TypeScript, &mut ops);
+                !ops.is_empty()
+            };
+            assert!(
+                has_op,
+                "api-suffix object should produce operation detection"
+            );
         }
     }
 
@@ -1045,9 +1051,15 @@ def fetch_phone(api_client, user_id):
 ";
         let records = scan_s2(src, &Lang::Python);
         let s2: Vec<_> = records.iter().filter(|r| r.operation.is_some()).collect();
-        assert!(!s2.is_empty(), "should have S2 records with operation set; got {records:?}");
+        assert!(
+            !s2.is_empty(),
+            "should have S2 records with operation set; got {records:?}"
+        );
         assert_eq!(s2[0].operation.as_deref(), Some("GET /users/{id}"));
-        assert!(s2.iter().any(|r| r.field_path == "phone"), "field 'phone' expected");
+        assert!(
+            s2.iter().any(|r| r.field_path == "phone"),
+            "field 'phone' expected"
+        );
     }
 
     #[test]
@@ -1095,7 +1107,10 @@ func fetchPhone(client *UserClient, id string) string {
 ";
         let records = scan_s2(src, &Lang::Go);
         let s2: Vec<_> = records.iter().filter(|r| r.operation.is_some()).collect();
-        assert!(!s2.is_empty(), "should have S2 records with operation set; got {records:?}");
+        assert!(
+            !s2.is_empty(),
+            "should have S2 records with operation set; got {records:?}"
+        );
         assert_eq!(s2[0].operation.as_deref(), Some("GET /users/{id}"));
     }
 
@@ -1158,9 +1173,8 @@ func process(svc *Service, id string) string {
 
     // --- E-7: parse_collection tests ---
 
-    const FIXTURE_COLLECTION: &str = include_str!(
-        "../../fixtures/billing-svc-tests.postman_collection.json"
-    );
+    const FIXTURE_COLLECTION: &str =
+        include_str!("../../fixtures/billing-svc-tests.postman_collection.json");
 
     #[test]
     fn parse_collection_extracts_name() {
@@ -1177,16 +1191,26 @@ func process(svc *Service, id string) string {
     #[test]
     fn parse_collection_extracts_get_operation() {
         let (_, reqs) = parse_collection_str(FIXTURE_COLLECTION).expect("should parse");
-        let user_req = reqs.iter().find(|r| r.name == "Get User by ID").expect("should find Get User by ID");
+        let user_req = reqs
+            .iter()
+            .find(|r| r.name == "Get User by ID")
+            .expect("should find Get User by ID");
         assert_eq!(user_req.method, "GET");
-        assert_eq!(user_req.operation.as_deref(), Some("/users/{id}"),
-            "should strip {{base_url}} prefix; got {:?}", user_req.operation);
+        assert_eq!(
+            user_req.operation.as_deref(),
+            Some("/users/{id}"),
+            "should strip {{base_url}} prefix; got {:?}",
+            user_req.operation
+        );
     }
 
     #[test]
     fn parse_collection_extracts_post_method() {
         let (_, reqs) = parse_collection_str(FIXTURE_COLLECTION).expect("should parse");
-        let order_req = reqs.iter().find(|r| r.name == "Create Order").expect("should find Create Order");
+        let order_req = reqs
+            .iter()
+            .find(|r| r.name == "Create Order")
+            .expect("should find Create Order");
         assert_eq!(order_req.method, "POST");
         assert_eq!(order_req.operation.as_deref(), Some("/orders"));
     }
@@ -1194,31 +1218,43 @@ func process(svc *Service, id string) string {
     #[test]
     fn parse_collection_extracts_field_paths_from_test_scripts() {
         let (_, reqs) = parse_collection_str(FIXTURE_COLLECTION).expect("should parse");
-        let user_req = reqs.iter().find(|r| r.name == "Get User by ID").expect("should find Get User by ID");
+        let user_req = reqs
+            .iter()
+            .find(|r| r.name == "Get User by ID")
+            .expect("should find Get User by ID");
         assert!(
             user_req.field_paths.iter().any(|fp| fp == "phone"),
-            "should extract 'phone' from pm.response.json().phone; got: {:?}", user_req.field_paths
+            "should extract 'phone' from pm.response.json().phone; got: {:?}",
+            user_req.field_paths
         );
         assert!(
             user_req.field_paths.iter().any(|fp| fp == "email"),
-            "should extract 'email' from pm.expect(json.email); got: {:?}", user_req.field_paths
+            "should extract 'email' from pm.expect(json.email); got: {:?}",
+            user_req.field_paths
         );
     }
 
     #[test]
     fn parse_collection_post_with_no_assertions_has_empty_field_paths() {
         let (_, reqs) = parse_collection_str(FIXTURE_COLLECTION).expect("should parse");
-        let order_req = reqs.iter().find(|r| r.name == "Create Order").expect("should find Create Order");
+        let order_req = reqs
+            .iter()
+            .find(|r| r.name == "Create Order")
+            .expect("should find Create Order");
         assert!(
             order_req.field_paths.is_empty(),
-            "POST /orders has no test assertions; got: {:?}", order_req.field_paths
+            "POST /orders has no test assertions; got: {:?}",
+            order_req.field_paths
         );
     }
 
     #[test]
     fn parse_collection_strips_multiple_variable_prefixes() {
         let (_, reqs) = parse_collection_str(FIXTURE_COLLECTION).expect("should parse");
-        let status_req = reqs.iter().find(|r| r.name.contains("variable prefix")).expect("should find variable prefix request");
+        let status_req = reqs
+            .iter()
+            .find(|r| r.name.contains("variable prefix"))
+            .expect("should find variable prefix request");
         // {{base_url}}{{api_prefix}}/orders/{id}/status → /orders/{id}/status
         // but the path array has {{api_prefix}} as first element — raw URL wins
         let op = status_req.operation.as_deref().unwrap_or("");
@@ -1251,7 +1287,11 @@ func process(svc *Service, id string) string {
             ]}
         ]}"#;
         let (_, reqs) = parse_collection_str(json).expect("parse");
-        assert_eq!(reqs.len(), 1, "request inside folder should be extracted; got {reqs:?}");
+        assert_eq!(
+            reqs.len(),
+            1,
+            "request inside folder should be extracted; got {reqs:?}"
+        );
         assert_eq!(reqs[0].name, "Get");
         // also exercises :var normalization
         assert_eq!(reqs[0].operation.as_deref(), Some("/users/{userId}"));
@@ -1263,7 +1303,10 @@ func process(svc *Service, id string) string {
             {"name":"R","request":{"method":"GET","url":{"raw":"{{base_url}}/users/:userId/orders/:orderId"}}}
         ]}"#;
         let (_, reqs) = parse_collection_str(json).expect("parse");
-        assert_eq!(reqs[0].operation.as_deref(), Some("/users/{userId}/orders/{orderId}"));
+        assert_eq!(
+            reqs[0].operation.as_deref(),
+            Some("/users/{userId}/orders/{orderId}")
+        );
     }
 
     #[test]
@@ -1275,7 +1318,13 @@ func process(svc *Service, id string) string {
         ]}"#;
         let (_, reqs) = parse_collection_str(json).expect("parse");
         for r in &reqs {
-            assert_eq!(r.operation.as_deref(), Some("/users"), "{}: {:?}", r.name, r.operation);
+            assert_eq!(
+                r.operation.as_deref(),
+                Some("/users"),
+                "{}: {:?}",
+                r.name,
+                r.operation
+            );
         }
     }
 
@@ -1291,9 +1340,15 @@ func process(svc *Service, id string) string {
             ]}}]}]}"#;
         let (_, reqs) = parse_collection_str(json).expect("parse");
         let fp = &reqs[0].field_paths;
-        assert!(fp.iter().any(|f| f == "phone"), "phone expected; got {fp:?}");
+        assert!(
+            fp.iter().any(|f| f == "phone"),
+            "phone expected; got {fp:?}"
+        );
         for bad in ["json", "to", "code", "status", "total"] {
-            assert!(!fp.iter().any(|f| f == bad), "'{bad}' must not be a field path; got {fp:?}");
+            assert!(
+                !fp.iter().any(|f| f == bad),
+                "'{bad}' must not be a field path; got {fp:?}"
+            );
         }
     }
 
@@ -1319,13 +1374,19 @@ func process(svc *Service, id string) string {
     fn tsx_jsx_member_access_parses() {
         let src = b"function C(user){ return <span>{user.phone}</span>; }";
         let hits = scan_file(src, &Lang::Tsx);
-        assert!(hits.iter().any(|(n, _)| n == "phone"), "expected phone in {hits:?}");
+        assert!(
+            hits.iter().any(|(n, _)| n == "phone"),
+            "expected phone in {hits:?}"
+        );
     }
 
     #[test]
     fn js_family_extensions_recognized() {
         for ext in ["js", "jsx", "mjs", "cjs", "mts", "cts"] {
-            assert!(Lang::from_extension(ext).is_some(), "{ext} should be supported");
+            assert!(
+                Lang::from_extension(ext).is_some(),
+                "{ext} should be supported"
+            );
         }
         assert_eq!(Lang::from_extension("tsx"), Some(Lang::Tsx));
         assert_eq!(Lang::from_extension("jsx"), Some(Lang::Tsx));
@@ -1346,11 +1407,23 @@ async function getOrders(ordersApi) {
 }
 ";
         let records = scan_typescript_s2(src);
-        let phone = records.iter().find(|r| r.field_path == "phone").expect("phone record");
-        assert_eq!(phone.operation.as_deref(), Some("GET /users/{id}"),
-            "phone should be attributed to its enclosing function's call");
-        let total = records.iter().find(|r| r.field_path == "total").expect("total record");
-        assert_eq!(total.operation.as_deref(), Some("GET /orders"),
-            "total should be attributed to its own function's call, not the first call");
+        let phone = records
+            .iter()
+            .find(|r| r.field_path == "phone")
+            .expect("phone record");
+        assert_eq!(
+            phone.operation.as_deref(),
+            Some("GET /users/{id}"),
+            "phone should be attributed to its enclosing function's call"
+        );
+        let total = records
+            .iter()
+            .find(|r| r.field_path == "total")
+            .expect("total record");
+        assert_eq!(
+            total.operation.as_deref(),
+            Some("GET /orders"),
+            "total should be attributed to its own function's call, not the first call"
+        );
     }
 }

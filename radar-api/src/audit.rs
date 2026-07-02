@@ -1,12 +1,12 @@
 // Audit event table — append-only via record_event(), read via GET /v1/audit-events.
 // POST /v1/audit-events lets external callers (CLI, integrations) record events too.
 
+use crate::auth::JwtClaims;
 use axum::{
     extract::{Extension, Query, State},
     http::StatusCode,
     Json,
 };
-use crate::auth::JwtClaims;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::AnyPool;
@@ -38,7 +38,14 @@ pub(crate) struct CreateBody {
 // Keys whose values must be redacted in audit event meta — prevents tokens,
 // passwords, and API keys from appearing in the audit log.
 const SECRET_KEYS: &[&str] = &[
-    "token", "password", "secret", "key", "bearer", "api_key", "auth", "credential",
+    "token",
+    "password",
+    "secret",
+    "key",
+    "bearer",
+    "api_key",
+    "auth",
+    "credential",
 ];
 
 /// Redact any object field whose key contains a known secret keyword.
@@ -159,18 +166,18 @@ pub(crate) async fn list_audit_events(
         .fetch_all(&pool)
         .await
     } else {
-        sqlx::query_as(&format!(
-            "{base} ORDER BY created_at DESC LIMIT ? OFFSET ?"
-        ))
-        .bind(org_id)
-        .bind(q.limit)
-        .bind(q.offset)
-        .fetch_all(&pool)
-        .await
+        sqlx::query_as(&format!("{base} ORDER BY created_at DESC LIMIT ? OFFSET ?"))
+            .bind(org_id)
+            .bind(q.limit)
+            .bind(q.offset)
+            .fetch_all(&pool)
+            .await
     }
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(json!({ "entries": rows.into_iter().map(row_to_json).collect::<Vec<_>>() })))
+    Ok(Json(
+        json!({ "entries": rows.into_iter().map(row_to_json).collect::<Vec<_>>() }),
+    ))
 }
 
 pub(crate) async fn create_audit_event(

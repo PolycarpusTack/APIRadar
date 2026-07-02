@@ -1,3 +1,6 @@
+use crate::auth::{assert_org_access, require_org_owned, JwtClaims, OrgResource};
+use crate::errors::ApiError;
+use crate::utils::collection_evidence_id;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -7,9 +10,6 @@ use axum::{
 use chrono::Utc;
 use serde_json::{json, Value};
 use uuid::Uuid;
-use crate::auth::{JwtClaims, OrgResource, assert_org_access, require_org_owned};
-use crate::errors::ApiError;
-use crate::utils::collection_evidence_id;
 
 #[derive(serde::Deserialize)]
 pub(crate) struct CreateConsumerBody {
@@ -132,7 +132,16 @@ pub(crate) async fn create_consumer(
         let oid = org_id.clone();
         let cid = id.clone();
         tokio::spawn(async move {
-            crate::audit::record_event(&pool2, &oid, "system", "consumer.registered", Some("consumer"), Some(&cid), None).await;
+            crate::audit::record_event(
+                &pool2,
+                &oid,
+                "system",
+                "consumer.registered",
+                Some("consumer"),
+                Some(&cid),
+                None,
+            )
+            .await;
         });
     }
 
@@ -179,18 +188,20 @@ pub(crate) async fn upsert_consumer_by_name(
     .execute(&pool)
     .await?;
 
-    let row = sqlx::query(
-        "SELECT id FROM consumer WHERE org_id = ? AND name = ? LIMIT 1",
-    )
-    .bind(&org_id)
-    .bind(&name)
-    .fetch_one(&pool)
-    .await?;
+    let row = sqlx::query("SELECT id FROM consumer WHERE org_id = ? AND name = ? LIMIT 1")
+        .bind(&org_id)
+        .bind(&name)
+        .fetch_one(&pool)
+        .await?;
     let id: String = row.try_get("id").unwrap_or(new_id.clone());
     let created = id == new_id;
 
     Ok((
-        if created { StatusCode::CREATED } else { StatusCode::OK },
+        if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
         Json(json!({"id": id, "name": name, "created": created})),
     ))
 }
@@ -202,7 +213,9 @@ pub(crate) async fn ingest_collection_evidence(
     Json(items): Json<Vec<CollectionEvidenceItem>>,
 ) -> Result<impl IntoResponse, ApiError> {
     if items.len() > 1000 {
-        return Err(ApiError::TooManyRequests("batch too large, max 1000".into()));
+        return Err(ApiError::TooManyRequests(
+            "batch too large, max 1000".into(),
+        ));
     }
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
@@ -241,8 +254,16 @@ pub(crate) async fn ingest_collection_evidence(
         .bind(&item.service_id)
         .bind(&item.consumer_id)
         .bind("collection_file")
-        .bind(if item.operation.is_empty() { None } else { Some(&item.operation) })
-        .bind(if item.field_path.is_empty() { None } else { Some(&item.field_path) })
+        .bind(if item.operation.is_empty() {
+            None
+        } else {
+            Some(&item.operation)
+        })
+        .bind(if item.field_path.is_empty() {
+            None
+        } else {
+            Some(&item.field_path)
+        })
         .bind("medium")
         .bind(&uri)
         .bind(&now)

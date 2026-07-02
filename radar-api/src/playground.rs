@@ -1,3 +1,5 @@
+use crate::auth::{assert_org_access, JwtClaims};
+use crate::errors::ApiError;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -6,8 +8,6 @@ use axum::{
 };
 use serde_json::json;
 use uuid::Uuid;
-use crate::auth::{JwtClaims, assert_org_access};
-use crate::errors::ApiError;
 
 #[derive(serde::Deserialize)]
 pub(crate) struct SandboxEnvBody {
@@ -137,14 +137,12 @@ pub(crate) async fn update_sandbox_env(
 
     // Verify ownership and fetch the current token so we can preserve it when
     // the caller doesn't provide a new one.
-    let existing = sqlx::query(
-        "SELECT bearer_token FROM sandbox_env WHERE id = ? AND org_id = ?",
-    )
-    .bind(&id)
-    .bind(&org_id)
-    .fetch_optional(&pool)
-    .await?
-    .ok_or_else(|| ApiError::NotFound("sandbox environment not found".into()))?;
+    let existing = sqlx::query("SELECT bearer_token FROM sandbox_env WHERE id = ? AND org_id = ?")
+        .bind(&id)
+        .bind(&org_id)
+        .fetch_optional(&pool)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("sandbox environment not found".into()))?;
 
     let current_token: String = existing.try_get("bearer_token").unwrap_or_default();
     // Use new token only when the caller supplies a non-empty string.
@@ -265,10 +263,12 @@ pub(crate) async fn get_spec_version_raw(
     assert_org_access(&row_org_id, &caller_org_id, "spec version")?;
 
     let spec_yaml: Option<String> = row.try_get("spec_yaml").ok().flatten();
-    let spec_format: String = row.try_get("spec_format").unwrap_or_else(|_| "openapi".into());
+    let spec_format: String = row
+        .try_get("spec_format")
+        .unwrap_or_else(|_| "openapi".into());
 
-    let content = spec_yaml
-        .ok_or_else(|| ApiError::NotFound("no spec stored for this version".into()))?;
+    let content =
+        spec_yaml.ok_or_else(|| ApiError::NotFound("no spec stored for this version".into()))?;
 
     let content_type = if spec_format.contains("json") || content.trim_start().starts_with('{') {
         "application/json"
@@ -276,10 +276,7 @@ pub(crate) async fn get_spec_version_raw(
         "application/yaml"
     };
 
-    Ok((
-        [(axum::http::header::CONTENT_TYPE, content_type)],
-        content,
-    ))
+    Ok(([(axum::http::header::CONTENT_TYPE, content_type)], content))
 }
 
 #[cfg(test)]

@@ -45,8 +45,9 @@ pub async fn generate_both(
     base_url: &str,
 ) -> anyhow::Result<(Collection, String)> {
     let suite = call_claude(jira_summary, jira_description, spec_yaml).await?;
-    let yaml = crate::apitesting::assemble_suite(&suite.collection_name, &suite.test_cases, base_url)
-        .unwrap_or_default();
+    let yaml =
+        crate::apitesting::assemble_suite(&suite.collection_name, &suite.test_cases, base_url)
+            .unwrap_or_default();
     let collection = assemble_collection(suite, base_url);
     Ok((collection, yaml))
 }
@@ -58,7 +59,8 @@ pub async fn generate_test_collection(
     spec_yaml: &str,
     base_url: &str,
 ) -> anyhow::Result<Collection> {
-    let (collection, _yaml) = generate_both(jira_summary, jira_description, spec_yaml, base_url).await?;
+    let (collection, _yaml) =
+        generate_both(jira_summary, jira_description, spec_yaml, base_url).await?;
     Ok(collection)
 }
 
@@ -68,7 +70,11 @@ async fn call_claude(
     jira_description: &str,
     spec_yaml: &str,
 ) -> Result<GeneratedSuite> {
-    let spec_excerpt = if spec_yaml.len() > 40_000 { &spec_yaml[..40_000] } else { spec_yaml };
+    let spec_excerpt = if spec_yaml.len() > 40_000 {
+        &spec_yaml[..40_000]
+    } else {
+        spec_yaml
+    };
     let prompt = build_prompt(jira_summary, jira_description, spec_excerpt);
 
     let raw_text = crate::ai_provider::complete(&prompt, 4096)
@@ -227,7 +233,11 @@ fn assemble_collection(suite: GeneratedSuite, base_url: &str) -> Collection {
         }
 
         Item {
-            name: format!("[{}] {}", tc.category.replace('_', " ").to_uppercase(), tc.name),
+            name: format!(
+                "[{}] {}",
+                tc.category.replace('_', " ").to_uppercase(),
+                tc.name
+            ),
             event: vec![Event {
                 listen: "test".into(),
                 script: Script {

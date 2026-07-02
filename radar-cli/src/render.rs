@@ -1,8 +1,5 @@
 use colored::Colorize;
-use radar_core::{
-    diff::DiffChange,
-    models::Severity,
-};
+use radar_core::{diff::DiffChange, models::Severity};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -76,18 +73,12 @@ pub fn print_table(changes: &[DiffChange], use_color: bool) {
 
     for change in changes {
         let (badge, path_colored) = match change.severity {
-            Severity::Breaking => (
-                "  BREAKING".red().bold(),
-                change.path.red().to_string(),
-            ),
+            Severity::Breaking => ("  BREAKING".red().bold(), change.path.red().to_string()),
             Severity::NonBreakingRisky => (
                 "     RISKY".yellow().bold(),
                 change.path.yellow().to_string(),
             ),
-            Severity::Safe => (
-                "        ok".cyan(),
-                change.path.normal().to_string(),
-            ),
+            Severity::Safe => ("        ok".cyan(), change.path.normal().to_string()),
         };
         println!("{badge}   {path_colored:<45}  {}", change.kind.as_str());
     }
@@ -224,7 +215,10 @@ mod tests {
         assert_eq!(v["breaking_count"], 2);
         assert_eq!(v["affected_consumer_count"], 1);
         assert_eq!(v["policy_verdict"], "block");
-        assert_eq!(v["dashboard_url"], "https://radar.example.com/app/diffs/abc-123");
+        assert_eq!(
+            v["dashboard_url"],
+            "https://radar.example.com/app/diffs/abc-123"
+        );
     }
 
     #[test]

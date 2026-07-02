@@ -1,4 +1,8 @@
-use axum::{http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde_json::json;
 use std::sync::OnceLock;
@@ -10,14 +14,21 @@ pub(crate) enum ApiError {
     Forbidden(String),
     Unauthorized,
     TooManyRequests(String),
-    UnprocessableEntity { error: String, detail: String, spec: String },
+    UnprocessableEntity {
+        error: String,
+        detail: String,
+        spec: String,
+    },
 }
 
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ApiError::Db(e) => write!(f, "database error: {e}"),
-            ApiError::BadRequest(m) | ApiError::NotFound(m) | ApiError::Forbidden(m) | ApiError::TooManyRequests(m) => write!(f, "{m}"),
+            ApiError::BadRequest(m)
+            | ApiError::NotFound(m)
+            | ApiError::Forbidden(m)
+            | ApiError::TooManyRequests(m) => write!(f, "{m}"),
             ApiError::Unauthorized => write!(f, "unauthorized"),
             ApiError::UnprocessableEntity { error, .. } => write!(f, "{error}"),
         }
@@ -62,27 +73,25 @@ impl IntoResponse for ApiError {
                 Json(json!({"error": msg})),
             )
                 .into_response(),
-            ApiError::NotFound(msg) => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": msg})),
-            )
-                .into_response(),
-            ApiError::Forbidden(msg) => (
-                StatusCode::FORBIDDEN,
-                Json(json!({"error": msg})),
-            )
-                .into_response(),
+            ApiError::NotFound(msg) => {
+                (StatusCode::NOT_FOUND, Json(json!({"error": msg}))).into_response()
+            }
+            ApiError::Forbidden(msg) => {
+                (StatusCode::FORBIDDEN, Json(json!({"error": msg}))).into_response()
+            }
             ApiError::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "unauthorized"})),
             )
                 .into_response(),
-            ApiError::TooManyRequests(msg) => (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({"error": msg})),
-            )
-                .into_response(),
-            ApiError::UnprocessableEntity { error, detail, spec } => (
+            ApiError::TooManyRequests(msg) => {
+                (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error": msg}))).into_response()
+            }
+            ApiError::UnprocessableEntity {
+                error,
+                detail,
+                spec,
+            } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({"error": error, "detail": detail, "spec": spec})),
             )

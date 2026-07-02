@@ -22,7 +22,10 @@ pub(crate) fn detect_provider() -> Option<AiProvider> {
         if !k.is_empty() {
             let base = std::env::var("OPENAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".into());
-            return Some(AiProvider::OpenAI { api_key: k, base_url: base });
+            return Some(AiProvider::OpenAI {
+                api_key: k,
+                base_url: base,
+            });
         }
     }
     if let Ok(t) = std::env::var("GITHUB_COPILOT_TOKEN") {
@@ -36,14 +39,18 @@ pub(crate) fn detect_provider() -> Option<AiProvider> {
 impl AiProvider {
     pub(crate) async fn complete(&self, prompt: &str, max_tokens: u32) -> Option<String> {
         match self {
-            Self::Anthropic { api_key } => {
-                ai_call_anthropic(api_key, prompt, max_tokens).await
-            }
+            Self::Anthropic { api_key } => ai_call_anthropic(api_key, prompt, max_tokens).await,
             Self::OpenAI { api_key, base_url } => {
                 ai_call_openai_compat(api_key, base_url, prompt, max_tokens).await
             }
             Self::GitHubCopilot { token } => {
-                ai_call_openai_compat(token, "https://api.githubcopilot.com/v1", prompt, max_tokens).await
+                ai_call_openai_compat(
+                    token,
+                    "https://api.githubcopilot.com/v1",
+                    prompt,
+                    max_tokens,
+                )
+                .await
             }
         }
     }
@@ -69,14 +76,20 @@ async fn ai_call_anthropic(api_key: &str, prompt: &str, max_tokens: u32) -> Opti
         return None;
     }
     let data: Value = resp.json().await.ok()?;
-    data["content"].as_array()?
+    data["content"]
+        .as_array()?
         .iter()
         .find(|b| b["type"] == "text")
         .and_then(|b| b["text"].as_str())
         .map(str::to_owned)
 }
 
-async fn ai_call_openai_compat(api_key: &str, base_url: &str, prompt: &str, max_tokens: u32) -> Option<String> {
+async fn ai_call_openai_compat(
+    api_key: &str,
+    base_url: &str,
+    prompt: &str,
+    max_tokens: u32,
+) -> Option<String> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let body = json!({
         "model": "gpt-4o",
@@ -96,7 +109,9 @@ async fn ai_call_openai_compat(api_key: &str, base_url: &str, prompt: &str, max_
         return None;
     }
     let data: Value = resp.json().await.ok()?;
-    data["choices"].as_array()?.first()
+    data["choices"]
+        .as_array()?
+        .first()
         .and_then(|c| c["message"]["content"].as_str())
         .map(str::to_owned)
 }
@@ -108,7 +123,10 @@ pub(crate) fn build_both_formats(suite: Value, base_url: &str) -> (Value, String
 }
 
 pub(crate) fn assemble_postman_collection(suite: Value, base_url: &str) -> Value {
-    let collection_name = suite["collection_name"].as_str().unwrap_or("Generated Tests").to_string();
+    let collection_name = suite["collection_name"]
+        .as_str()
+        .unwrap_or("Generated Tests")
+        .to_string();
     let empty = vec![];
     let test_cases = suite["test_cases"].as_array().unwrap_or(&empty);
 
@@ -213,7 +231,9 @@ pub(crate) fn assemble_apitesting_yaml(suite: &Value, base_url: &str) -> String 
         items: Vec<TestCase>,
     }
     #[derive(serde::Serialize)]
-    struct Spec { kind: &'static str }
+    struct Spec {
+        kind: &'static str,
+    }
     #[derive(serde::Serialize)]
     struct TestCase {
         name: String,
@@ -234,75 +254,102 @@ pub(crate) fn assemble_apitesting_yaml(suite: &Value, base_url: &str) -> String 
         status_code: u64,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         verify: Vec<String>,
-        #[serde(rename = "bodyFieldsExpect", skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        #[serde(
+            rename = "bodyFieldsExpect",
+            skip_serializing_if = "std::collections::BTreeMap::is_empty"
+        )]
         body_fields_expect: std::collections::BTreeMap<String, Value>,
     }
 
-    let collection_name = suite["collection_name"].as_str().unwrap_or("Generated Tests");
+    let collection_name = suite["collection_name"]
+        .as_str()
+        .unwrap_or("Generated Tests");
     let empty = vec![];
     let test_cases = suite["test_cases"].as_array().unwrap_or(&empty);
 
     let mut param = std::collections::BTreeMap::new();
     param.insert("authToken", "");
 
-    let items: Vec<TestCase> = test_cases.iter().map(|tc| {
-        let category = tc["category"].as_str().unwrap_or("test");
-        let name = tc["name"].as_str().unwrap_or("Test");
-        let method = tc["method"].as_str().unwrap_or("GET").to_uppercase();
-        let path = tc["path"].as_str().unwrap_or("/").to_string();
-        let status = tc["expected_status"].as_u64().unwrap_or(200);
-        let has_body = tc["body"].is_object() && !tc["body"].as_object().map(|m| m.is_empty()).unwrap_or(true);
+    let items: Vec<TestCase> = test_cases
+        .iter()
+        .map(|tc| {
+            let category = tc["category"].as_str().unwrap_or("test");
+            let name = tc["name"].as_str().unwrap_or("Test");
+            let method = tc["method"].as_str().unwrap_or("GET").to_uppercase();
+            let path = tc["path"].as_str().unwrap_or("/").to_string();
+            let status = tc["expected_status"].as_u64().unwrap_or(200);
+            let has_body = tc["body"].is_object()
+                && !tc["body"].as_object().map(|m| m.is_empty()).unwrap_or(true);
 
-        let mut header = std::collections::BTreeMap::new();
-        header.insert("Authorization".into(), "Bearer {{.param.authToken}}".into());
-        if has_body {
-            header.insert("Content-Type".into(), "application/json".into());
-        }
+            let mut header = std::collections::BTreeMap::new();
+            header.insert("Authorization".into(), "Bearer {{.param.authToken}}".into());
+            if has_body {
+                header.insert("Content-Type".into(), "application/json".into());
+            }
 
-        let body = if has_body {
-            Some(serde_json::to_string_pretty(&tc["body"]).unwrap_or_default())
-        } else {
-            None
-        };
-
-        // Convert Postman assertions to api-testing expr verify expressions.
-        let mut verify: Vec<String> = tc["assertions"]
-            .as_array()
-            .unwrap_or(&empty)
-            .iter()
-            .filter_map(|a| postman_assertion_to_verify(a.as_str().unwrap_or("")))
-            .collect();
-
-        if verify.is_empty() {
-            verify.push(if category == "happy_path" {
-                "data != null".into()
+            let body = if has_body {
+                Some(serde_json::to_string_pretty(&tc["body"]).unwrap_or_default())
             } else {
-                "data.error != null".into()
-            });
-        }
+                None
+            };
 
-        // bodyFieldsExpect: pin top-level scalar fields from the request body for
-        // happy-path tests as a lightweight contract check.
-        let body_fields_expect = if category == "happy_path" {
-            tc["body"].as_object()
-                .map(|m| m.iter()
-                    .filter(|(_, v)| v.is_string() || v.is_number() || v.is_boolean())
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect())
-                .unwrap_or_default()
-        } else {
-            std::collections::BTreeMap::new()
-        };
+            // Convert Postman assertions to api-testing expr verify expressions.
+            let mut verify: Vec<String> = tc["assertions"]
+                .as_array()
+                .unwrap_or(&empty)
+                .iter()
+                .filter_map(|a| postman_assertion_to_verify(a.as_str().unwrap_or("")))
+                .collect();
 
-        let label = format!("[{}] {name}", category.replace('_', " ").to_uppercase());
-        TestCase {
-            name: label,
-            request: TestRequest { api: path, method, header, body },
-            expect: Expect { status_code: status, verify, body_fields_expect },
-        }
-    }).collect();
+            if verify.is_empty() {
+                verify.push(if category == "happy_path" {
+                    "data != null".into()
+                } else {
+                    "data.error != null".into()
+                });
+            }
 
-    let s = Suite { name: collection_name, api: base_url, param, spec: Spec { kind: "openapi" }, items };
+            // bodyFieldsExpect: pin top-level scalar fields from the request body for
+            // happy-path tests as a lightweight contract check.
+            let body_fields_expect = if category == "happy_path" {
+                tc["body"]
+                    .as_object()
+                    .map(|m| {
+                        m.iter()
+                            .filter(|(_, v)| v.is_string() || v.is_number() || v.is_boolean())
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                std::collections::BTreeMap::new()
+            };
+
+            let label = format!("[{}] {name}", category.replace('_', " ").to_uppercase());
+            TestCase {
+                name: label,
+                request: TestRequest {
+                    api: path,
+                    method,
+                    header,
+                    body,
+                },
+                expect: Expect {
+                    status_code: status,
+                    verify,
+                    body_fields_expect,
+                },
+            }
+        })
+        .collect();
+
+    let s = Suite {
+        name: collection_name,
+        api: base_url,
+        param,
+        spec: Spec { kind: "openapi" },
+        items,
+    };
     match serde_yml::to_string(&s) {
         Ok(yaml) => format!("#!api-testing\n{yaml}"),
         Err(_) => String::from("#!api-testing\n# (yaml serialisation failed)\n"),
@@ -311,8 +358,12 @@ pub(crate) fn assemble_apitesting_yaml(suite: &Value, base_url: &str) -> String 
 
 /// Convert a Postman pm.test() assertion line to an api-testing expr verify expression.
 pub(crate) fn postman_assertion_to_verify(assertion: &str) -> Option<String> {
-    if assertion.contains("have.status") { return None; }
-    if assertion.contains("headers.get") || assertion.contains("response.headers") { return None; }
+    if assertion.contains("have.status") {
+        return None;
+    }
+    if assertion.contains("headers.get") || assertion.contains("response.headers") {
+        return None;
+    }
 
     for q in ["'", "\""] {
         let pat = format!(".have.property({q}");
@@ -320,7 +371,8 @@ pub(crate) fn postman_assertion_to_verify(assertion: &str) -> Option<String> {
             let rest = &assertion[pos + pat.len()..];
             if let Some(end) = rest.find(q) {
                 let field = &rest[..end];
-                if !field.is_empty() && field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                if !field.is_empty() && field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
                     return Some(format!("data.{field} != null"));
                 }
             }

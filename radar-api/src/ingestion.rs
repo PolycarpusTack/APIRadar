@@ -1,16 +1,11 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
-use chrono::Utc;
-use serde_json::{json, Value};
-use uuid::Uuid;
 use crate::auth::JwtClaims;
 use crate::errors::ApiError;
 use crate::sampling::load_sampling;
 use crate::utils::{field_in_deny_list, normalise_path, otlp_attr, sample_keep};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use chrono::Utc;
+use serde_json::{json, Value};
+use uuid::Uuid;
 
 #[derive(serde::Deserialize)]
 pub(crate) struct UsageEventRequest {
@@ -79,7 +74,9 @@ pub(crate) async fn ingest_usage_event(
         if !event.field_path.is_empty() {
             let sampling = load_sampling(&pool, &event.service_id, &org_id).await;
             let deny_str = sampling.field_deny_list.join(",");
-            if field_in_deny_list(&event.field_path, &deny_str) { continue; }
+            if field_in_deny_list(&event.field_path, &deny_str) {
+                continue;
+            }
         }
         to_insert.push(event);
     }
@@ -106,7 +103,10 @@ pub(crate) async fn ingest_usage_event(
     }
     tx.commit().await?;
 
-    Ok((StatusCode::ACCEPTED, Json(json!({"accepted": to_insert.len()}))))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"accepted": to_insert.len()})),
+    ))
 }
 
 // POST /v1/call-sites
@@ -136,15 +136,14 @@ pub(crate) async fn upsert_call_sites(
             &site.field_path,
         );
 
-        let updated = sqlx::query(
-            "UPDATE call_site SET last_seen_at = ?, operation = ? WHERE id = ?",
-        )
-        .bind(&now)
-        .bind(&site.operation)
-        .bind(&id)
-        .execute(&mut *tx)
-        .await
-        .map_err(crate::errors::map_ingest_db_error)?;
+        let updated =
+            sqlx::query("UPDATE call_site SET last_seen_at = ?, operation = ? WHERE id = ?")
+                .bind(&now)
+                .bind(&site.operation)
+                .bind(&id)
+                .execute(&mut *tx)
+                .await
+                .map_err(crate::errors::map_ingest_db_error)?;
 
         if updated.rows_affected() == 0 {
             sqlx::query(
@@ -210,7 +209,9 @@ pub(crate) async fn ingest_otlp_traces(
 
             for span in &spans {
                 let kind = span.get("kind").and_then(|v| v.as_i64()).unwrap_or(0);
-                if kind != 3 { continue; }
+                if kind != 3 {
+                    continue;
+                }
 
                 let attrs = span
                     .get("attributes")
@@ -249,11 +250,15 @@ pub(crate) async fn ingest_otlp_traces(
                     .or_else(|| otlp_attr(&attrs, "http.target").map(|p| normalise_path(&p)))
                     .unwrap_or_default();
 
-                if method.is_empty() || route.is_empty() { continue; }
+                if method.is_empty() || route.is_empty() {
+                    continue;
+                }
                 let operation = format!("{} {}", method.to_uppercase(), route);
 
                 let sampling = load_sampling(&pool, &service_id, &org_id).await;
-                if !sample_keep(sampling.sample_rate) { continue; }
+                if !sample_keep(sampling.sample_rate) {
+                    continue;
+                }
 
                 let id = Uuid::new_v4().to_string();
                 let _ = sqlx::query(
@@ -284,7 +289,9 @@ pub(crate) async fn ingest_gateway_logs(
     Json(entries): Json<Vec<GatewayLogEntry>>,
 ) -> Result<impl IntoResponse, ApiError> {
     if entries.len() > 5000 {
-        return Err(ApiError::TooManyRequests("batch too large, max 5000".into()));
+        return Err(ApiError::TooManyRequests(
+            "batch too large, max 5000".into(),
+        ));
     }
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
@@ -299,7 +306,9 @@ pub(crate) async fn ingest_gateway_logs(
         );
 
         let sampling = load_sampling(&pool, &entry.service_id, &org_id).await;
-        if !sample_keep(sampling.sample_rate) { continue; }
+        if !sample_keep(sampling.sample_rate) {
+            continue;
+        }
 
         let id = Uuid::new_v4().to_string();
         let _ = sqlx::query(

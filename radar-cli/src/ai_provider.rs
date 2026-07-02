@@ -33,7 +33,10 @@ impl Provider {
             if !k.is_empty() {
                 let base = std::env::var("OPENAI_BASE_URL")
                     .unwrap_or_else(|_| "https://api.openai.com/v1".into());
-                return Some(Self::OpenAI { api_key: k, base_url: base });
+                return Some(Self::OpenAI {
+                    api_key: k,
+                    base_url: base,
+                });
             }
         }
         if let Ok(t) = std::env::var("GITHUB_COPILOT_TOKEN") {
@@ -52,8 +55,13 @@ impl Provider {
                 call_openai_compat(api_key, base_url, prompt, max_tokens).await
             }
             Self::GitHubCopilot { token } => {
-                call_openai_compat(token, "https://api.githubcopilot.com/v1", prompt, max_tokens)
-                    .await
+                call_openai_compat(
+                    token,
+                    "https://api.githubcopilot.com/v1",
+                    prompt,
+                    max_tokens,
+                )
+                .await
             }
         }
     }
@@ -85,7 +93,10 @@ async fn call_anthropic(api_key: &str, prompt: &str, max_tokens: u32) -> Option<
     let body = Req {
         model: "claude-sonnet-4-6",
         max_tokens,
-        messages: vec![Msg { role: "user", content: prompt }],
+        messages: vec![Msg {
+            role: "user",
+            content: prompt,
+        }],
     };
 
     let client = Client::builder()
@@ -144,7 +155,10 @@ async fn call_openai_compat(
     let body = Req {
         model: "gpt-4o",
         max_tokens,
-        messages: vec![Msg { role: "user", content: prompt }],
+        messages: vec![Msg {
+            role: "user",
+            content: prompt,
+        }],
     };
 
     let client = Client::builder()

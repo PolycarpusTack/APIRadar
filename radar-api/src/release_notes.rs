@@ -1,3 +1,7 @@
+use crate::ai_tests::load_diff_evidence;
+use crate::auth::{require_org_owned, JwtClaims, OrgResource};
+use crate::errors::ApiError;
+use crate::PaginationParams;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -8,10 +12,6 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
-use crate::auth::{JwtClaims, OrgResource, require_org_owned};
-use crate::errors::ApiError;
-use crate::ai_tests::load_diff_evidence;
-use crate::PaginationParams;
 
 type OrgExt = Option<axum::extract::Extension<JwtClaims>>;
 
@@ -42,16 +42,17 @@ pub(crate) async fn create_release_note(
     }
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    sqlx::query(
-        "INSERT INTO release_note (id, diff_id, content, created_at) VALUES (?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(&diff_id)
-    .bind(&body.content)
-    .bind(&now)
-    .execute(&pool)
-    .await?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": id, "diff_id": diff_id, "created_at": now }))))
+    sqlx::query("INSERT INTO release_note (id, diff_id, content, created_at) VALUES (?, ?, ?, ?)")
+        .bind(&id)
+        .bind(&diff_id)
+        .bind(&body.content)
+        .bind(&now)
+        .execute(&pool)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "diff_id": diff_id, "created_at": now })),
+    ))
 }
 
 // GET /v1/release-notes
@@ -61,8 +62,7 @@ pub(crate) async fn list_release_notes(
     Query(params): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Clamp: a negative LIMIT dumps the whole table on SQLite and 500s on Postgres.
-    let (limit, offset) =
-        crate::utils::clamp_pagination(Some(params.limit), Some(params.offset));
+    let (limit, offset) = crate::utils::clamp_pagination(Some(params.limit), Some(params.offset));
     let org_id = caller_org(&org);
     // Org isolation: authenticated callers only see release notes for diffs whose
     // producer service belongs to their org. Empty org (desktop/no-auth) sees all.
@@ -76,11 +76,13 @@ pub(crate) async fn list_release_notes(
            JOIN spec_version sv_to   ON sv_to.id   = d.to_version
            JOIN service     svc    ON svc.id     = sv_from.service_id"#;
     let rows = if org_id.is_empty() {
-        sqlx::query(&format!("{base} ORDER BY rn.created_at DESC LIMIT ? OFFSET ?"))
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&pool)
-            .await?
+        sqlx::query(&format!(
+            "{base} ORDER BY rn.created_at DESC LIMIT ? OFFSET ?"
+        ))
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&pool)
+        .await?
     } else {
         sqlx::query(&format!(
             "{base} WHERE svc.org_id = ? ORDER BY rn.created_at DESC LIMIT ? OFFSET ?"
@@ -92,17 +94,20 @@ pub(crate) async fn list_release_notes(
         .await?
     };
 
-    let items: Vec<Value> = rows.iter().map(|r| {
-        use sqlx::Row;
-        json!({
-            "id":           r.get::<String, _>("id"),
-            "diff_id":      r.get::<String, _>("diff_id"),
-            "from_git_ref": r.get::<String, _>("from_git_ref"),
-            "to_git_ref":   r.get::<String, _>("to_git_ref"),
-            "status":       r.try_get::<String, _>("status").unwrap_or_else(|_| "draft".into()),
-            "created_at":   r.get::<String, _>("created_at"),
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            use sqlx::Row;
+            json!({
+                "id":           r.get::<String, _>("id"),
+                "diff_id":      r.get::<String, _>("diff_id"),
+                "from_git_ref": r.get::<String, _>("from_git_ref"),
+                "to_git_ref":   r.get::<String, _>("to_git_ref"),
+                "status":       r.try_get::<String, _>("status").unwrap_or_else(|_| "draft".into()),
+                "created_at":   r.get::<String, _>("created_at"),
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(Json(json!(items)))
 }
@@ -129,7 +134,9 @@ pub(crate) async fn get_release_note(
     .await?;
 
     match row {
-        None => Err(ApiError::NotFound(format!("release note {note_id} not found"))),
+        None => Err(ApiError::NotFound(format!(
+            "release note {note_id} not found"
+        ))),
         Some(r) => {
             use sqlx::Row;
             Ok(Json(json!({
@@ -169,16 +176,18 @@ pub(crate) async fn patch_release_note_status(
         .await?;
 
     let Some(row) = row else {
-        return Err(ApiError::NotFound(format!("release note {note_id} not found")));
+        return Err(ApiError::NotFound(format!(
+            "release note {note_id} not found"
+        )));
     };
     let current: String = row.try_get("status").unwrap_or_else(|_| "draft".into());
 
     let allowed_next = match current.as_str() {
-        "draft"       => &["reviewed", "superseded"][..],
-        "reviewed"    => &["published", "draft", "superseded"][..],
-        "published"   => &["superseded"][..],
-        "superseded"  => &[][..],
-        _             => &["draft"][..],
+        "draft" => &["reviewed", "superseded"][..],
+        "reviewed" => &["published", "draft", "superseded"][..],
+        "published" => &["superseded"][..],
+        "superseded" => &[][..],
+        _ => &["draft"][..],
     };
     if !allowed_next.contains(&body.status.as_str()) {
         return Err(ApiError::BadRequest(format!(
@@ -223,8 +232,10 @@ pub(crate) async fn get_migration_guide(
         return Err(ApiError::NotFound(format!("diff {diff_id} not found")));
     };
     let from_ref: String = dr.try_get("from_ref").unwrap_or_default();
-    let to_ref: String   = dr.try_get("to_ref").unwrap_or_default();
-    let service_name: String = dr.try_get("service_name").unwrap_or_else(|_| diff_id.clone());
+    let to_ref: String = dr.try_get("to_ref").unwrap_or_default();
+    let service_name: String = dr
+        .try_get("service_name")
+        .unwrap_or_else(|_| diff_id.clone());
 
     let consumer_name: Option<String> = if let Some(cid) = consumer_id {
         sqlx::query("SELECT name FROM consumer WHERE id = ?")
@@ -259,7 +270,8 @@ pub(crate) async fn get_migration_guide(
     let call_sites = csqb.fetch_all(&pool).await?;
 
     let mut md = String::new();
-    let scope_label = consumer_name.as_deref()
+    let scope_label = consumer_name
+        .as_deref()
         .or(consumer_id)
         .map(|n| format!(" ��� scoped to **{n}**"))
         .unwrap_or_default();
@@ -272,10 +284,7 @@ pub(crate) async fn get_migration_guide(
     if change_rows.is_empty() {
         md.push_str("No breaking changes in this diff.\n");
     } else {
-        md.push_str(&format!(
-            "## Breaking Changes ({})\n\n",
-            change_rows.len()
-        ));
+        md.push_str(&format!("## Breaking Changes ({})\n\n", change_rows.len()));
         for cr in &change_rows {
             let path: String = cr.try_get("path").unwrap_or_default();
             let kind: String = cr.try_get("kind").unwrap_or_default();
@@ -289,16 +298,25 @@ pub(crate) async fn get_migration_guide(
     }
 
     if !evidence.is_empty() {
-        md.push_str(&format!("\n## Your Usage Evidence ({})\n\n", evidence.len()));
+        md.push_str(&format!(
+            "\n## Your Usage Evidence ({})\n\n",
+            evidence.len()
+        ));
         md.push_str("The following operations and fields were observed from your service:\n\n");
         md.push_str("| Operation | Field | Source | Confidence | Last seen |\n");
         md.push_str("|---|---|---|---|---|\n");
         for ev in &evidence {
-            let op  = ev["operation"].as_str().unwrap_or("—");
-            let fp  = ev["field_path"].as_str().filter(|s| !s.is_empty()).unwrap_or("—");
+            let op = ev["operation"].as_str().unwrap_or("—");
+            let fp = ev["field_path"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("—");
             let src = ev["source_type"].as_str().unwrap_or("—");
             let conf = ev["confidence"].as_str().unwrap_or("—");
-            let obs  = ev["observed_at"].as_str().map(|s| s.get(..10).unwrap_or(s)).unwrap_or("—");
+            let obs = ev["observed_at"]
+                .as_str()
+                .map(|s| s.get(..10).unwrap_or(s))
+                .unwrap_or("—");
             md.push_str(&format!("| `{op}` | `{fp}` | {src} | {conf} | {obs} |\n"));
         }
     }
@@ -310,8 +328,8 @@ pub(crate) async fn get_migration_guide(
         md.push_str("|---|---|---|---|\n");
         for cs in &call_sites {
             use sqlx::Row as _;
-            let op:  String = cs.try_get("operation").unwrap_or_default();
-            let fp:  String = cs.try_get("field_path").unwrap_or_default();
+            let op: String = cs.try_get("operation").unwrap_or_default();
+            let fp: String = cs.try_get("field_path").unwrap_or_default();
             let file: String = cs.try_get("file_path").unwrap_or_default();
             let line: Option<i64> = cs.try_get("line_number").unwrap_or(None);
             let line_str = line.map(|l| l.to_string()).unwrap_or_else(|| "—".into());
@@ -319,10 +337,7 @@ pub(crate) async fn get_migration_guide(
         }
     }
 
-    Ok((
-        [("Content-Type", "text/markdown; charset=utf-8")],
-        md,
-    ))
+    Ok(([("Content-Type", "text/markdown; charset=utf-8")], md))
 }
 
 // POST /v1/diffs/:id/release-notes/generate
@@ -345,7 +360,7 @@ pub(crate) async fn generate_release_note(
         return Err(ApiError::NotFound(format!("diff {diff_id} not found")));
     }
 
-    let id  = uuid::Uuid::new_v4().to_string();
+    let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     sqlx::query(
@@ -365,15 +380,22 @@ pub(crate) async fn generate_release_note(
         let did = diff_id.clone();
         let oid = org_id.clone();
         tokio::spawn(async move {
-            crate::audit::record_event(&p2, &oid, "system", "release_note.generate.started",
-                Some("release_note"), Some(&nid),
-                Some(&serde_json::json!({ "diff_id": did }))).await;
+            crate::audit::record_event(
+                &p2,
+                &oid,
+                "system",
+                "release_note.generate.started",
+                Some("release_note"),
+                Some(&nid),
+                Some(&serde_json::json!({ "diff_id": did })),
+            )
+            .await;
         });
     }
 
     // Background generation task.
     {
-        let p2  = pool.clone();
+        let p2 = pool.clone();
         let nid = id.clone();
         let did = diff_id.clone();
         let oid = org_id.clone();
@@ -387,8 +409,16 @@ pub(crate) async fn generate_release_note(
                     .bind(&nid)
                     .execute(&p2)
                     .await;
-                    crate::audit::record_event(&p2, &oid, "system", "release_note.generate.completed",
-                        Some("release_note"), Some(&nid), None).await;
+                    crate::audit::record_event(
+                        &p2,
+                        &oid,
+                        "system",
+                        "release_note.generate.completed",
+                        Some("release_note"),
+                        Some(&nid),
+                        None,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     let msg = e.to_string();
@@ -399,9 +429,16 @@ pub(crate) async fn generate_release_note(
                     .bind(&nid)
                     .execute(&p2)
                     .await;
-                    crate::audit::record_event(&p2, &oid, "system", "release_note.generate.failed",
-                        Some("release_note"), Some(&nid),
-                        Some(&serde_json::json!({ "error": msg }))).await;
+                    crate::audit::record_event(
+                        &p2,
+                        &oid,
+                        "system",
+                        "release_note.generate.failed",
+                        Some("release_note"),
+                        Some(&nid),
+                        Some(&serde_json::json!({ "error": msg })),
+                    )
+                    .await;
                 }
             }
         });
@@ -444,10 +481,10 @@ pub(crate) async fn get_generate_status(
     };
 
     let gen_status: Option<String> = r.try_get("generation_status").ok().flatten();
-    let gen_error:  Option<String> = r.try_get("generation_error").ok().flatten();
-    let content:    String         = r.try_get("content").unwrap_or_default();
-    let status:     String         = r.try_get("status").unwrap_or_else(|_| "draft".into());
-    let created_at: String         = r.try_get("created_at").unwrap_or_default();
+    let gen_error: Option<String> = r.try_get("generation_error").ok().flatten();
+    let content: String = r.try_get("content").unwrap_or_default();
+    let status: String = r.try_get("status").unwrap_or_else(|_| "draft".into());
+    let created_at: String = r.try_get("created_at").unwrap_or_default();
 
     let mut resp = serde_json::json!({
         "id":                id,
@@ -493,9 +530,11 @@ async fn build_release_note_content(
         return Err(ApiError::NotFound(format!("diff {diff_id} not found")));
     };
 
-    let from_ref:     String = dr.try_get("from_ref").unwrap_or_default();
-    let to_ref:       String = dr.try_get("to_ref").unwrap_or_default();
-    let service_name: String = dr.try_get("service_name").unwrap_or_else(|_| diff_id.to_owned());
+    let from_ref: String = dr.try_get("from_ref").unwrap_or_default();
+    let to_ref: String = dr.try_get("to_ref").unwrap_or_default();
+    let service_name: String = dr
+        .try_get("service_name")
+        .unwrap_or_else(|_| diff_id.to_owned());
 
     let change_rows = sqlx::query(
         "SELECT path, kind, severity, description FROM change WHERE diff_id = ? ORDER BY severity DESC, path",
@@ -504,18 +543,30 @@ async fn build_release_note_content(
     .fetch_all(pool)
     .await?;
 
-    let breaking: Vec<_> = change_rows.iter().filter(|r| r.try_get::<String, _>("severity").unwrap_or_default() == "breaking").collect();
-    let risky: Vec<_>    = change_rows.iter().filter(|r| r.try_get::<String, _>("severity").unwrap_or_default() == "non_breaking_risky").collect();
-    let safe: Vec<_>     = change_rows.iter().filter(|r| r.try_get::<String, _>("severity").unwrap_or_default() == "safe").collect();
+    let breaking: Vec<_> = change_rows
+        .iter()
+        .filter(|r| r.try_get::<String, _>("severity").unwrap_or_default() == "breaking")
+        .collect();
+    let risky: Vec<_> = change_rows
+        .iter()
+        .filter(|r| r.try_get::<String, _>("severity").unwrap_or_default() == "non_breaking_risky")
+        .collect();
+    let safe: Vec<_> = change_rows
+        .iter()
+        .filter(|r| r.try_get::<String, _>("severity").unwrap_or_default() == "safe")
+        .collect();
 
     let mut md = String::new();
     md.push_str(&format!(
         "# Release Notes — {service_name}\n\n\
          **Versions:** `{from_ref}` → `{to_ref}`\n\n\
          **Summary:** {} breaking change{}, {} risky change{}, {} safe change{}\n\n",
-        breaking.len(), if breaking.len() == 1 { "" } else { "s" },
-        risky.len(),    if risky.len()    == 1 { "" } else { "s" },
-        safe.len(),     if safe.len()     == 1 { "" } else { "s" },
+        breaking.len(),
+        if breaking.len() == 1 { "" } else { "s" },
+        risky.len(),
+        if risky.len() == 1 { "" } else { "s" },
+        safe.len(),
+        if safe.len() == 1 { "" } else { "s" },
     ));
 
     if !breaking.is_empty() {
@@ -526,7 +577,9 @@ async fn build_release_note_content(
             let kind: String = row.try_get("kind").unwrap_or_default();
             let desc: Option<String> = row.try_get("description").unwrap_or(None);
             md.push_str(&format!("### `{path}`\n\n**Kind:** `{kind}`\n\n"));
-            if let Some(d) = desc { md.push_str(&format!("{d}\n\n")); }
+            if let Some(d) = desc {
+                md.push_str(&format!("{d}\n\n"));
+            }
             migration_advice(&mut md, &kind, &path);
         }
     }
@@ -561,7 +614,10 @@ async fn build_release_note_content(
 }
 
 fn migration_advice(md: &mut String, kind: &str, path: &str) {
-    let field = path.rsplit_once(" \u{2192} ").map(|(_, f)| f).unwrap_or(path);
+    let field = path
+        .rsplit_once(" \u{2192} ")
+        .map(|(_, f)| f)
+        .unwrap_or(path);
     match kind {
         "field_removed" => {
             md.push_str(&format!(

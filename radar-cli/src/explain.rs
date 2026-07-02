@@ -119,7 +119,14 @@ pub async fn run(
             blast.entries.iter().map(|_| None).collect()
         };
 
-        let notes = build_release_notes(&diff, &groups, &narratives, &blast, &per_consumer, migration_guide);
+        let notes = build_release_notes(
+            &diff,
+            &groups,
+            &narratives,
+            &blast,
+            &per_consumer,
+            migration_guide,
+        );
 
         if post_github_release {
             match crate::github::GithubContext::from_env() {
@@ -145,7 +152,10 @@ pub async fn run(
         let mut store_req = client
             .post(&store_url)
             .header("content-type", "application/json")
-            .body(format!(r#"{{"content":{}}}"#, serde_json::to_string(&notes).unwrap()));
+            .body(format!(
+                r#"{{"content":{}}}"#,
+                serde_json::to_string(&notes).unwrap()
+            ));
         if let Some(t) = token {
             store_req = store_req.header("Authorization", format!("Bearer {t}"));
         }
@@ -153,7 +163,10 @@ pub async fn run(
             Ok(resp) if resp.status().is_success() => {
                 eprintln!("Release notes stored in Radar dashboard.");
             }
-            Ok(resp) => eprintln!("Warning: failed to store release notes (HTTP {})", resp.status()),
+            Ok(resp) => eprintln!(
+                "Warning: failed to store release notes (HTTP {})",
+                resp.status()
+            ),
             Err(e) => eprintln!("Warning: could not reach API to store release notes: {e}"),
         }
 
@@ -166,7 +179,11 @@ pub async fn run(
             None => print!("{notes}"),
         }
     } else {
-        let breaking = diff.changes.iter().filter(|c| c.severity == "breaking").count();
+        let breaking = diff
+            .changes
+            .iter()
+            .filter(|c| c.severity == "breaking")
+            .count();
         let consumers_affected = blast.entries.len();
         println!("Diff {diff_id}: {breaking} breaking change(s), {consumers_affected} consumer(s) affected.");
     }
@@ -181,7 +198,9 @@ pub async fn run(
 fn group_by_concept(changes: &[ChangeRow]) -> BTreeMap<String, Vec<&ChangeRow>> {
     let mut map: BTreeMap<String, Vec<&ChangeRow>> = BTreeMap::new();
     for change in changes {
-        map.entry(extract_concept(&change.path)).or_default().push(change);
+        map.entry(extract_concept(&change.path))
+            .or_default()
+            .push(change);
     }
     map
 }
@@ -243,7 +262,11 @@ fn build_concept_prompt(version: &str, groups: &BTreeMap<String, Vec<&ChangeRow>
     for (concept, changes) in groups {
         concept_block.push_str(&format!("- **{concept}**:\n"));
         for c in changes {
-            let marker = if c.severity == "breaking" { " — BREAKING" } else { "" };
+            let marker = if c.severity == "breaking" {
+                " — BREAKING"
+            } else {
+                ""
+            };
             concept_block.push_str(&format!("  - `{}` ({}{})\n", c.path, c.kind, marker));
         }
     }
@@ -283,8 +306,8 @@ fn parse_narratives(text: &str) -> BTreeMap<String, (String, String)> {
         if let Some(groups) = val["groups"].as_array() {
             for g in groups {
                 let concept = g["concept"].as_str().unwrap_or("").to_string();
-                let title   = g["title"].as_str().unwrap_or("").to_string();
-                let prose   = g["prose"].as_str().unwrap_or("").to_string();
+                let title = g["title"].as_str().unwrap_or("").to_string();
+                let prose = g["prose"].as_str().unwrap_or("").to_string();
                 if !concept.is_empty() {
                     result.insert(concept, (title, prose));
                 }
@@ -327,7 +350,11 @@ fn build_release_notes(
             // H3 title — fall back to concept name if AI wasn't available
             md.push_str(&format!(
                 "### {}\n\n",
-                if title.is_empty() { concept.as_str() } else { title.as_str() }
+                if title.is_empty() {
+                    concept.as_str()
+                } else {
+                    title.as_str()
+                }
             ));
 
             // Prose
@@ -355,11 +382,11 @@ fn build_release_notes(
                  - **Contact**: {contact}\n\
                  - **Confidence**: {confidence}\n\
                  - **Last seen**: {last_seen}\n\n",
-                name       = entry.consumer.name,
-                team       = entry.consumer.owner_team,
-                contact    = entry.consumer.contact,
+                name = entry.consumer.name,
+                team = entry.consumer.owner_team,
+                contact = entry.consumer.contact,
                 confidence = entry.confidence,
-                last_seen  = entry.last_seen,
+                last_seen = entry.last_seen,
             ));
 
             match narrative {
@@ -408,7 +435,11 @@ mod tests {
     }
 
     fn change(path: &str, kind: &str, severity: &str) -> ChangeRow {
-        ChangeRow { path: path.into(), kind: kind.into(), severity: severity.into() }
+        ChangeRow {
+            path: path.into(),
+            kind: kind.into(),
+            severity: severity.into(),
+        }
     }
 
     // ── extract_concept ──────────────────────────────────────────────────────
@@ -458,7 +489,11 @@ mod tests {
 
     #[test]
     fn output_contains_version_heading() {
-        let diff = make_diff(vec![change("GET /products/{id}", "field_removed", "breaking")]);
+        let diff = make_diff(vec![change(
+            "GET /products/{id}",
+            "field_removed",
+            "breaking",
+        )]);
         let groups = group_by_concept(&diff.changes);
         let blast = BlastRadius { entries: vec![] };
         let notes = build_release_notes(&diff, &groups, &BTreeMap::new(), &blast, &[], false);
@@ -467,7 +502,11 @@ mod tests {
 
     #[test]
     fn output_contains_concept_table() {
-        let diff = make_diff(vec![change("GET /products/{id}", "field_removed", "breaking")]);
+        let diff = make_diff(vec![change(
+            "GET /products/{id}",
+            "field_removed",
+            "breaking",
+        )]);
         let groups = group_by_concept(&diff.changes);
         let blast = BlastRadius { entries: vec![] };
         let notes = build_release_notes(&diff, &groups, &BTreeMap::new(), &blast, &[], false);
@@ -477,12 +516,19 @@ mod tests {
 
     #[test]
     fn ai_title_and_prose_appear_in_output() {
-        let diff = make_diff(vec![change("GET /products/{id}", "field_removed", "breaking")]);
+        let diff = make_diff(vec![change(
+            "GET /products/{id}",
+            "field_removed",
+            "breaking",
+        )]);
         let groups = group_by_concept(&diff.changes);
         let mut narratives = BTreeMap::new();
         narratives.insert(
             "Products".to_string(),
-            ("Breaking: price removed from Products".to_string(), "The price field has been removed.".to_string()),
+            (
+                "Breaking: price removed from Products".to_string(),
+                "The price field has been removed.".to_string(),
+            ),
         );
         let blast = BlastRadius { entries: vec![] };
         let notes = build_release_notes(&diff, &groups, &narratives, &blast, &[], false);
@@ -492,7 +538,11 @@ mod tests {
 
     #[test]
     fn no_migration_section_without_flag() {
-        let diff = make_diff(vec![change("GET /products/{id}", "field_removed", "breaking")]);
+        let diff = make_diff(vec![change(
+            "GET /products/{id}",
+            "field_removed",
+            "breaking",
+        )]);
         let groups = group_by_concept(&diff.changes);
         let blast = BlastRadius {
             entries: vec![BlastEntry {
@@ -511,7 +561,11 @@ mod tests {
 
     #[test]
     fn migration_section_present_with_flag() {
-        let diff = make_diff(vec![change("GET /products/{id}", "field_removed", "breaking")]);
+        let diff = make_diff(vec![change(
+            "GET /products/{id}",
+            "field_removed",
+            "breaking",
+        )]);
         let groups = group_by_concept(&diff.changes);
         let blast = BlastRadius {
             entries: vec![BlastEntry {

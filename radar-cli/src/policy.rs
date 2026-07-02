@@ -91,8 +91,8 @@ pub fn load_config(path: Option<&std::path::Path>) -> anyhow::Result<DriftConfig
         return Ok(DriftConfig::default());
     }
     let content = std::fs::read_to_string(&p)?;
-    let config: DriftConfig = serde_yml::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("invalid .radar.yml: {e}"))?;
+    let config: DriftConfig =
+        serde_yml::from_str(&content).map_err(|e| anyhow::anyhow!("invalid .radar.yml: {e}"))?;
     Ok(config)
 }
 
@@ -203,7 +203,11 @@ pub fn decide(
                 };
             }
             let code = exit_code(changes, policy, has_active_consumers, has_label_override);
-            let verdict = if code == 0 { Verdict::Pass } else { Verdict::Block };
+            let verdict = if code == 0 {
+                Verdict::Pass
+            } else {
+                Verdict::Block
+            };
             PolicyDecision {
                 verdict,
                 fail_mode: FailMode::Closed,
@@ -236,7 +240,11 @@ mod tests {
         let p = PolicyConfig::default();
         let d = decide(&[breaking()], &p, &FailMode::Open, false, false, true);
         assert_eq!(d.exit_code, 1, "local breaking diff in open mode → exit 1");
-        assert_eq!(d.verdict, Verdict::Warn, "open mode → warn verdict even on exit 1");
+        assert_eq!(
+            d.verdict,
+            Verdict::Warn,
+            "open mode → warn verdict even on exit 1"
+        );
     }
 
     #[test]
@@ -332,7 +340,10 @@ mod tests {
             ..Default::default()
         };
         let d = decide(&[breaking()], &p, &FailMode::Open, false, false, false);
-        assert_eq!(d.exit_code, 0, "no active consumers → should not block in open mode");
+        assert_eq!(
+            d.exit_code, 0,
+            "no active consumers → should not block in open mode"
+        );
         assert_eq!(d.verdict, Verdict::Warn);
     }
 
@@ -343,7 +354,10 @@ mod tests {
             ..Default::default()
         };
         let d = decide(&[breaking()], &p, &FailMode::Open, true, false, false);
-        assert_eq!(d.exit_code, 1, "active consumers + breaking → exit 1 in open mode");
+        assert_eq!(
+            d.exit_code, 1,
+            "active consumers + breaking → exit 1 in open mode"
+        );
         assert_eq!(d.verdict, Verdict::Warn);
     }
 
@@ -354,7 +368,10 @@ mod tests {
             ..Default::default()
         };
         let d = decide(&[breaking()], &p, &FailMode::Open, false, false, false);
-        assert_eq!(d.exit_code, 1, "block_on=AnyBreak + breaking → exit 1 in open mode");
+        assert_eq!(
+            d.exit_code, 1,
+            "block_on=AnyBreak + breaking → exit 1 in open mode"
+        );
         assert_eq!(d.verdict, Verdict::Warn);
     }
 
@@ -365,7 +382,10 @@ mod tests {
             ..Default::default()
         };
         let d = decide(&[breaking()], &p, &FailMode::Open, true, false, false);
-        assert_eq!(d.exit_code, 0, "block_on=Never → always exit 0 regardless of consumers");
+        assert_eq!(
+            d.exit_code, 0,
+            "block_on=Never → always exit 0 regardless of consumers"
+        );
         assert_eq!(d.verdict, Verdict::Warn);
     }
 
@@ -383,7 +403,10 @@ mod tests {
             ..Default::default()
         };
         let d = decide(&[breaking()], &p, &FailMode::Open, false, true, true);
-        assert_eq!(d.exit_code, 0, "valid label override honored in fail-open despite api error");
+        assert_eq!(
+            d.exit_code, 0,
+            "valid label override honored in fail-open despite api error"
+        );
         assert_eq!(d.verdict, Verdict::Warn, "open mode stays warn verdict");
     }
 
@@ -395,7 +418,10 @@ mod tests {
             ..Default::default()
         };
         let d = decide(&[breaking()], &p, &FailMode::Open, false, false, true);
-        assert_eq!(d.exit_code, 0, "block_on=never honored in fail-open despite api error");
+        assert_eq!(
+            d.exit_code, 0,
+            "block_on=never honored in fail-open despite api error"
+        );
         assert_eq!(d.verdict, Verdict::Warn);
     }
 
@@ -408,6 +434,9 @@ mod tests {
             ..Default::default()
         };
         let d = decide(&[breaking()], &p, &FailMode::Open, false, true, true);
-        assert_eq!(d.exit_code, 1, "override not configured → breaking still blocks");
+        assert_eq!(
+            d.exit_code, 1,
+            "override not configured → breaking still blocks"
+        );
     }
 }

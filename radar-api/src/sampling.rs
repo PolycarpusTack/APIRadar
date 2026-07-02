@@ -1,3 +1,5 @@
+use crate::auth::JwtClaims;
+use crate::errors::ApiError;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -7,8 +9,6 @@ use axum::{
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use crate::auth::JwtClaims;
-use crate::errors::ApiError;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub(crate) struct ServiceSamplingBody {
@@ -18,10 +18,16 @@ pub(crate) struct ServiceSamplingBody {
     pub(crate) field_deny_list: Vec<String>,
 }
 
-fn default_sample_rate() -> f64 { 1.0 }
+fn default_sample_rate() -> f64 {
+    1.0
+}
 
 /// Load sampling configuration for a service, returning defaults if not set.
-pub(crate) async fn load_sampling(pool: &sqlx::AnyPool, service_id: &str, org_id: &str) -> ServiceSamplingBody {
+pub(crate) async fn load_sampling(
+    pool: &sqlx::AnyPool,
+    service_id: &str,
+    org_id: &str,
+) -> ServiceSamplingBody {
     use sqlx::Row;
     let row = sqlx::query(
         "SELECT sample_rate, field_deny_list FROM service_sampling WHERE service_id = ? AND org_id = ?",
@@ -41,9 +47,15 @@ pub(crate) async fn load_sampling(pool: &sqlx::AnyPool, service_id: &str, org_id
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            ServiceSamplingBody { sample_rate: rate, field_deny_list: deny }
+            ServiceSamplingBody {
+                sample_rate: rate,
+                field_deny_list: deny,
+            }
         }
-        None => ServiceSamplingBody { sample_rate: 1.0, field_deny_list: vec![] },
+        None => ServiceSamplingBody {
+            sample_rate: 1.0,
+            field_deny_list: vec![],
+        },
     }
 }
 
@@ -55,11 +67,14 @@ pub(crate) async fn get_sampling(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let config = load_sampling(&pool, &service_id, &org_id).await;
-    Ok((StatusCode::OK, Json(json!({
-        "service_id":       service_id,
-        "sample_rate":      config.sample_rate,
-        "field_deny_list":  config.field_deny_list,
-    }))))
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "service_id":       service_id,
+            "sample_rate":      config.sample_rate,
+            "field_deny_list":  config.field_deny_list,
+        })),
+    ))
 }
 
 /// PUT /v1/services/:id/sampling
@@ -70,7 +85,9 @@ pub(crate) async fn put_sampling(
     Json(body): Json<ServiceSamplingBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if !(0.0..=1.0).contains(&body.sample_rate) {
-        return Err(ApiError::BadRequest("sample_rate must be between 0.0 and 1.0".into()));
+        return Err(ApiError::BadRequest(
+            "sample_rate must be between 0.0 and 1.0".into(),
+        ));
     }
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let deny_str = body.field_deny_list.join(",");
@@ -92,11 +109,14 @@ pub(crate) async fn put_sampling(
     .execute(&pool)
     .await?;
 
-    Ok((StatusCode::OK, Json(json!({
-        "service_id":      service_id,
-        "sample_rate":     body.sample_rate,
-        "field_deny_list": body.field_deny_list,
-    }))))
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "service_id":      service_id,
+            "sample_rate":     body.sample_rate,
+            "field_deny_list": body.field_deny_list,
+        })),
+    ))
 }
 
 /// GET /v1/evidence/coverage — aggregated evidence stats by consumer × service × source type.
@@ -170,7 +190,11 @@ pub(crate) async fn evidence_coverage(
         .map(|r| {
             let last_seen_at: String = r.try_get("last_seen_at").unwrap_or_default();
             let recent: i64 = r.try_get("recent").unwrap_or(0);
-            let last_seen_at_opt: Option<String> = if last_seen_at.is_empty() { None } else { Some(last_seen_at) };
+            let last_seen_at_opt: Option<String> = if last_seen_at.is_empty() {
+                None
+            } else {
+                Some(last_seen_at)
+            };
             json!({
                 "consumer_id":   r.try_get::<String, _>("consumer_id").unwrap_or_default(),
                 "consumer_name": r.try_get::<String, _>("consumer_name").unwrap_or_default(),

@@ -1,3 +1,5 @@
+use crate::auth::JwtClaims;
+use crate::errors::ApiError;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -6,14 +8,21 @@ use axum::{
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
-use crate::auth::JwtClaims;
-use crate::errors::ApiError;
 
 const VALID_CHANGE_KINDS: &[&str] = &[
-    "field_removed", "field_added", "type_changed", "required_changed",
-    "operation_removed", "operation_added", "parameter_removed", "response_removed",
-    "enum_value_removed", "enum_value_added", "nullability_changed",
-    "request_body_added", "request_body_removed",
+    "field_removed",
+    "field_added",
+    "type_changed",
+    "required_changed",
+    "operation_removed",
+    "operation_added",
+    "parameter_removed",
+    "response_removed",
+    "enum_value_removed",
+    "enum_value_added",
+    "nullability_changed",
+    "request_body_added",
+    "request_body_removed",
 ];
 
 #[derive(serde::Deserialize)]
@@ -120,16 +129,16 @@ pub(crate) async fn delete_evolution_rule(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
-    let result = sqlx::query(
-        "DELETE FROM evolution_rule WHERE id = ? AND org_id = ?",
-    )
-    .bind(&rule_id)
-    .bind(&org_id)
-    .execute(&pool)
-    .await?;
+    let result = sqlx::query("DELETE FROM evolution_rule WHERE id = ? AND org_id = ?")
+        .bind(&rule_id)
+        .bind(&org_id)
+        .execute(&pool)
+        .await?;
 
     if result.rows_affected() == 0 {
-        return Err(ApiError::NotFound(format!("evolution rule {rule_id} not found")));
+        return Err(ApiError::NotFound(format!(
+            "evolution rule {rule_id} not found"
+        )));
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -149,17 +158,17 @@ pub(crate) async fn toggle_evolution_rule(
         .map(|b| if b { 1 } else { 0 })
         .ok_or_else(|| ApiError::BadRequest("body must include enabled: bool".into()))?;
 
-    let result = sqlx::query(
-        "UPDATE evolution_rule SET enabled = ? WHERE id = ? AND org_id = ?",
-    )
-    .bind(enabled)
-    .bind(&rule_id)
-    .bind(&org_id)
-    .execute(&pool)
-    .await?;
+    let result = sqlx::query("UPDATE evolution_rule SET enabled = ? WHERE id = ? AND org_id = ?")
+        .bind(enabled)
+        .bind(&rule_id)
+        .bind(&org_id)
+        .execute(&pool)
+        .await?;
 
     if result.rows_affected() == 0 {
-        return Err(ApiError::NotFound(format!("evolution rule {rule_id} not found")));
+        return Err(ApiError::NotFound(format!(
+            "evolution rule {rule_id} not found"
+        )));
     }
 
     Ok(StatusCode::NO_CONTENT)

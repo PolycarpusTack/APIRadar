@@ -1,3 +1,5 @@
+use crate::auth::JwtClaims;
+use crate::errors::ApiError;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -8,8 +10,6 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
-use crate::auth::JwtClaims;
-use crate::errors::ApiError;
 
 #[derive(serde::Deserialize)]
 pub(crate) struct CreatePolicyDecisionBody {
@@ -27,8 +27,15 @@ pub(crate) async fn list_policy_decisions(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
-    let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50).min(200);
-    let offset: i64 = params.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50)
+        .min(200);
+    let offset: i64 = params
+        .get("offset")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
 
     let rows = sqlx::query(
         "SELECT id, diff_id, service_id, verdict, fail_mode, actor, created_at \
@@ -56,7 +63,9 @@ pub(crate) async fn list_policy_decisions(
         })
         .collect();
 
-    Ok(Json(json!({ "entries": entries, "limit": limit, "offset": offset })))
+    Ok(Json(
+        json!({ "entries": entries, "limit": limit, "offset": offset }),
+    ))
 }
 
 // POST /v1/policy-decisions — persist a policy verdict from a drift check run

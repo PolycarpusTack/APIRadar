@@ -1,3 +1,7 @@
+use crate::auth::{assert_org_access, JwtClaims};
+use crate::errors::ApiError;
+use crate::utils::apply_evolution_rules;
+use crate::PaginationParams;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -7,10 +11,6 @@ use axum::{
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use uuid::Uuid;
-use crate::auth::{JwtClaims, assert_org_access};
-use crate::errors::ApiError;
-use crate::utils::apply_evolution_rules;
-use crate::PaginationParams;
 
 #[derive(serde::Deserialize)]
 pub(crate) struct CompareSpecsBody {
@@ -70,12 +70,18 @@ mod tests {
 
     #[test]
     fn spec_version_id_differs_by_service() {
-        assert_ne!(spec_version_id("svc-1", "main"), spec_version_id("svc-2", "main"));
+        assert_ne!(
+            spec_version_id("svc-1", "main"),
+            spec_version_id("svc-2", "main")
+        );
     }
 
     #[test]
     fn spec_version_id_differs_by_ref() {
-        assert_ne!(spec_version_id("svc-1", "main"), spec_version_id("svc-1", "dev"));
+        assert_ne!(
+            spec_version_id("svc-1", "main"),
+            spec_version_id("svc-1", "dev")
+        );
     }
 
     #[test]
@@ -170,12 +176,11 @@ pub(crate) async fn create_diff(
 
     // Org isolation: reject if an existing service with this ID belongs to a different org.
     if !org_id.is_empty() {
-        if let Some(existing_org) = sqlx::query_scalar::<_, String>(
-            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
-        )
-        .bind(&service_id)
-        .fetch_optional(&pool)
-        .await?
+        if let Some(existing_org) =
+            sqlx::query_scalar::<_, String>("SELECT COALESCE(org_id, '') FROM service WHERE id = ?")
+                .bind(&service_id)
+                .fetch_optional(&pool)
+                .await?
         {
             if !existing_org.is_empty() && existing_org != org_id {
                 return Err(ApiError::Forbidden("service belongs to another org".into()));
@@ -239,13 +244,11 @@ pub(crate) async fn create_diff(
 
     {
         use sqlx::Row;
-        let existing = sqlx::query(
-            "SELECT id FROM diff WHERE from_version = ? AND to_version = ?",
-        )
-        .bind(&from_version_id)
-        .bind(&to_version_id)
-        .fetch_optional(&pool)
-        .await?;
+        let existing = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
+            .bind(&from_version_id)
+            .bind(&to_version_id)
+            .fetch_optional(&pool)
+            .await?;
 
         if let Some(row) = existing {
             let existing_id: String = row.try_get("id").map_err(ApiError::Db)?;
@@ -329,7 +332,16 @@ pub(crate) async fn create_diff(
         let did = diff_id.clone();
         let oid = org_id.clone();
         tokio::spawn(async move {
-            crate::audit::record_event(&pool2, &oid, "system", "diff.created", Some("diff"), Some(&did), None).await;
+            crate::audit::record_event(
+                &pool2,
+                &oid,
+                "system",
+                "diff.created",
+                Some("diff"),
+                Some(&did),
+                None,
+            )
+            .await;
             crate::webhooks::dispatch_diff_event(pool2, did, oid).await;
         });
     }
@@ -434,7 +446,8 @@ pub(crate) async fn get_diff(
             (
                 r.get::<String, _>("id"),
                 r.get::<String, _>("name"),
-                r.try_get::<Option<String>, _>("path_pattern").unwrap_or(None),
+                r.try_get::<Option<String>, _>("path_pattern")
+                    .unwrap_or(None),
                 r.get::<String, _>("change_kind"),
                 r.get::<String, _>("severity_override"),
             )
@@ -488,14 +501,17 @@ pub(crate) async fn get_shared_diff(
     .fetch_all(&pool)
     .await?;
 
-    let changes: Vec<serde_json::Value> = change_rows.iter().map(|c| {
-        json!({
-            "path":        c.get::<String, _>("path"),
-            "kind":        c.get::<String, _>("kind"),
-            "severity":    c.get::<String, _>("severity"),
-            "description": c.try_get::<Option<String>, _>("description").unwrap_or(None),
+    let changes: Vec<serde_json::Value> = change_rows
+        .iter()
+        .map(|c| {
+            json!({
+                "path":        c.get::<String, _>("path"),
+                "kind":        c.get::<String, _>("kind"),
+                "severity":    c.get::<String, _>("severity"),
+                "description": c.try_get::<Option<String>, _>("description").unwrap_or(None),
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(Json(json!({
         "id":           diff_id,
@@ -626,12 +642,16 @@ pub(crate) async fn blast_radius(
             );
             let mut first = true;
             for _ in &op_level_ops {
-                if !first { sql.push_str(" OR "); }
+                if !first {
+                    sql.push_str(" OR ");
+                }
                 sql.push_str("operation = ?");
                 first = false;
             }
             for _ in &field_level_only {
-                if !first { sql.push_str(" OR "); }
+                if !first {
+                    sql.push_str(" OR ");
+                }
                 sql.push_str("(operation = ? AND field_path = ?)");
                 first = false;
             }
@@ -679,12 +699,16 @@ pub(crate) async fn blast_radius(
             );
             let mut first = true;
             for _ in &op_level_ops {
-                if !first { sql.push_str(" OR "); }
+                if !first {
+                    sql.push_str(" OR ");
+                }
                 sql.push_str("operation = ?");
                 first = false;
             }
             for _ in &changed_field_paths {
-                if !first { sql.push_str(" OR "); }
+                if !first {
+                    sql.push_str(" OR ");
+                }
                 sql.push_str("field_path = ?");
                 first = false;
             }
@@ -720,7 +744,8 @@ pub(crate) async fn blast_radius(
         if let Some(days) = params.max_age_days {
             let cutoff_age = (Utc::now() - Duration::days(i64::from(days))).to_rfc3339();
             evidence_items.retain(|e| {
-                let ts = e["recorded_at"].as_str()
+                let ts = e["recorded_at"]
+                    .as_str()
                     .or_else(|| e["last_seen_at"].as_str())
                     .unwrap_or("");
                 !ts.is_empty() && ts >= cutoff_age.as_str()
@@ -746,18 +771,29 @@ pub(crate) async fn blast_radius(
                 // row, keeping this append-only table (and event_count) bounded.
                 let ev_id = Uuid::new_v5(
                     &Uuid::NAMESPACE_URL,
-                    format!("blast_radius:{diff_id}:{service_id}:{consumer_id}:{source_type}:{op}:{fp}")
-                        .as_bytes(),
+                    format!(
+                        "blast_radius:{diff_id}:{service_id}:{consumer_id}:{source_type}:{op}:{fp}"
+                    )
+                    .as_bytes(),
                 )
                 .to_string();
-                let observed_at = item["recorded_at"].as_str()
+                let observed_at = item["recorded_at"]
+                    .as_str()
                     .or_else(|| item["last_seen_at"].as_str())
                     .unwrap_or(now_str.as_str());
                 let item_confidence = if source_type == "runtime_usage" {
-                    if observed_at >= cutoff_7.as_str() { "high" } else { "medium" }
+                    if observed_at >= cutoff_7.as_str() {
+                        "high"
+                    } else {
+                        "medium"
+                    }
                 } else {
                     let op_t = op.trim();
-                    if !op_t.is_empty() { "medium" } else { "low" }
+                    if !op_t.is_empty() {
+                        "medium"
+                    } else {
+                        "low"
+                    }
                 };
                 // ON CONFLICT(id) DO NOTHING is atomic on SQLite and PostgreSQL; combined
                 // with the deterministic id above this makes the GET write idempotent.
@@ -784,16 +820,24 @@ pub(crate) async fn blast_radius(
             }
         }
 
-        evidence_items.sort_by_key(|e| if e["kind"] == "runtime_usage" { 0u8 } else { 1u8 });
+        evidence_items.sort_by_key(|e| {
+            if e["kind"] == "runtime_usage" {
+                0u8
+            } else {
+                1u8
+            }
+        });
 
         let has_runtime_usage = evidence_items.iter().any(|e| e["kind"] == "runtime_usage");
         let has_call_site = evidence_items.iter().any(|e| e["kind"] == "call_site");
 
-        let usage_last_seen: Option<String> = evidence_items.iter()
+        let usage_last_seen: Option<String> = evidence_items
+            .iter()
             .filter(|e| e["kind"] == "runtime_usage")
             .filter_map(|e| e["recorded_at"].as_str().map(|s| s.to_string()))
             .max();
-        let call_site_last_seen: Option<String> = evidence_items.iter()
+        let call_site_last_seen: Option<String> = evidence_items
+            .iter()
             .filter(|e| e["kind"] == "call_site")
             .filter_map(|e| e["last_seen_at"].as_str().map(|s| s.to_string()))
             .max();
@@ -808,9 +852,7 @@ pub(crate) async fn blast_radius(
             "low"
         };
 
-        let last_seen = usage_last_seen
-            .or(call_site_last_seen)
-            .unwrap_or_default();
+        let last_seen = usage_last_seen.or(call_site_last_seen).unwrap_or_default();
 
         entries.push(json!({
             "consumer": {
@@ -870,18 +912,22 @@ pub(crate) async fn list_all_diffs(
     "#;
 
     let rows = if !org_id.is_empty() {
-        sqlx::query(&format!("{base_query} WHERE s.org_id = ? ORDER BY d.created_at DESC LIMIT ? OFFSET ?"))
-            .bind(&org_id)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&pool)
-            .await?
+        sqlx::query(&format!(
+            "{base_query} WHERE s.org_id = ? ORDER BY d.created_at DESC LIMIT ? OFFSET ?"
+        ))
+        .bind(&org_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&pool)
+        .await?
     } else {
-        sqlx::query(&format!("{base_query} ORDER BY d.created_at DESC LIMIT ? OFFSET ?"))
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&pool)
-            .await?
+        sqlx::query(&format!(
+            "{base_query} ORDER BY d.created_at DESC LIMIT ? OFFSET ?"
+        ))
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&pool)
+        .await?
     };
 
     let items: Vec<Value> = rows
@@ -926,48 +972,54 @@ pub(crate) async fn compare_specs(
     // Parse both specs and compute the diff.
     let changes: Vec<radar_core::diff::DiffChange> = match format.as_str() {
         "graphql" | "gql" => {
-            let base_map = radar_core::graphql::parse_graphql(&body.base_spec)
-                .map_err(|e| ApiError::UnprocessableEntity {
+            let base_map = radar_core::graphql::parse_graphql(&body.base_spec).map_err(|e| {
+                ApiError::UnprocessableEntity {
                     error: "parse_error".into(),
                     detail: e.to_string(),
                     spec: "base".into(),
-                })?;
-            let head_map = radar_core::graphql::parse_graphql(&body.head_spec)
-                .map_err(|e| ApiError::UnprocessableEntity {
+                }
+            })?;
+            let head_map = radar_core::graphql::parse_graphql(&body.head_spec).map_err(|e| {
+                ApiError::UnprocessableEntity {
                     error: "parse_error".into(),
                     detail: e.to_string(),
                     spec: "head".into(),
-                })?;
+                }
+            })?;
             radar_core::graphql::diff_graphql(&base_map, &head_map)
         }
         "protobuf" | "proto" => {
-            let base_schema = radar_core::proto::parse_proto(&body.base_spec)
-                .map_err(|e| ApiError::UnprocessableEntity {
+            let base_schema = radar_core::proto::parse_proto(&body.base_spec).map_err(|e| {
+                ApiError::UnprocessableEntity {
                     error: "parse_error".into(),
                     detail: e.to_string(),
                     spec: "base".into(),
-                })?;
-            let head_schema = radar_core::proto::parse_proto(&body.head_spec)
-                .map_err(|e| ApiError::UnprocessableEntity {
+                }
+            })?;
+            let head_schema = radar_core::proto::parse_proto(&body.head_spec).map_err(|e| {
+                ApiError::UnprocessableEntity {
                     error: "parse_error".into(),
                     detail: e.to_string(),
                     spec: "head".into(),
-                })?;
+                }
+            })?;
             radar_core::proto::diff_proto(&base_schema, &head_schema)
         }
         _ => {
-            let base_parsed = radar_core::diff::parse_openapi(&body.base_spec)
-                .map_err(|e| ApiError::UnprocessableEntity {
+            let base_parsed = radar_core::diff::parse_openapi(&body.base_spec).map_err(|e| {
+                ApiError::UnprocessableEntity {
                     error: "parse_error".into(),
                     detail: e.to_string(),
                     spec: "base".into(),
-                })?;
-            let head_parsed = radar_core::diff::parse_openapi(&body.head_spec)
-                .map_err(|e| ApiError::UnprocessableEntity {
+                }
+            })?;
+            let head_parsed = radar_core::diff::parse_openapi(&body.head_spec).map_err(|e| {
+                ApiError::UnprocessableEntity {
                     error: "parse_error".into(),
                     detail: e.to_string(),
                     spec: "head".into(),
-                })?;
+                }
+            })?;
             radar_core::diff::diff_openapi(&base_parsed, &head_parsed)
         }
     };
@@ -976,12 +1028,11 @@ pub(crate) async fn compare_specs(
 
     // Org isolation: reject if an existing service with this ID belongs to a different org.
     if !org_id.is_empty() {
-        if let Some(existing_org) = sqlx::query_scalar::<_, String>(
-            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
-        )
-        .bind(&service_id)
-        .fetch_optional(&pool)
-        .await?
+        if let Some(existing_org) =
+            sqlx::query_scalar::<_, String>("SELECT COALESCE(org_id, '') FROM service WHERE id = ?")
+                .bind(&service_id)
+                .fetch_optional(&pool)
+                .await?
         {
             if !existing_org.is_empty() && existing_org != org_id {
                 return Err(ApiError::Forbidden("service belongs to another org".into()));
@@ -1037,17 +1088,16 @@ pub(crate) async fn compare_specs(
     // Re-use an existing diff for the same (from, to) pair.
     {
         use sqlx::Row;
-        let existing = sqlx::query(
-            "SELECT id FROM diff WHERE from_version = ? AND to_version = ?",
-        )
-        .bind(&from_version_id)
-        .bind(&to_version_id)
-        .fetch_optional(&pool)
-        .await?;
+        let existing = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
+            .bind(&from_version_id)
+            .bind(&to_version_id)
+            .fetch_optional(&pool)
+            .await?;
 
         if let Some(row) = existing {
             let existing_id: String = row.try_get("id").map_err(ApiError::Db)?;
-            let breaking_count = changes.iter()
+            let breaking_count = changes
+                .iter()
                 .filter(|c| c.severity == radar_core::models::Severity::Breaking)
                 .count() as i64;
             return Ok((
@@ -1078,7 +1128,10 @@ pub(crate) async fn compare_specs(
     for change in &changes {
         let change_id = Uuid::new_v4().to_string();
         let sev_str = match change.severity {
-            radar_core::models::Severity::Breaking => { breaking_count += 1; "breaking" }
+            radar_core::models::Severity::Breaking => {
+                breaking_count += 1;
+                "breaking"
+            }
             radar_core::models::Severity::NonBreakingRisky => "non_breaking_risky",
             radar_core::models::Severity::Safe => "safe",
         };
@@ -1104,7 +1157,16 @@ pub(crate) async fn compare_specs(
         let did = diff_id.clone();
         let oid = org_id.clone();
         tokio::spawn(async move {
-            crate::audit::record_event(&pool2, &oid, "system", "diff.created", Some("diff"), Some(&did), None).await;
+            crate::audit::record_event(
+                &pool2,
+                &oid,
+                "system",
+                "diff.created",
+                Some("diff"),
+                Some(&did),
+                None,
+            )
+            .await;
             crate::webhooks::dispatch_diff_event(pool2, did, oid).await;
         });
     }
@@ -1133,7 +1195,9 @@ pub(crate) struct BatchCompareItem {
     pub(crate) head_url: String,
 }
 
-fn default_batch_format() -> String { "openapi".to_string() }
+fn default_batch_format() -> String {
+    "openapi".to_string()
+}
 
 #[derive(serde::Serialize)]
 struct BatchResultItem {
@@ -1163,7 +1227,11 @@ pub(crate) async fn batch_compare(
     let mut results: Vec<BatchResultItem> = Vec::new();
 
     for item in &items {
-        let label = item.label.as_deref().unwrap_or(item.base_url.as_str()).to_string();
+        let label = item
+            .label
+            .as_deref()
+            .unwrap_or(item.base_url.as_str())
+            .to_string();
         match run_batch_item(&pool, &http, item, &org_id, &label).await {
             Ok(r) => results.push(r),
             Err(e) => results.push(BatchResultItem {
@@ -1195,15 +1263,27 @@ async fn run_batch_item(
         anyhow::bail!("head_url is blocked by SSRF policy");
     }
 
-    let base_content = http.get(&item.base_url)
-        .send().await.map_err(|e| anyhow::anyhow!("fetch base_url: {e}"))?
-        .error_for_status().map_err(|e| anyhow::anyhow!("base_url HTTP error: {e}"))?
-        .text().await.map_err(|e| anyhow::anyhow!("read base_url: {e}"))?;
+    let base_content = http
+        .get(&item.base_url)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("fetch base_url: {e}"))?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("base_url HTTP error: {e}"))?
+        .text()
+        .await
+        .map_err(|e| anyhow::anyhow!("read base_url: {e}"))?;
 
-    let head_content = http.get(&item.head_url)
-        .send().await.map_err(|e| anyhow::anyhow!("fetch head_url: {e}"))?
-        .error_for_status().map_err(|e| anyhow::anyhow!("head_url HTTP error: {e}"))?
-        .text().await.map_err(|e| anyhow::anyhow!("read head_url: {e}"))?;
+    let head_content = http
+        .get(&item.head_url)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("fetch head_url: {e}"))?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("head_url HTTP error: {e}"))?
+        .text()
+        .await
+        .map_err(|e| anyhow::anyhow!("read head_url: {e}"))?;
 
     let format = item.format.to_lowercase();
 
@@ -1241,13 +1321,12 @@ async fn run_batch_item(
 
     // Org isolation: reject if an existing service with this ID belongs to a different org.
     if !org_id.is_empty() {
-        if let Some(existing_org) = sqlx::query_scalar::<_, String>(
-            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
-        )
-        .bind(&service_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("org check: {e}"))?
+        if let Some(existing_org) =
+            sqlx::query_scalar::<_, String>("SELECT COALESCE(org_id, '') FROM service WHERE id = ?")
+                .bind(&service_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| anyhow::anyhow!("org check: {e}"))?
         {
             if !existing_org.is_empty() && existing_org != org_id {
                 anyhow::bail!("service belongs to another org");
@@ -1260,8 +1339,15 @@ async fn run_batch_item(
          VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET spec_format = excluded.spec_format",
     )
-    .bind(&service_id).bind(label).bind("").bind("").bind(&format).bind(org_id)
-    .execute(pool).await.map_err(|e| anyhow::anyhow!("upsert service: {e}"))?;
+    .bind(&service_id)
+    .bind(label)
+    .bind("")
+    .bind("")
+    .bind(&format)
+    .bind(org_id)
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("upsert service: {e}"))?;
 
     // Use URL strings as git refs — keeps spec_version IDs stable across reruns.
     let from_ver = spec_version_id(&service_id, &item.base_url);
@@ -1269,9 +1355,15 @@ async fn run_batch_item(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
          VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
     )
-    .bind(&from_ver).bind(&service_id).bind(&item.base_url)
-    .bind(&now).bind(&format).bind(&base_content)
-    .execute(pool).await.map_err(|e| anyhow::anyhow!("insert base spec_version: {e}"))?;
+    .bind(&from_ver)
+    .bind(&service_id)
+    .bind(&item.base_url)
+    .bind(&now)
+    .bind(&format)
+    .bind(&base_content)
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("insert base spec_version: {e}"))?;
 
     let to_ver = spec_version_id(&service_id, &item.head_url);
     sqlx::query(
@@ -1285,12 +1377,18 @@ async fn run_batch_item(
 
     // Re-use an existing diff for the same (from, to) pair.
     if let Some(row) = sqlx::query("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")
-        .bind(&from_ver).bind(&to_ver)
-        .fetch_optional(pool).await.map_err(|e| anyhow::anyhow!("select diff: {e}"))?
+        .bind(&from_ver)
+        .bind(&to_ver)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("select diff: {e}"))?
     {
         use sqlx::Row;
-        let existing_id: String = row.try_get("id").map_err(|e| anyhow::anyhow!("get id: {e}"))?;
-        let bc = changes.iter()
+        let existing_id: String = row
+            .try_get("id")
+            .map_err(|e| anyhow::anyhow!("get id: {e}"))?;
+        let bc = changes
+            .iter()
             .filter(|c| c.severity == radar_core::models::Severity::Breaking)
             .count() as i64;
         return Ok(BatchResultItem {
@@ -1311,7 +1409,10 @@ async fn run_batch_item(
     let mut breaking_count: i64 = 0;
     for change in &changes {
         let sev = match change.severity {
-            radar_core::models::Severity::Breaking => { breaking_count += 1; "breaking" }
+            radar_core::models::Severity::Breaking => {
+                breaking_count += 1;
+                "breaking"
+            }
             radar_core::models::Severity::NonBreakingRisky => "non_breaking_risky",
             radar_core::models::Severity::Safe => "safe",
         };

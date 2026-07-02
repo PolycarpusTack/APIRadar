@@ -1,12 +1,8 @@
-use axum::{
-    extract::State,
-    response::IntoResponse,
-    Json,
-};
+use crate::errors::ApiError;
+use axum::{extract::State, response::IntoResponse, Json};
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use crate::errors::ApiError;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct AppSettings {
@@ -113,7 +109,10 @@ pub(crate) async fn get_integrations() -> Json<Value> {
     }))
 }
 
-pub async fn purge_old_usage_events(pool: &sqlx::AnyPool, lookback_days: u32) -> anyhow::Result<u64> {
+pub async fn purge_old_usage_events(
+    pool: &sqlx::AnyPool,
+    lookback_days: u32,
+) -> anyhow::Result<u64> {
     let cutoff = (Utc::now() - Duration::days(lookback_days as i64)).to_rfc3339();
     let result = sqlx::query("DELETE FROM usage_event WHERE recorded_at < ?")
         .bind(&cutoff)
@@ -126,11 +125,10 @@ pub async fn purge_old_usage_events(pool: &sqlx::AnyPool, lookback_days: u32) ->
 /// Rows with expires_at = NULL are never deleted by this job.
 pub async fn expire_old_evidence(pool: &sqlx::AnyPool) -> anyhow::Result<u64> {
     let now = Utc::now().to_rfc3339();
-    let result = sqlx::query(
-        "DELETE FROM impact_evidence WHERE expires_at IS NOT NULL AND expires_at < ?",
-    )
-    .bind(&now)
-    .execute(pool)
-    .await?;
+    let result =
+        sqlx::query("DELETE FROM impact_evidence WHERE expires_at IS NOT NULL AND expires_at < ?")
+            .bind(&now)
+            .execute(pool)
+            .await?;
     Ok(result.rows_affected())
 }

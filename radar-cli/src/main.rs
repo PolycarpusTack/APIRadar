@@ -444,19 +444,18 @@ async fn main() -> Result<()> {
             }
 
             // D-2: check if the PR carries the configured label override.
-            let has_label_override =
-                if let Some(ref override_cfg) = pol.allow_override_with {
-                    if let Some(label) = override_cfg.strip_prefix("label:") {
-                        match github::GithubContext::from_env() {
-                            Some(ctx) => github::pr_has_label(&ctx, label).await,
-                            None => false,
-                        }
-                    } else {
-                        false
+            let has_label_override = if let Some(ref override_cfg) = pol.allow_override_with {
+                if let Some(label) = override_cfg.strip_prefix("label:") {
+                    match github::GithubContext::from_env() {
+                        Some(ctx) => github::pr_has_label(&ctx, label).await,
+                        None => false,
                     }
                 } else {
                     false
-                };
+                }
+            } else {
+                false
+            };
 
             // F-3: check for a server-side acknowledgement (overrides block verdict).
             let has_label_override = if !has_label_override {
@@ -473,8 +472,14 @@ async fn main() -> Result<()> {
 
             // E-3: compute policy verdict using fail_mode semantics.
             let fail_mode = config.fail_mode();
-            let decision =
-                policy::decide(&changes, &pol, &fail_mode, has_active_consumers, has_label_override, api_error);
+            let decision = policy::decide(
+                &changes,
+                &pol,
+                &fail_mode,
+                has_active_consumers,
+                has_label_override,
+                api_error,
+            );
 
             if decision.verdict == policy::Verdict::Warn && !json {
                 eprintln!(
@@ -577,11 +582,12 @@ async fn main() -> Result<()> {
                     policy::Verdict::Block => "block",
                     policy::Verdict::Overridden => "overridden",
                 };
-                let dashboard_url = if let (Some(ref url), Some(ref did)) = (&api_url, &posted_diff_id) {
-                    Some(format!("{url}/app/diffs/{did}"))
-                } else {
-                    None
-                };
+                let dashboard_url =
+                    if let (Some(ref url), Some(ref did)) = (&api_url, &posted_diff_id) {
+                        Some(format!("{url}/app/diffs/{did}"))
+                    } else {
+                        None
+                    };
                 let summary = render::CheckSummary {
                     diff_id: posted_diff_id.clone(),
                     breaking_count,
@@ -600,22 +606,45 @@ async fn main() -> Result<()> {
         }
         Commands::Rule { action } => {
             match action {
-                RuleAction::Add { name, change_kind, path_pattern, severity_override, api_url, token } => {
-                    let body = api_client::CreateRuleBody { name, change_kind, path_pattern, severity_override };
-                    let rule = api_client::create_evolution_rule(&api_url, &body, token.as_deref()).await?;
+                RuleAction::Add {
+                    name,
+                    change_kind,
+                    path_pattern,
+                    severity_override,
+                    api_url,
+                    token,
+                } => {
+                    let body = api_client::CreateRuleBody {
+                        name,
+                        change_kind,
+                        path_pattern,
+                        severity_override,
+                    };
+                    let rule = api_client::create_evolution_rule(&api_url, &body, token.as_deref())
+                        .await?;
                     println!("Created rule: {}", rule["id"].as_str().unwrap_or("?"));
-                    println!("  kind:     {}", rule["change_kind"].as_str().unwrap_or("?"));
-                    println!("  override: {}", rule["severity_override"].as_str().unwrap_or("?"));
+                    println!(
+                        "  kind:     {}",
+                        rule["change_kind"].as_str().unwrap_or("?")
+                    );
+                    println!(
+                        "  override: {}",
+                        rule["severity_override"].as_str().unwrap_or("?")
+                    );
                     if let Some(p) = rule["path_pattern"].as_str() {
                         println!("  pattern:  {p}");
                     }
                 }
                 RuleAction::List { api_url, token } => {
-                    let rules = api_client::list_evolution_rules(&api_url, token.as_deref()).await?;
+                    let rules =
+                        api_client::list_evolution_rules(&api_url, token.as_deref()).await?;
                     if rules.is_empty() {
                         println!("No evolution rules configured.");
                     } else {
-                        println!("{:<38} {:<24} {:<22} {:<12} Pattern", "ID", "Name", "ChangeKind", "Override");
+                        println!(
+                            "{:<38} {:<24} {:<22} {:<12} Pattern",
+                            "ID", "Name", "ChangeKind", "Override"
+                        );
                         println!("{}", "-".repeat(110));
                         for r in &rules {
                             let enabled = r["enabled"].as_bool().unwrap_or(true);
@@ -636,11 +665,24 @@ async fn main() -> Result<()> {
                     api_client::delete_evolution_rule(&api_url, &id, token.as_deref()).await?;
                     println!("Deleted rule {id}");
                 }
-                RuleAction::Toggle { id, enabled, api_url, token } => {
-                    api_client::toggle_evolution_rule(&api_url, &id, enabled, token.as_deref()).await?;
-                    println!("Rule {id} is now {}", if enabled { "enabled" } else { "disabled" });
+                RuleAction::Toggle {
+                    id,
+                    enabled,
+                    api_url,
+                    token,
+                } => {
+                    api_client::toggle_evolution_rule(&api_url, &id, enabled, token.as_deref())
+                        .await?;
+                    println!(
+                        "Rule {id} is now {}",
+                        if enabled { "enabled" } else { "disabled" }
+                    );
                 }
-                RuleAction::Test { diff_id, api_url, token } => {
+                RuleAction::Test {
+                    diff_id,
+                    api_url,
+                    token,
+                } => {
                     // Fetch the diff — evolution rules are already applied server-side.
                     let client = reqwest::Client::new();
                     let mut req = client.get(format!("{api_url}/v1/diffs/{diff_id}"));
@@ -653,7 +695,8 @@ async fn main() -> Result<()> {
                     }
                     let diff: serde_json::Value = resp.json().await?;
                     let changes = diff["changes"].as_array().cloned().unwrap_or_default();
-                    let applied: Vec<_> = changes.iter()
+                    let applied: Vec<_> = changes
+                        .iter()
                         .filter(|c| c.get("applied_rule").is_some())
                         .collect();
                     if applied.is_empty() {
@@ -675,7 +718,13 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Batch { csv, json, no_color, api_url, token } => {
+        Commands::Batch {
+            csv,
+            json,
+            no_color,
+            api_url,
+            token,
+        } => {
             let content = std::fs::read_to_string(&csv)
                 .map_err(|e| anyhow::anyhow!("cannot read '{}': {e}", csv.display()))?;
             let rows = parse_batch_csv(&content)?;
@@ -703,7 +752,9 @@ async fn main() -> Result<()> {
                     Err(e) => {
                         eprintln!("[{}] Error reading '{}': {e}", row.label, row.base);
                         row_results.push(RowResult {
-                            label: row.label.clone(), total: 0, breaking: 0,
+                            label: row.label.clone(),
+                            total: 0,
+                            breaking: 0,
                             diff_id: None,
                             error: Some(format!("cannot read '{}': {e}", row.base)),
                         });
@@ -715,7 +766,9 @@ async fn main() -> Result<()> {
                     Err(e) => {
                         eprintln!("[{}] Error reading '{}': {e}", row.label, row.head);
                         row_results.push(RowResult {
-                            label: row.label.clone(), total: 0, breaking: 0,
+                            label: row.label.clone(),
+                            total: 0,
+                            breaking: 0,
                             diff_id: None,
                             error: Some(format!("cannot read '{}': {e}", row.head)),
                         });
@@ -723,20 +776,28 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                let detected = row.format.clone()
+                let detected = row
+                    .format
+                    .clone()
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| detect_format(&row.head));
 
                 let changes_result = match detected.as_str() {
                     "graphql" | "gql" => radar_core::graphql::parse_graphql(&base_content)
-                        .and_then(|bm| radar_core::graphql::parse_graphql(&head_content)
-                            .map(|hm| radar_core::graphql::diff_graphql(&bm, &hm))),
-                    "protobuf" | "proto" => radar_core::proto::parse_proto(&base_content)
-                        .and_then(|bs| radar_core::proto::parse_proto(&head_content)
-                            .map(|hs| radar_core::proto::diff_proto(&bs, &hs))),
-                    _ => radar_core::diff::parse_openapi(&base_content)
-                        .and_then(|bp| radar_core::diff::parse_openapi(&head_content)
-                            .map(|hp| radar_core::diff::diff_openapi(&bp, &hp))),
+                        .and_then(|bm| {
+                            radar_core::graphql::parse_graphql(&head_content)
+                                .map(|hm| radar_core::graphql::diff_graphql(&bm, &hm))
+                        }),
+                    "protobuf" | "proto" => {
+                        radar_core::proto::parse_proto(&base_content).and_then(|bs| {
+                            radar_core::proto::parse_proto(&head_content)
+                                .map(|hs| radar_core::proto::diff_proto(&bs, &hs))
+                        })
+                    }
+                    _ => radar_core::diff::parse_openapi(&base_content).and_then(|bp| {
+                        radar_core::diff::parse_openapi(&head_content)
+                            .map(|hp| radar_core::diff::diff_openapi(&bp, &hp))
+                    }),
                 };
 
                 let changes = match changes_result {
@@ -744,7 +805,9 @@ async fn main() -> Result<()> {
                     Err(e) => {
                         eprintln!("[{}] Parse error: {e}", row.label);
                         row_results.push(RowResult {
-                            label: row.label.clone(), total: 0, breaking: 0,
+                            label: row.label.clone(),
+                            total: 0,
+                            breaking: 0,
                             diff_id: None,
                             error: Some(e.to_string()),
                         });
@@ -752,7 +815,8 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                let breaking = changes.iter()
+                let breaking = changes
+                    .iter()
                     .filter(|c| c.severity == radar_core::models::Severity::Breaking)
                     .count();
 
@@ -776,9 +840,13 @@ async fn main() -> Result<()> {
                             changes: &changes,
                             token: token.as_deref(),
                         },
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(diff_id) => {
-                            if !json { println!("  Diff posted: {diff_id}"); }
+                            if !json {
+                                println!("  Diff posted: {diff_id}");
+                            }
                             posted_diff_id = Some(diff_id);
                         }
                         Err(e) => eprintln!("  Warning: failed to post diff: {e}"),
@@ -795,34 +863,51 @@ async fn main() -> Result<()> {
             }
 
             if json {
-                let out: Vec<serde_json::Value> = row_results.iter().map(|r| {
-                    serde_json::json!({
-                        "label":    r.label,
-                        "total":    r.total,
-                        "breaking": r.breaking,
-                        "diff_id":  r.diff_id,
-                        "error":    r.error,
+                let out: Vec<serde_json::Value> = row_results
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "label":    r.label,
+                            "total":    r.total,
+                            "breaking": r.breaking,
+                            "diff_id":  r.diff_id,
+                            "error":    r.error,
+                        })
                     })
-                }).collect();
+                    .collect();
                 println!("{}", serde_json::to_string_pretty(&out)?);
             } else {
                 let sep = "─".repeat(78);
                 println!("\n{sep}");
                 println!("Batch Summary — {} comparison(s)", row_results.len());
                 println!("{sep}");
-                println!("{:<42} {:>7} {:>10}  Status", "Label", "Changes", "Breaking");
+                println!(
+                    "{:<42} {:>7} {:>10}  Status",
+                    "Label", "Changes", "Breaking"
+                );
                 println!("{sep}");
                 for r in &row_results {
-                    let status = if r.error.is_some() { "ERROR" }
-                        else if r.breaking > 0 { "BREAKING" }
-                        else { "PASS" };
-                    println!("{:<42} {:>7} {:>10}  {}", r.label, r.total, r.breaking, status);
+                    let status = if r.error.is_some() {
+                        "ERROR"
+                    } else if r.breaking > 0 {
+                        "BREAKING"
+                    } else {
+                        "PASS"
+                    };
+                    println!(
+                        "{:<42} {:>7} {:>10}  {}",
+                        r.label, r.total, r.breaking, status
+                    );
                 }
                 println!("{sep}");
             }
 
-            let has_failures = row_results.iter().any(|r| r.breaking > 0 || r.error.is_some());
-            if has_failures { std::process::exit(1); }
+            let has_failures = row_results
+                .iter()
+                .any(|r| r.breaking > 0 || r.error.is_some());
+            if has_failures {
+                std::process::exit(1);
+            }
         }
 
         Commands::Completions { shell } => {
@@ -871,7 +956,11 @@ async fn main() -> Result<()> {
             )
             .await?;
 
-            let happy = collection.item.iter().filter(|i| i.name.starts_with("[HAPPY")).count();
+            let happy = collection
+                .item
+                .iter()
+                .filter(|i| i.name.starts_with("[HAPPY"))
+                .count();
             let negative = collection.item.len() - happy;
             eprintln!(
                 "Generated {} test(s): {} happy-path, {} negative.",
@@ -991,8 +1080,13 @@ async fn main() -> Result<()> {
                         Ok((col_name, requests)) => {
                             // Auto-register consumer by collection name
                             let resolved_consumer_id = match api_client::upsert_consumer_by_name(
-                                &api_url, &col_name, "collection_file", token.as_deref(),
-                            ).await {
+                                &api_url,
+                                &col_name,
+                                "collection_file",
+                                token.as_deref(),
+                            )
+                            .await
+                            {
                                 Ok((id, created)) => {
                                     if created {
                                         println!("  Registered consumer '{col_name}' ({id})");
@@ -1008,7 +1102,8 @@ async fn main() -> Result<()> {
                             // Build evidence items — one per (request × field_path), or one
                             // with empty field_path when the request has no test assertions.
                             let mut evidence: Vec<api_client::CollectionEvidenceBody> = Vec::new();
-                            let file_base = col_path.file_name()
+                            let file_base = col_path
+                                .file_name()
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("<collection>");
                             for req in &requests {
@@ -1028,18 +1123,29 @@ async fn main() -> Result<()> {
                                             service_id: service_id.clone(),
                                             operation: op.clone(),
                                             field_path: fp.clone(),
-                                            evidence_uri: format!("file://{file_base}#{}", req.name),
+                                            evidence_uri: format!(
+                                                "file://{file_base}#{}",
+                                                req.name
+                                            ),
                                         });
                                     }
                                 }
                             }
 
-                            match api_client::post_collection_evidence(&api_url, &evidence, token.as_deref()).await {
+                            match api_client::post_collection_evidence(
+                                &api_url,
+                                &evidence,
+                                token.as_deref(),
+                            )
+                            .await
+                            {
                                 Ok((accepted, inserted)) => println!(
                                     "  {}: {accepted} request(s), {inserted} new evidence row(s)",
                                     col_path.display()
                                 ),
-                                Err(e) => eprintln!("Warning: failed to post collection evidence: {e}"),
+                                Err(e) => {
+                                    eprintln!("Warning: failed to post collection evidence: {e}")
+                                }
                             }
                         }
                     }
@@ -1099,8 +1205,12 @@ struct BatchCsvRow {
 }
 
 fn parse_batch_csv(content: &str) -> anyhow::Result<Vec<BatchCsvRow>> {
-    let lines: Vec<&str> = content.lines()
-        .filter(|l| { let t = l.trim(); !t.is_empty() && !t.starts_with('#') })
+    let lines: Vec<&str> = content
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('#')
+        })
         .collect();
 
     if lines.is_empty() {
@@ -1117,7 +1227,9 @@ fn parse_batch_csv(content: &str) -> anyhow::Result<Vec<BatchCsvRow>> {
         let cols = split_csv_line(line);
 
         let get = |name: &str| -> Option<String> {
-            headers.iter().position(|h| h == name)
+            headers
+                .iter()
+                .position(|h| h == name)
                 .and_then(|i| cols.get(i))
                 .filter(|s| !s.is_empty())
                 .map(|s| s.trim().to_owned())
@@ -1125,7 +1237,9 @@ fn parse_batch_csv(content: &str) -> anyhow::Result<Vec<BatchCsvRow>> {
 
         let base = get("base").unwrap_or_default();
         let head = get("head").unwrap_or_default();
-        if base.is_empty() || head.is_empty() { continue; }
+        if base.is_empty() || head.is_empty() {
+            continue;
+        }
 
         rows.push(BatchCsvRow {
             label: get("label").unwrap_or_else(|| base.clone()),
@@ -1145,7 +1259,10 @@ fn split_csv_line(line: &str) -> Vec<String> {
     for ch in line.chars() {
         match ch {
             '"' => in_quotes = !in_quotes,
-            ',' if !in_quotes => { result.push(current.trim().to_owned()); current = String::new(); }
+            ',' if !in_quotes => {
+                result.push(current.trim().to_owned());
+                current = String::new();
+            }
             _ => current.push(ch),
         }
     }

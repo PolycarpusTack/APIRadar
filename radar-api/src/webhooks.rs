@@ -6,9 +6,9 @@ use axum::{
 };
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::Sha256;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -21,8 +21,8 @@ use crate::utils::{is_host_allowed, is_ssrf_blocked};
 // ---------------------------------------------------------------------------
 
 pub(crate) fn sign_payload(secret: &str, body: &[u8]) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(body);
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
@@ -41,7 +41,9 @@ pub(crate) struct CreateWebhookBody {
     webhook_type: String,
 }
 
-fn default_webhook_type() -> String { "generic".to_string() }
+fn default_webhook_type() -> String {
+    "generic".to_string()
+}
 
 fn default_events() -> Vec<String> {
     vec!["diff.created".to_string()]
@@ -63,7 +65,11 @@ struct WebhookResponse {
 
 fn mask_secret(secret: &str, reveal: bool) -> (Option<String>, String) {
     // Use char_indices to avoid panicking on multi-byte UTF-8 characters.
-    let boundary = secret.char_indices().nth(4).map(|(i, _)| i).unwrap_or(secret.len());
+    let boundary = secret
+        .char_indices()
+        .nth(4)
+        .map(|(i, _)| i)
+        .unwrap_or(secret.len());
     let hint = format!("{}****", &secret[..boundary]);
     if reveal {
         (Some(secret.to_string()), hint)
@@ -80,8 +86,13 @@ fn row_to_response(row: &sqlx::any::AnyRow, reveal_secret: bool) -> WebhookRespo
         id: row.get("id"),
         org_id: row.get("org_id"),
         url: row.get("url"),
-        events: events_str.split(',').map(|s| s.trim().to_string()).collect(),
-        webhook_type: row.try_get("type").unwrap_or_else(|_| "generic".to_string()),
+        events: events_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect(),
+        webhook_type: row
+            .try_get("type")
+            .unwrap_or_else(|_| "generic".to_string()),
         secret: sec_full,
         secret_hint: hint,
         active: {
@@ -114,14 +125,13 @@ pub(crate) async fn create_webhook(
     let now = Utc::now().to_rfc3339();
 
     // Idempotent on (org_id, url, events)
-    let existing = sqlx::query(
-        "SELECT id FROM webhook WHERE org_id = ? AND url = ? AND events = ?",
-    )
-    .bind(&org_id)
-    .bind(&body.url)
-    .bind(&events_str)
-    .fetch_optional(&pool)
-    .await?;
+    let existing =
+        sqlx::query("SELECT id FROM webhook WHERE org_id = ? AND url = ? AND events = ?")
+            .bind(&org_id)
+            .bind(&body.url)
+            .bind(&events_str)
+            .fetch_optional(&pool)
+            .await?;
 
     if let Some(row) = existing {
         let id: String = row.get("id");
@@ -234,10 +244,13 @@ pub(crate) async fn test_webhook(
     .fetch_optional(&pool)
     .await?;
 
-    let row = row.ok_or_else(|| ApiError::NotFound(format!("webhook {id} not found or inactive")))?;
+    let row =
+        row.ok_or_else(|| ApiError::NotFound(format!("webhook {id} not found or inactive")))?;
     let url: String = row.get("url");
     let secret: String = row.get("secret");
-    let webhook_type: String = row.try_get("type").unwrap_or_else(|_| "generic".to_string());
+    let webhook_type: String = row
+        .try_get("type")
+        .unwrap_or_else(|_| "generic".to_string());
 
     let payload = if webhook_type == "slack" {
         json!({
@@ -265,7 +278,10 @@ pub(crate) async fn test_webhook(
         payload,
     }));
 
-    Ok((StatusCode::ACCEPTED, Json(json!({"status": "ping dispatched"}))))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"status": "ping dispatched"})),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +315,9 @@ pub(crate) async fn dispatch_diff_event(pool: sqlx::AnyPool, diff_id: String, or
         let wh_id: String = row.get("id");
         let url: String = row.get("url");
         let secret: String = row.get("secret");
-        let wh_type: String = row.try_get("type").unwrap_or_else(|_| "generic".to_string());
+        let wh_type: String = row
+            .try_get("type")
+            .unwrap_or_else(|_| "generic".to_string());
 
         let send_payload = if wh_type == "slack" {
             build_slack_block_kit(&payload)
@@ -320,7 +338,10 @@ pub(crate) async fn dispatch_diff_event(pool: sqlx::AnyPool, diff_id: String, or
     }
 }
 
-async fn build_diff_payload(pool: &sqlx::AnyPool, diff_id: &str) -> anyhow::Result<serde_json::Value> {
+async fn build_diff_payload(
+    pool: &sqlx::AnyPool,
+    diff_id: &str,
+) -> anyhow::Result<serde_json::Value> {
     // diff has no service_id or change counts directly — join through spec_version → service
     // and aggregate change counts from the change table (portable SQL, no dialect-specific syntax).
     let row = sqlx::query(
@@ -350,10 +371,22 @@ async fn build_diff_payload(pool: &sqlx::AnyPool, diff_id: &str) -> anyhow::Resu
 }
 
 fn build_slack_block_kit(diff_payload: &serde_json::Value) -> serde_json::Value {
-    let service_name = diff_payload.get("service_name").and_then(|v| v.as_str()).unwrap_or("unknown");
-    let breaking = diff_payload.get("breaking_count").and_then(|v| v.as_i64()).unwrap_or(0);
-    let total = diff_payload.get("changes_count").and_then(|v| v.as_i64()).unwrap_or(0);
-    let diff_id = diff_payload.get("diff_id").and_then(|v| v.as_str()).unwrap_or("");
+    let service_name = diff_payload
+        .get("service_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let breaking = diff_payload
+        .get("breaking_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let total = diff_payload
+        .get("changes_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let diff_id = diff_payload
+        .get("diff_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     let mut blocks = vec![
         json!({
@@ -409,7 +442,16 @@ struct DeliveryTask {
 }
 
 async fn deliver_webhook_event(t: DeliveryTask) {
-    let DeliveryTask { pool, org_id, webhook_id, url, secret, webhook_type, event, payload } = t;
+    let DeliveryTask {
+        pool,
+        org_id,
+        webhook_id,
+        url,
+        secret,
+        webhook_type,
+        event,
+        payload,
+    } = t;
     let delivery_id = Uuid::new_v4().to_string();
     let body = serde_json::to_string(&payload).unwrap_or_default();
     let now = Utc::now().to_rfc3339();
@@ -453,8 +495,7 @@ async fn deliver_webhook_event(t: DeliveryTask) {
             req_builder = req_builder.header("X-Radar-Signature-256", signature);
         }
 
-        match req_builder.send().await
-        {
+        match req_builder.send().await {
             Ok(resp) if resp.status().is_success() => {
                 let _ = sqlx::query(
                     "UPDATE webhook_delivery SET status = 'delivered', attempt = ?, delivered_at = ? WHERE id = ?",
@@ -464,7 +505,16 @@ async fn deliver_webhook_event(t: DeliveryTask) {
                 .bind(&delivery_id)
                 .execute(&pool)
                 .await;
-                crate::audit::record_event(&pool, &org_id, "system", "webhook.delivered", Some("webhook"), Some(&webhook_id), Some(&serde_json::json!({ "event": event, "delivery_id": delivery_id }))).await;
+                crate::audit::record_event(
+                    &pool,
+                    &org_id,
+                    "system",
+                    "webhook.delivered",
+                    Some("webhook"),
+                    Some(&webhook_id),
+                    Some(&serde_json::json!({ "event": event, "delivery_id": delivery_id })),
+                )
+                .await;
                 return;
             }
             Ok(resp) => {
@@ -475,25 +525,30 @@ async fn deliver_webhook_event(t: DeliveryTask) {
             }
         }
 
-        let _ = sqlx::query(
-            "UPDATE webhook_delivery SET attempt = ?, error = ? WHERE id = ?",
-        )
-        .bind(attempt as i32 + 1)
+        let _ = sqlx::query("UPDATE webhook_delivery SET attempt = ?, error = ? WHERE id = ?")
+            .bind(attempt as i32 + 1)
+            .bind(last_error.as_deref())
+            .bind(&delivery_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // All attempts exhausted
+    let _ = sqlx::query("UPDATE webhook_delivery SET status = 'failed', error = ? WHERE id = ?")
         .bind(last_error.as_deref())
         .bind(&delivery_id)
         .execute(&pool)
         .await;
-    }
-
-    // All attempts exhausted
-    let _ = sqlx::query(
-        "UPDATE webhook_delivery SET status = 'failed', error = ? WHERE id = ?",
+    crate::audit::record_event(
+        &pool,
+        &org_id,
+        "system",
+        "webhook.failed",
+        Some("webhook"),
+        Some(&webhook_id),
+        Some(&serde_json::json!({ "event": event, "error": last_error })),
     )
-    .bind(last_error.as_deref())
-    .bind(&delivery_id)
-    .execute(&pool)
     .await;
-    crate::audit::record_event(&pool, &org_id, "system", "webhook.failed", Some("webhook"), Some(&webhook_id), Some(&serde_json::json!({ "event": event, "error": last_error }))).await;
 }
 
 pub(crate) async fn list_deliveries(
@@ -568,7 +623,10 @@ pub(crate) fn start_webhook_outbox(pool: sqlx::AnyPool) {
             return;
         }
 
-        tracing::info!("outbox: re-dispatching {} pending delivery/deliveries", rows.len());
+        tracing::info!(
+            "outbox: re-dispatching {} pending delivery/deliveries",
+            rows.len()
+        );
 
         for row in rows {
             let delivery_id: String = row.get("id");
@@ -583,7 +641,16 @@ pub(crate) fn start_webhook_outbox(pool: sqlx::AnyPool) {
 
             let pool2 = pool.clone();
             tokio::spawn(async move {
-                retry_pending_delivery(pool2, delivery_id, url, secret, webhook_type, event, payload).await;
+                retry_pending_delivery(
+                    pool2,
+                    delivery_id,
+                    url,
+                    secret,
+                    webhook_type,
+                    event,
+                    payload,
+                )
+                .await;
             });
         }
     });
@@ -652,23 +719,19 @@ async fn retry_pending_delivery(
             }
         }
 
-        let _ = sqlx::query(
-            "UPDATE webhook_delivery SET attempt = ?, error = ? WHERE id = ?",
-        )
-        .bind(attempt as i32 + 1)
+        let _ = sqlx::query("UPDATE webhook_delivery SET attempt = ?, error = ? WHERE id = ?")
+            .bind(attempt as i32 + 1)
+            .bind(last_error.as_deref())
+            .bind(&delivery_id)
+            .execute(&pool)
+            .await;
+    }
+
+    let _ = sqlx::query("UPDATE webhook_delivery SET status = 'failed', error = ? WHERE id = ?")
         .bind(last_error.as_deref())
         .bind(&delivery_id)
         .execute(&pool)
         .await;
-    }
-
-    let _ = sqlx::query(
-        "UPDATE webhook_delivery SET status = 'failed', error = ? WHERE id = ?",
-    )
-    .bind(last_error.as_deref())
-    .bind(&delivery_id)
-    .execute(&pool)
-    .await;
     tracing::warn!(
         "outbox: delivery {delivery_id} permanently failed: {:?}",
         last_error
@@ -686,7 +749,10 @@ mod tests {
     #[test]
     fn sign_payload_starts_with_sha256_prefix() {
         let sig = sign_payload("secret", b"hello world");
-        assert!(sig.starts_with("sha256="), "expected sha256= prefix, got: {sig}");
+        assert!(
+            sig.starts_with("sha256="),
+            "expected sha256= prefix, got: {sig}"
+        );
         assert_eq!(sig.len(), 7 + 64, "expected sha256= + 64 hex chars");
     }
 
@@ -697,12 +763,18 @@ mod tests {
 
     #[test]
     fn sign_payload_changes_with_different_secret() {
-        assert_ne!(sign_payload("secret1", b"body"), sign_payload("secret2", b"body"));
+        assert_ne!(
+            sign_payload("secret1", b"body"),
+            sign_payload("secret2", b"body")
+        );
     }
 
     #[test]
     fn sign_payload_changes_with_different_body() {
-        assert_ne!(sign_payload("key", b"body-a"), sign_payload("key", b"body-b"));
+        assert_ne!(
+            sign_payload("key", b"body-a"),
+            sign_payload("key", b"body-b")
+        );
     }
 
     #[test]

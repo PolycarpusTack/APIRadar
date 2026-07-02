@@ -1,3 +1,5 @@
+use crate::auth::{assert_org_access, JwtClaims};
+use crate::errors::ApiError;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -6,8 +8,6 @@ use axum::{
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
-use crate::auth::{JwtClaims, assert_org_access};
-use crate::errors::ApiError;
 
 #[derive(serde::Deserialize)]
 pub(crate) struct CreateServiceBody {
@@ -33,12 +33,11 @@ pub(crate) async fn create_service(
     // Org isolation: if a service with this ID already exists, ensure it belongs
     // to the caller's org before allowing an overwrite.
     if !org_id.is_empty() {
-        if let Some(existing_org) = sqlx::query_scalar::<_, String>(
-            "SELECT COALESCE(org_id, '') FROM service WHERE id = ?",
-        )
-        .bind(&id)
-        .fetch_optional(&pool)
-        .await?
+        if let Some(existing_org) =
+            sqlx::query_scalar::<_, String>("SELECT COALESCE(org_id, '') FROM service WHERE id = ?")
+                .bind(&id)
+                .fetch_optional(&pool)
+                .await?
         {
             if !existing_org.is_empty() && existing_org != org_id {
                 return Err(ApiError::Forbidden("service belongs to another org".into()));
@@ -96,10 +95,16 @@ pub(crate) async fn get_service(
     .await?;
 
     match row {
-        None => Err(ApiError::NotFound(format!("service {service_id} not found"))),
+        None => Err(ApiError::NotFound(format!(
+            "service {service_id} not found"
+        ))),
         Some(r) => {
             let row_org_id: String = r.try_get("org_id").unwrap_or_default();
-            assert_org_access(&row_org_id, &caller_org_id, &format!("service {service_id}"))?;
+            assert_org_access(
+                &row_org_id,
+                &caller_org_id,
+                &format!("service {service_id}"),
+            )?;
             Ok((
                 StatusCode::OK,
                 Json(json!({
@@ -131,11 +136,9 @@ pub(crate) async fn list_services(
         .fetch_all(&pool)
         .await?
     } else {
-        sqlx::query(
-            "SELECT id, name, repo_url, owner_team, spec_format FROM service ORDER BY name",
-        )
-        .fetch_all(&pool)
-        .await?
+        sqlx::query("SELECT id, name, repo_url, owner_team, spec_format FROM service ORDER BY name")
+            .fetch_all(&pool)
+            .await?
     };
 
     let items: Vec<Value> = rows

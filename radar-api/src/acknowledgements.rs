@@ -1,3 +1,5 @@
+use crate::auth::{require_org_owned, JwtClaims, OrgResource};
+use crate::errors::ApiError;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -8,8 +10,6 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
-use crate::auth::{JwtClaims, OrgResource, require_org_owned};
-use crate::errors::ApiError;
 
 #[derive(serde::Deserialize)]
 pub(crate) struct CreateAcknowledgementBody {
@@ -29,7 +29,9 @@ pub(crate) async fn create_acknowledgement(
     Json(body): Json<CreateAcknowledgementBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.acknowledged_by.is_empty() {
-        return Err(ApiError::BadRequest("acknowledged_by must not be empty".into()));
+        return Err(ApiError::BadRequest(
+            "acknowledged_by must not be empty".into(),
+        ));
     }
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
@@ -153,8 +155,15 @@ pub(crate) async fn list_acknowledgements(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
-    let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50).min(200);
-    let offset: i64 = params.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50)
+        .min(200);
+    let offset: i64 = params
+        .get("offset")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
 
     let rows = sqlx::query(
         "SELECT id, diff_id, change_id, consumer_id, service_id, acknowledged_by, reason, expires_at, created_at \
@@ -187,5 +196,7 @@ pub(crate) async fn list_acknowledgements(
         })
         .collect();
 
-    Ok(Json(json!({ "entries": entries, "limit": limit, "offset": offset })))
+    Ok(Json(
+        json!({ "entries": entries, "limit": limit, "offset": offset }),
+    ))
 }
