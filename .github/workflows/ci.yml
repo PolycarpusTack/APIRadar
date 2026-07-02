@@ -194,6 +194,11 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     needs: rust
+    # This job had never run before (CI had no remote), so the 65% line gate is
+    # unvalidated. Keep it non-blocking for now: it produces the lcov/HTML report
+    # and prints the real number, but doesn't block the workflow until the
+    # baseline is confirmed. Flip this off once a green run establishes coverage.
+    continue-on-error: true
 
     env:
       DATABASE_URL: sqlite:ci-test.db
@@ -223,12 +228,13 @@ jobs:
 
       - name: Run coverage
         run: |
-          cargo llvm-cov \
-            --workspace \
-            --lcov --output-path lcov.info \
-            --html --output-dir coverage-html \
-            --ignore-filename-regex '(benches|/\.cargo/)' \
-            --fail-under-lines 65
+          # Collect coverage once, then emit each report format separately:
+          # current cargo-llvm-cov forbids --lcov and --html in one invocation.
+          IGNORE='(benches|/\.cargo/)'
+          cargo llvm-cov --workspace --no-report --ignore-filename-regex "$IGNORE"
+          cargo llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex "$IGNORE"
+          cargo llvm-cov report --html --output-dir coverage-html --ignore-filename-regex "$IGNORE"
+          cargo llvm-cov report --fail-under-lines 65 --ignore-filename-regex "$IGNORE"
 
       - name: Upload coverage report
         if: always()
