@@ -5,6 +5,7 @@ use radar_core::models::Severity;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::time::Duration;
 
 use crate::render::{BlastRadiusEntry, BlastRadiusResponse};
 
@@ -360,6 +361,63 @@ struct CreatedComment {
     html_url: String,
 }
 
+/// Page size used when listing issue comments (GitHub's maximum).
+const COMMENTS_PER_PAGE: usize = 100;
+
+/// Pure decision: given the number of comments returned on the page just
+/// fetched, should we request another page? A full page implies more may
+/// exist; a short or empty page means we've reached the end.
+fn has_more_comment_pages(page_len: usize, per_page: usize) -> bool {
+    per_page > 0 && page_len >= per_page
+}
+
+/// Walk every page of PR comments looking for the marker comment. Returns the
+/// id of the first matching comment, or `None` if none exists on any page.
+async fn find_existing_comment(
+    client: &reqwest::Client,
+    ctx: &GithubContext,
+    auth_header: &HeaderValue,
+) -> Result<Option<u64>> {
+    let mut page: u32 = 1;
+    loop {
+        let list_url = format!(
+            "https://api.github.com/repos/{}/{}/issues/{}/comments?per_page={}&page={}",
+            ctx.owner, ctx.repo, ctx.pr_number, COMMENTS_PER_PAGE, page
+        );
+
+        let list_resp = client
+            .get(&list_url)
+            .header(AUTHORIZATION, auth_header.clone())
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()
+            .await
+            .context("failed to list PR comments")?;
+
+        if !list_resp.status().is_success() {
+            let status = list_resp.status();
+            let text = list_resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable>".into());
+            bail!("GitHub API error listing comments: {} — {}", status, text);
+        }
+
+        let comments: Vec<CommentResponse> = list_resp
+            .json()
+            .await
+            .context("failed to parse comment list response")?;
+
+        if let Some(c) = comments.iter().find(|c| c.body.starts_with(COMMENT_MARKER)) {
+            return Ok(Some(c.id));
+        }
+
+        if !has_more_comment_pages(comments.len(), COMMENTS_PER_PAGE) {
+            return Ok(None);
+        }
+        page += 1;
+    }
+}
+
 /// Post or update (idempotent) the drift comment on the PR.
 /// Returns the comment URL on success.
 pub async fn post_or_update_comment(ctx: &GithubContext, body: &str) -> Result<String> {
@@ -371,6 +429,8 @@ pub async fn post_or_update_comment(ctx: &GithubContext, body: &str) -> Result<S
 
     let client = reqwest::Client::builder()
         .default_headers(default_headers)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
         .build()
         .context("failed to build HTTP client")?;
 
@@ -378,41 +438,16 @@ pub async fn post_or_update_comment(ctx: &GithubContext, body: &str) -> Result<S
     let auth_header =
         HeaderValue::from_str(&auth_value).context("invalid GITHUB_TOKEN value")?;
 
-    // List existing comments on the PR.
-    let list_url = format!(
-        "https://api.github.com/repos/{}/{}/issues/{}/comments?per_page=100",
-        ctx.owner, ctx.repo, ctx.pr_number
-    );
+    // List existing comments on the PR, paginating until we find the marker
+    // comment or run out of pages.  Looking only at the first page would post a
+    // duplicate comment on PRs with more than one page of comments.
+    let existing_id = find_existing_comment(&client, ctx, &auth_header).await?;
 
-    let list_resp = client
-        .get(&list_url)
-        .header(AUTHORIZATION, auth_header.clone())
-        .header(ACCEPT, "application/vnd.github+json")
-        .send()
-        .await
-        .context("failed to list PR comments")?;
-
-    if !list_resp.status().is_success() {
-        let status = list_resp.status();
-        let text = list_resp
-            .text()
-            .await
-            .unwrap_or_else(|_| "<unreadable>".into());
-        bail!("GitHub API error listing comments: {} — {}", status, text);
-    }
-
-    let comments: Vec<CommentResponse> = list_resp
-        .json()
-        .await
-        .context("failed to parse comment list response")?;
-
-    let existing = comments.iter().find(|c| c.body.starts_with(COMMENT_MARKER));
-
-    let response_body = if let Some(existing_comment) = existing {
+    let response_body = if let Some(existing_comment_id) = existing_id {
         // PATCH to update the existing comment.
         let patch_url = format!(
             "https://api.github.com/repos/{}/{}/issues/comments/{}",
-            ctx.owner, ctx.repo, existing_comment.id
+            ctx.owner, ctx.repo, existing_comment_id
         );
         let resp = client
             .patch(&patch_url)
@@ -479,6 +514,8 @@ pub async fn pr_has_label(ctx: &GithubContext, label: &str) -> bool {
 
     let client = match reqwest::Client::builder()
         .default_headers(default_headers)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
         .build()
     {
         Ok(c) => c,
@@ -550,6 +587,8 @@ pub async fn post_release(
 
     let client = reqwest::Client::builder()
         .default_headers(default_headers)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
         .build()
         .context("failed to build HTTP client")?;
 
@@ -671,6 +710,25 @@ mod tests {
     fn comment_contains_breaking_emoji() {
         let body = build_comment_with_suites(&sample_changes(), "abc", "def", None, "block", "closed", &[]);
         assert!(body.contains("\u{1f534}")); // 🔴
+    }
+
+    // --- M-12: comment pagination decision ---
+
+    #[test]
+    fn has_more_comment_pages_full_page_continues() {
+        // A full page (== per_page) means more comments may follow.
+        assert!(has_more_comment_pages(100, 100));
+    }
+
+    #[test]
+    fn has_more_comment_pages_short_or_empty_page_stops() {
+        assert!(!has_more_comment_pages(42, 100), "short page → last page");
+        assert!(!has_more_comment_pages(0, 100), "empty page → last page");
+    }
+
+    #[test]
+    fn has_more_comment_pages_guards_zero_per_page() {
+        assert!(!has_more_comment_pages(0, 0));
     }
 
     #[test]

@@ -154,13 +154,30 @@ pub fn decide(
             exit_code: 0,
         },
         FailMode::Open => {
-            // When the API was unreachable we have no consumer data, so fall
-            // back to the raw breaking-change signal.  When the API responded
-            // successfully, apply the full policy (block_on + label override)
-            // so that the exit code is consistent with what Closed mode would
-            // produce — the only difference is the verdict stays at Warn.
+            // When the API was unreachable we have no *consumer* data, but the
+            // label override (from GitHub) and `block_on` (from local .radar.yml)
+            // do not depend on the Radar API — so honor both.  Only the
+            // `ActiveConsumers` branch, which needs consumer data we don't have,
+            // falls back to the raw breaking-change signal.  When the API
+            // responded successfully, apply the full policy so the exit code is
+            // consistent with Closed mode — only the verdict stays at Warn.
             let code = if api_error {
-                if has_breaking { 1 } else { 0 }
+                if has_label_override && policy.allow_override_with.is_some() {
+                    0
+                } else {
+                    match &policy.block_on {
+                        BlockOn::Never => 0,
+                        // No consumer data available, so treat ActiveConsumers
+                        // like AnyBreak: block on any breaking change.
+                        BlockOn::AnyBreak | BlockOn::ActiveConsumers => {
+                            if has_breaking {
+                                1
+                            } else {
+                                0
+                            }
+                        }
+                    }
+                }
             } else {
                 exit_code(changes, policy, has_active_consumers, has_label_override)
             };
@@ -350,5 +367,47 @@ mod tests {
         let d = decide(&[breaking()], &p, &FailMode::Open, true, false, false);
         assert_eq!(d.exit_code, 0, "block_on=Never → always exit 0 regardless of consumers");
         assert_eq!(d.verdict, Verdict::Warn);
+    }
+
+    // ── M-12: fail-open + api_error must still honor override + block_on ──────
+    // The label override comes from GitHub and `block_on` from local .radar.yml;
+    // neither depends on the (down) Radar API, so both must be respected even
+    // when consumer data is unavailable.
+
+    #[test]
+    fn fail_mode_open_api_error_label_override_passes() {
+        // (a) Open + api_error + valid label override + breaking → pass (exit 0).
+        let p = PolicyConfig {
+            block_on: BlockOn::AnyBreak,
+            allow_override_with: Some("label:drift-ack".to_string()),
+            ..Default::default()
+        };
+        let d = decide(&[breaking()], &p, &FailMode::Open, false, true, true);
+        assert_eq!(d.exit_code, 0, "valid label override honored in fail-open despite api error");
+        assert_eq!(d.verdict, Verdict::Warn, "open mode stays warn verdict");
+    }
+
+    #[test]
+    fn fail_mode_open_api_error_block_on_never_passes() {
+        // (b) Open + api_error + block_on=never + breaking → pass (exit 0).
+        let p = PolicyConfig {
+            block_on: BlockOn::Never,
+            ..Default::default()
+        };
+        let d = decide(&[breaking()], &p, &FailMode::Open, false, false, true);
+        assert_eq!(d.exit_code, 0, "block_on=never honored in fail-open despite api error");
+        assert_eq!(d.verdict, Verdict::Warn);
+    }
+
+    #[test]
+    fn fail_mode_open_api_error_label_override_ignored_when_not_configured() {
+        // has_label_override=true but allow_override_with=None → still block on breaking.
+        let p = PolicyConfig {
+            block_on: BlockOn::AnyBreak,
+            allow_override_with: None,
+            ..Default::default()
+        };
+        let d = decide(&[breaking()], &p, &FailMode::Open, false, true, true);
+        assert_eq!(d.exit_code, 1, "override not configured → breaking still blocks");
     }
 }

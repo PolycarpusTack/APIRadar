@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use serde::Serialize;
@@ -84,6 +86,10 @@ fn build_client(token: Option<&str>) -> Result<(Client, reqwest::header::HeaderM
     }
 
     let client = Client::builder()
+        // Bound every request so a hung endpoint can never stall `drift check`
+        // (or a CI job) indefinitely.
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
         .build()
         .context("failed to build HTTP client")?;
 
