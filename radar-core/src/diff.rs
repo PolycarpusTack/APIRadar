@@ -21,6 +21,18 @@ fn resolve_schema<'a>(spec: &'a OpenAPI, reference: &str) -> Option<&'a Schema> 
     }
 }
 
+/// Resolve a boxed schema reference (used for array `items`) to a `&Schema`,
+/// following a single local component `$ref`.
+fn resolve_boxed_schema<'a>(
+    spec: &'a OpenAPI,
+    r: &'a ReferenceOr<Box<Schema>>,
+) -> Option<&'a Schema> {
+    match r {
+        ReferenceOr::Item(s) => Some(s.as_ref()),
+        ReferenceOr::Reference { reference } => resolve_schema(spec, reference),
+    }
+}
+
 fn resolve_response<'a>(spec: &'a OpenAPI, reference: &str) -> Option<&'a Response> {
     let name = reference.strip_prefix("#/components/responses/")?;
     match spec.components.as_ref()?.responses.get(name)? {
@@ -765,6 +777,23 @@ fn diff_schema_properties(
 
     let (base_obj, head_obj) = match (&base_schema.schema_kind, &head_schema.schema_kind) {
         (SchemaKind::Type(Type::Object(b)), SchemaKind::Type(Type::Object(h))) => (b, h),
+        // N-4: array-of-objects (e.g. `GET /users -> [User]`). Recurse into the
+        // item schemas so item-level field/type changes are detected — previously
+        // these were silently ignored on the most common list-endpoint shape.
+        (SchemaKind::Type(Type::Array(ba)), SchemaKind::Type(Type::Array(ha))) => {
+            if let (Some(bi), Some(hi)) = (ba.items.as_ref(), ha.items.as_ref()) {
+                if let (Some(bs), Some(hs)) = (
+                    resolve_boxed_schema(base_spec, bi),
+                    resolve_boxed_schema(head_spec, hi),
+                ) {
+                    diff_schema_properties(
+                        op_path, prefix, bs, hs, base_spec, head_spec, changes, visited,
+                    );
+                }
+            }
+            visited.remove(&self_ptr);
+            return;
+        }
         _ => {
             visited.remove(&self_ptr);
             return;
@@ -2556,6 +2585,97 @@ components:
             type_changed.len(),
             1,
             "recursive schema must be diffed once without overflow, got: {:?}",
+            changes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // N-4: array-of-object responses are diffed at the item level
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_array_item_field_removed_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    phone: { type: string }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::FieldRemoved && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            removed.len(),
+            1,
+            "array-item field removal must be Breaking, got: {:?}",
+            changes
+        );
+        assert!(removed[0].path.contains("phone"));
+    }
+
+    #[test]
+    fn test_array_item_type_changed_via_ref_is_breaking() {
+        // Array items referenced via $ref; an item field's type changes.
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/User' }
+components:
+  schemas:
+    User:
+      type: object
+      properties:
+        id: { type: string }
+"#;
+        let head_yaml = base_yaml.replace("id: { type: string }", "id: { type: integer }");
+        let changes = diff_openapi(&parse(base_yaml), &parse(&head_yaml));
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.kind == ChangeKind::TypeChanged && c.path.contains("id")),
+            "array item type change via $ref must be detected, got: {:?}",
             changes
         );
     }
