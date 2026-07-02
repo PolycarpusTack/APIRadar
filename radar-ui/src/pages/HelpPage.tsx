@@ -829,6 +829,21 @@ function BeginnersGuide() {
               <strong>Settings → Integrations</strong>.
             </p>
           </FAQ>
+          <FAQ q="Where is my data stored, and is the desktop app secure?">
+            <p>
+              In the <strong>desktop app</strong>, everything is stored locally in a database on
+              your own machine — specs, diffs, evidence, and history never leave your computer
+              unless you explicitly use an AI or notification integration. The app runs a local
+              background service that is protected with a per-session token, so other apps or
+              websites open on your machine cannot read or change your Radar data.
+            </p>
+            <p className="mt-2">
+              In a <strong>self-hosted web deployment</strong>, data lives in the database your
+              team configured, scoped per organization so one team never sees another's data.
+              Secrets — bearer tokens, passwords, API keys — are redacted from logs and audit
+              records.
+            </p>
+          </FAQ>
           <FAQ q="I don't have Jira. Can I still use Generate Tests?">
             <p>
               Yes. On the <strong>Generate Tests</strong> page, click "Switch to paste text" next to the

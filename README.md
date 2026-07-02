@@ -200,6 +200,7 @@ Confidence affects the policy engine: `closed` mode blocks when at least one **h
 | `RADAR_REQUIRE_AUTH` | Reject unauthenticated requests (`true`/`1`) | `false` |
 | `RADAR_SERVICE_TOKEN` | Static bearer token required on all `/v1` requests when set (clients pass `Authorization: Bearer <token>`). The Electron desktop app generates and sets this automatically for its local sidecar. | — |
 | `RADAR_TRUST_PROXY` | When `true`, trust the `X-Forwarded-For` header for rate-limit keying (use only behind a trusted reverse proxy). When `false` (default) the socket peer address is used. | `false` |
+| `RADAR_PUBLIC_BASE_URL` | Public base URL used to build absolute links in outbound notifications (e.g. the Slack "View Diff" button). When unset, the button is omitted rather than sent as a relative URL. | — |
 | `RADAR_JWT_SECRET` | HS256 secret for JWT auth (`org_id` claim for tenancy) | — |
 | `RADAR_OIDC_PROVIDER_URL` | OIDC provider base URL (e.g. `https://accounts.google.com`) | — |
 | `RADAR_OIDC_CLIENT_ID` | OIDC client ID | — |
@@ -221,6 +222,11 @@ Confidence affects the policy engine: `closed` mode blocks when at least one **h
 > environment variable whose name is prefixed with `RADAR_CATALOG_TOKEN_` (e.g.
 > `RADAR_CATALOG_TOKEN_ACME`). Names outside this allowlist are rejected, so the
 > service can never be tricked into reading an arbitrary process environment variable.
+
+> **Database support status.** SQLite (the default, used by the desktop app and CI)
+> is fully supported. PostgreSQL migrations apply cleanly, but the runtime query
+> layer currently has an unresolved `sqlx` `Any`→PostgreSQL placeholder issue — see
+> `REMEDIATION-PLAN.md` (M-20). Use SQLite for production until this is resolved.
 
 ## Workspace layout
 

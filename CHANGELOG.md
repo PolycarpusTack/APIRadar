@@ -7,6 +7,43 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.2.1] — 2026-07-02
+
+Security, correctness, and reliability hardening from a full-codebase review (EPIC M). No new user-facing features; existing behaviour is unchanged except where noted.
+
+### Security
+
+- **Catalog sync credential exfiltration + SSRF fixed** — `POST /v1/catalog-sources` previously read *any* client-named environment variable and sent it to a client-supplied URL. `token_env` is now restricted to names prefixed `RADAR_CATALOG_TOKEN_`, and catalog fetches go through the SSRF guard with redirects disabled and a request timeout.
+- **Desktop sidecar now requires a bearer token** — the Electron app generates a per-session token, passes it to the `radar-api` sidecar as `RADAR_SERVICE_TOKEN`, and attaches it from the renderer. A website visited in the user's browser can no longer read or mutate the local drift database.
+- **Playground stored-XSS fixed** — sandbox-environment values interpolated into the API-explorer iframe are now HTML/JSON-escaped.
+- **Multi-tenant isolation** — release notes, acknowledgements, scheduled scans, subscriptions, AI test generation, summary, digest preview, spec-version listing, and the audit log now enforce the caller's org via a shared `require_org_owned` guard (cross-org access returns 403).
+- **Hardening** — database URL credentials are redacted in logs; secret comparisons are constant-time; the rate limiter now keys on the real socket peer (X-Forwarded-For trusted only behind `RADAR_TRUST_PROXY`) instead of an unvalidated bearer token; share tokens are now random (not derivable from the diff id); Slack "View Diff" links use `RADAR_PUBLIC_BASE_URL`.
+
+### Fixed
+
+- **Breaking-change detection** — the OpenAPI diff now correctly flags request-body and parameter `optional → required` changes, `requestBody.required` flips, and dropped `application/json` content types as breaking; path-item-level parameters are diffed; renaming a path-template variable (`/users/{id}` → `/users/{userId}`) no longer reports a phantom operation add/remove.
+- **Protobuf diff** — `parse_proto` now errors on non-proto input instead of silently reporting "no changes", and parses `oneof` members and `map<>` fields.
+- **Scheduled scans** — a scan now diffs against the immediately previous spec (an off-by-one previously diffed against an empty or two-generations-old spec).
+- **PostgreSQL migrations** — migrations `014`–`017` no longer use the SQLite-only `strftime()` default, so a fresh PostgreSQL database migrates cleanly (see *Known limitations*). New migration `033` adds `webhook_delivery.created_at` and hot-path indices; delivery listing orders by `created_at` instead of the SQLite-only `rowid`.
+- **Scanner accuracy** — the Postman collection parser recurses nested folders, normalizes `:var` path params to `{var}`, strips query strings/BOM, and no longer emits false field paths from `pm.response.*`; `.tsx` files parse with the TSX grammar, plain-JS extensions are scanned, and API-call operations are attributed to the enclosing function.
+- **CLI** — in fail-open mode with an API error, a valid label override and `block_on: never` are now honoured; all HTTP clients have timeouts; GitHub PR comment lookup paginates past 100 comments.
+- **Desktop** — single-instance lock (a second launch no longer kills the first instance's sidecar), tree-kill on quit, PID-reuse guard, a recoverable startup dialog, and post-startup crash detection.
+- **Dashboard** — release-note generation polls the async status endpoint and renders the result; public share links and audit diff links work under the `/app` base path; the Settings form no longer fires unintended saves; the diffs list is paginated and the service filter works; the home timeline and diff table use a consistent time zone.
+- **API** — blast-radius evidence writes are idempotent; batch ingestion is transactional and maps constraint violations to 4xx; `mask_token` no longer panics on multi-byte tokens.
+
+### Changed
+
+- Negative/unbounded `limit` query parameters are clamped consistently across list endpoints (previously dumped the whole table on SQLite / errored on PostgreSQL).
+- New operator environment variables: `RADAR_SERVICE_TOKEN` (bearer required on `/v1` when set), `RADAR_TRUST_PROXY`, `RADAR_PUBLIC_BASE_URL`, and the `RADAR_CATALOG_TOKEN_*` allowlist for catalog `token_env`.
+- CI/release fixes: pnpm installed before its cache step, the desktop installer builds with the correct config (sidecar bundled), Playwright targets the served port, workspace formatted, `quinn-proto` bumped for a RUSTSEC advisory, and the composite `radar-action` builds its binary to a findable path.
+
+### Known limitations
+
+- **PostgreSQL runtime queries** — migrations apply on PostgreSQL, but the runtime query layer has an unresolved `sqlx` `Any`→PostgreSQL placeholder-translation issue; the shipped path (SQLite / desktop) is unaffected. The `Rust (Postgres)` CI job runs but is non-blocking until this is resolved.
+- **Per-org settings** — `PUT/GET /v1/settings` remain global (auth-gated); org scoping needs a schema migration.
+
+---
+
 ## [0.2.0] — 2026-05-26
 
 ### Added
