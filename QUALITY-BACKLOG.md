@@ -316,6 +316,8 @@ Given a field is defined via `extend type` then it is not reported as removed
 **Decision (SPIKE N-26-T0):** (a) **Commit to Postgres** — replace `AnyPool` with `enum DbPool { Sqlite(SqlitePool), Pg(PgPool) }` (or feature-gated backends) so each backend gets real, checked queries; make the `rust-postgres` CI job gating. OR (b) **Descope Postgres** — remove the claim from README/SOLUTION_DESIGN/compose/enterprise docs, keep SQLite-only, delete `AnyPool` portability constraints over time.
 **Tasks:** T0 SPIKE decision (a/b); then either the per-backend pool migration (large, staged) or the descope + doc/CI cleanup.
 
+**✅ DONE (Option C — keep `AnyPool`, fix the placeholder layer):** Rather than the per-backend pool rewrite (a) or descoping (b), the root cause — sqlx `Any` not translating `?`→`$N` for Postgres — is fixed at the query layer. `radar-api/src/db.rs` rewrites the final SQL string (`pg()` + `q!`/`qs!`/`qa!` macros) to `$N` when the pool is Postgres, and is a no-op (borrow) on SQLite. ~337 call sites converted. The `rust-postgres` CI job is **re-enabled as gating** (`cargo test --all` against Postgres 16). Three cross-backend bugs this surfaced were also fixed (sample_rate f32/f64 decode, missing FK parent in a scans test, two env-var test races). **Verified green on PR #1: the full radar-api suite passes on real Postgres.** Commits `f337501` + `7cc5373`.
+
 ### Story N-27 · Decompose `lib.rs` to the documented module map
 > **Priority:** P2 · **Size:** L · **Hat:** REFACTORING
 > **Finding:** `radar-api/src/lib.rs` is 5,393 lines (3× the next module) and its flat 27-file layout has drifted from the `SOLUTION_DESIGN §4.5` module architecture (diffs/evidence/impact/policy/artifacts/catalog/authz/audit); the 4,500-line test module lives inside it.
@@ -339,6 +341,8 @@ Given a field is defined via `extend type` then it is not reported as removed
 > **Priority:** P2 · **Size:** S · **Hat:** REFACTORING
 > **Finding:** `rust-postgres` is `continue-on-error: true` and known-failing, so new PG regressions are indistinguishable from M-20 and a full compile+test burns per push for an ungated signal.
 **AC:** either reduce it to `sqlx migrate run` only (gating, should pass post-M-7b) until N-26 lands, or remove it and track N-26. Gates migration regressions again.
+
+**✅ DONE:** Narrowed to migrations-only under this story, then **re-widened to the full gating `cargo test --all`** once N-26 fixed the query layer. The job now gates both migration and query-layer portability on Postgres 16.
 
 ### Story N-31 · Desktop into CI
 > **Priority:** P2 · **Size:** S · **Hat:** FEATURE
