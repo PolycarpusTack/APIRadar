@@ -43,7 +43,35 @@ pub fn parse_proto(content: &str) -> Result<ProtoSchema, DriftError> {
     let stripped = strip_comments(content);
     let mut schema = ProtoSchema::default();
     parse_body(stripped.as_bytes(), &mut schema);
+
+    // Reject input that does not look like protobuf at all. Without this a wrong
+    // format (e.g. an OpenAPI YAML passed with --format proto) or a corrupted
+    // file parses to an empty schema and is silently reported as "no changes".
+    // A valid-but-empty proto (`syntax = "proto3";` with no messages) is still
+    // accepted because it carries a syntax declaration.
+    if schema.messages.is_empty() && schema.enums.is_empty() && !has_proto_syntax(&stripped) {
+        return Err(DriftError::Parse(
+            "input does not appear to be a protobuf schema \
+             (no syntax declaration, message, or enum found)"
+                .to_string(),
+        ));
+    }
+
     Ok(schema)
+}
+
+/// True when the (comment-stripped) input contains a `syntax = "proto…"` line.
+fn has_proto_syntax(stripped: &str) -> bool {
+    stripped.lines().any(|line| {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("syntax") {
+            let rest = rest.trim_start();
+            if let Some(after_eq) = rest.strip_prefix('=') {
+                return after_eq.trim_start().starts_with("\"proto");
+            }
+        }
+        false
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +230,19 @@ fn read_message_body(bytes: &[u8], start: usize) -> (Vec<ProtoField>, usize) {
                     pos += 1;
                 }
                 let stmt = String::from_utf8_lossy(&bytes[stmt_start..pos]).into_owned();
+
+                // `oneof <name> { <fields> }` — its members share the message's
+                // field-number space, so parse them as fields of this message
+                // rather than skipping the nested block.
+                if pos < bytes.len()
+                    && bytes[pos] == b'{'
+                    && stmt.trim_start().starts_with("oneof")
+                {
+                    pos += 1; // consume '{'
+                    read_oneof_fields(bytes, &mut pos, &mut fields);
+                    continue;
+                }
+
                 if pos < bytes.len() && bytes[pos] == b';' {
                     pos += 1; // consume ';'
                 }
@@ -216,6 +257,32 @@ fn read_message_body(bytes: &[u8], start: usize) -> (Vec<ProtoField>, usize) {
     }
 
     (fields, pos)
+}
+
+/// Read the fields inside a `oneof { … }` block (pos is just after the `{`),
+/// pushing each into `fields` and leaving pos just after the closing `}`.
+fn read_oneof_fields(bytes: &[u8], pos: &mut usize, fields: &mut Vec<ProtoField>) {
+    loop {
+        skip_ws(bytes, pos);
+        if *pos >= bytes.len() {
+            break;
+        }
+        if bytes[*pos] == b'}' {
+            *pos += 1; // consume closing '}'
+            break;
+        }
+        let stmt_start = *pos;
+        while *pos < bytes.len() && bytes[*pos] != b';' && bytes[*pos] != b'}' {
+            *pos += 1;
+        }
+        let stmt = String::from_utf8_lossy(&bytes[stmt_start..*pos]).into_owned();
+        if *pos < bytes.len() && bytes[*pos] == b';' {
+            *pos += 1; // consume ';'
+        }
+        if let Some(f) = parse_field_stmt(&stmt) {
+            fields.push(f);
+        }
+    }
 }
 
 /// Read enum body (after opening `{`), returning (values, pos_after_closing_brace).
@@ -279,6 +346,29 @@ fn parse_field_stmt(stmt: &str) -> Option<ProtoField> {
         "option" | "reserved" | "oneof" | "syntax" | "package" | "import" | "message" | "enum"
     ) {
         return None;
+    }
+
+    // `map<K, V> name = number` — the angle-bracket type may contain a space and
+    // a comma, so it cannot be tokenised by whitespace. Treat the whole `map<…>`
+    // as the type (whitespace-normalised so `map<string, string>` == `map<string,string>`).
+    if let Some(rest) = trimmed.strip_prefix("map<") {
+        let gt = rest.find('>')?;
+        let inner: String = rest[..gt].split_whitespace().collect();
+        let type_name = format!("map<{inner}>");
+        let after = rest[gt + 1..].trim();
+        let mut parts = after.split_ascii_whitespace();
+        let field_name = parts.next()?.to_string();
+        if parts.next()? != "=" {
+            return None;
+        }
+        let num_raw = parts.next()?;
+        let num_str = num_raw.split('[').next().unwrap_or(num_raw).trim_end_matches(';');
+        let number: u32 = num_str.parse().ok()?;
+        return Some(ProtoField {
+            name: field_name,
+            type_name,
+            number,
+        });
     }
 
     let mut parts = trimmed.split_ascii_whitespace();
@@ -575,5 +665,72 @@ mod tests {
             changes.iter().all(|c| c.severity == Severity::Safe),
             "expected all safe, got: {changes:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // M-5: non-proto / malformed input returns Err (not an empty schema)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_non_proto_input_is_err() {
+        // An OpenAPI YAML accidentally passed as proto.
+        assert!(parse_proto("openapi: \"3.0.0\"\ninfo:\n  title: X\n").is_err());
+        // Random garbage.
+        assert!(parse_proto("!!! not a schema at all ###").is_err());
+        // Empty input.
+        assert!(parse_proto("").is_err());
+    }
+
+    #[test]
+    fn test_empty_but_valid_proto_is_ok() {
+        // A syntax declaration with no messages is legitimately empty.
+        assert!(parse_proto(r#"syntax = "proto3";"#).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // M-5: oneof member removal is detected
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_oneof_member_removed_is_breaking() {
+        let base = parse(
+            r#"syntax="proto3"; message M { oneof choice { string a = 1; int32 b = 2; } }"#,
+        );
+        let head = parse(r#"syntax="proto3"; message M { oneof choice { string a = 1; } }"#);
+        let changes = diff_proto(&base, &head);
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::FieldRemoved && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(removed.len(), 1, "oneof member removal must be detected, got: {changes:?}");
+        assert!(removed[0].path.contains('b'));
+    }
+
+    // -----------------------------------------------------------------------
+    // M-5: map<> field is parsed and its removal detected
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_map_field_removed_is_breaking() {
+        let base = parse(
+            r#"syntax="proto3"; message M { string id = 1; map<string, string> labels = 2; }"#,
+        );
+        let head = parse(r#"syntax="proto3"; message M { string id = 1; }"#);
+        let changes = diff_proto(&base, &head);
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::FieldRemoved && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(removed.len(), 1, "map field removal must be detected, got: {changes:?}");
+        assert!(removed[0].path.contains("labels"));
+    }
+
+    #[test]
+    fn test_map_field_value_type_change_is_breaking() {
+        let base = parse(r#"syntax="proto3"; message M { map<string, string> labels = 1; }"#);
+        let head = parse(r#"syntax="proto3"; message M { map<string, int32> labels = 1; }"#);
+        let changes = diff_proto(&base, &head);
+        let changed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(changed.len(), 1, "map value type change must be detected, got: {changes:?}");
     }
 }

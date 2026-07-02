@@ -84,28 +84,29 @@ pub fn diff_openapi(base: &OpenAPI, head: &OpenAPI) -> Vec<DiffChange> {
     let head_ops = collect_operations(head);
 
     // --- Operations removed or changed --------------------------------------
-    for (key, base_op) in &base_ops {
-        if !head_ops.contains_key(key) {
+    // Keys are normalised (template variable names collapsed) so that renaming a
+    // path variable (/users/{id} → /users/{userId}) is not seen as remove+add.
+    for (norm_key, (display, base_op)) in &base_ops {
+        if let Some((_head_display, head_op)) = head_ops.get(norm_key) {
+            diff_operation(display, base_op, head_op, base, head, &mut changes);
+        } else {
             changes.push(DiffChange {
-                path: key.clone(),
+                path: display.clone(),
                 kind: ChangeKind::OperationRemoved,
                 severity: Severity::Breaking,
-                description: Some(format!("Operation {} was removed", key)),
+                description: Some(format!("Operation {} was removed", display)),
             });
-        } else {
-            let head_op = &head_ops[key];
-            diff_operation(key, base_op, head_op, base, head, &mut changes);
         }
     }
 
     // --- Operations added ---------------------------------------------------
-    for (key, _head_op) in &head_ops {
-        if !base_ops.contains_key(key) {
+    for (norm_key, (display, _head_op)) in &head_ops {
+        if !base_ops.contains_key(norm_key) {
             changes.push(DiffChange {
-                path: key.clone(),
+                path: display.clone(),
                 kind: ChangeKind::OperationAdded,
                 severity: Severity::Safe,
-                description: Some(format!("Operation {} was added", key)),
+                description: Some(format!("Operation {} was added", display)),
             });
         }
     }
@@ -113,13 +114,44 @@ pub fn diff_openapi(base: &OpenAPI, head: &OpenAPI) -> Vec<DiffChange> {
     changes
 }
 
+/// Collapse `{templateVar}` segments to `{}` so that path-variable renames
+/// (which do not change the contract) do not register as remove + add.
+fn normalize_op_key(method_path: &str) -> String {
+    let mut out = String::with_capacity(method_path.len());
+    let mut in_brace = false;
+    for ch in method_path.chars() {
+        match ch {
+            '{' => {
+                in_brace = true;
+                out.push('{');
+            }
+            '}' => {
+                in_brace = false;
+                out.push('}');
+            }
+            _ if in_brace => {} // drop the variable name
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// True when a schema `prefix` refers to a request body (where required/optional
+/// semantics are the mirror image of a response).
+fn is_request_context(prefix: &str) -> bool {
+    prefix == "request_body" || prefix.starts_with("request_body.")
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers — operation collection
 // ---------------------------------------------------------------------------
 
 /// Collect all (method + path) → Operation pairs from a spec, keyed by the
-/// human-readable string "METHOD /path".
-fn collect_operations(spec: &OpenAPI) -> IndexMap<String, openapiv3::Operation> {
+/// normalised string "METHOD /path" (template variables collapsed), with the
+/// original human-readable "METHOD /path" retained as the display value.
+fn collect_operations(
+    spec: &OpenAPI,
+) -> IndexMap<String, (String, openapiv3::Operation)> {
     let mut map = IndexMap::new();
 
     for (path_str, path_ref) in spec.paths.paths.iter() {
@@ -148,8 +180,19 @@ fn collect_operations(spec: &OpenAPI) -> IndexMap<String, openapiv3::Operation> 
         };
 
         for (method, op) in path_item.iter() {
-            let key = format!("{} {}", method.to_uppercase(), path_str);
-            map.insert(key, op.clone());
+            let mut op = op.clone();
+            // Fold path-item-level parameters (shared across operations) in front
+            // of operation-level ones so shared params participate in the diff.
+            // Operation-level params override on key collision (spec semantics)
+            // because resolved_params inserts them last.
+            if !path_item.parameters.is_empty() {
+                let mut merged = path_item.parameters.clone();
+                merged.extend(op.parameters.clone());
+                op.parameters = merged;
+            }
+            let display = format!("{} {}", method.to_uppercase(), path_str);
+            let norm_key = normalize_op_key(&display);
+            map.insert(norm_key, (display, op));
         }
     }
 
@@ -300,6 +343,36 @@ fn diff_parameters(
             }
         }
     }
+
+    // Param requiredness changed (present in both) → optional→required is Breaking,
+    // required→optional is Safe (relaxation).
+    for (key, base_p) in &base_params {
+        if let Some(head_p) = head_params.get(key) {
+            let was = param_required(base_p);
+            let now = param_required(head_p);
+            if !was && now {
+                changes.push(DiffChange {
+                    path: format!("{} \u{2192} param.{}", op_path, key.name),
+                    kind: ChangeKind::RequiredChanged,
+                    severity: Severity::Breaking,
+                    description: Some(format!(
+                        "{} parameter '{}' changed from optional to required",
+                        key.location, key.name
+                    )),
+                });
+            } else if was && !now {
+                changes.push(DiffChange {
+                    path: format!("{} \u{2192} param.{}", op_path, key.name),
+                    kind: ChangeKind::RequiredChanged,
+                    severity: Severity::Safe,
+                    description: Some(format!(
+                        "{} parameter '{}' changed from required to optional",
+                        key.location, key.name
+                    )),
+                });
+            }
+        }
+    }
 }
 
 /// Extract a simple type label string from a parameter's schema, if possible.
@@ -384,6 +457,43 @@ fn diff_request_body(
             });
         }
         (Some(base), Some(head)) => {
+            // requestBody.required flip: optional→required breaks clients that
+            // omit the body; required→optional is a safe relaxation.
+            if !base.required && head.required {
+                changes.push(DiffChange {
+                    path: format!("{} \u{2192} request_body", op_path),
+                    kind: ChangeKind::RequiredChanged,
+                    severity: Severity::Breaking,
+                    description: Some(
+                        "Request body changed from optional to required".to_string(),
+                    ),
+                });
+            } else if base.required && !head.required {
+                changes.push(DiffChange {
+                    path: format!("{} \u{2192} request_body", op_path),
+                    kind: ChangeKind::RequiredChanged,
+                    severity: Severity::Safe,
+                    description: Some(
+                        "Request body changed from required to optional".to_string(),
+                    ),
+                });
+            }
+
+            // JSON content type dropped entirely (e.g. switched to XML) → breaks
+            // every JSON client. Only flag when the base offered JSON.
+            if base.content.contains_key("application/json")
+                && !head.content.contains_key("application/json")
+            {
+                changes.push(DiffChange {
+                    path: format!("{} \u{2192} request_body", op_path),
+                    kind: ChangeKind::TypeChanged,
+                    severity: Severity::Breaking,
+                    description: Some(
+                        "Request body no longer accepts application/json".to_string(),
+                    ),
+                });
+            }
+
             if let (Some(base_media), Some(head_media)) = (
                 base.content.get("application/json"),
                 head.content.get("application/json"),
@@ -504,6 +614,22 @@ fn diff_responses(
             }
         };
 
+        // JSON content type dropped from this response (e.g. switched to XML) →
+        // breaks every JSON consumer. Only flag when the base offered JSON.
+        if base_resp.content.contains_key("application/json")
+            && !head_resp.content.contains_key("application/json")
+        {
+            changes.push(DiffChange {
+                path: format!("{} \u{2192} response.{}", op_path, status_code_str(status)),
+                kind: ChangeKind::TypeChanged,
+                severity: Severity::Breaking,
+                description: Some(format!(
+                    "Response {} no longer returns application/json",
+                    status_code_str(status)
+                )),
+            });
+        }
+
         // Compare application/json content schemas
         if let (Some(base_media), Some(head_media)) = (
             base_resp.content.get("application/json"),
@@ -612,6 +738,12 @@ fn diff_schema_properties(
         _ => return,
     };
 
+    let field_noun = if is_request_context(prefix) {
+        "Request property"
+    } else {
+        "Response property"
+    };
+
     // Properties removed → FieldRemoved (Breaking)
     for (prop_name, _) in &base_obj.properties {
         if !head_obj.properties.contains_key(prop_name) {
@@ -619,7 +751,7 @@ fn diff_schema_properties(
                 path: format!("{} \u{2192} {}.{}", op_path, prefix, prop_name),
                 kind: ChangeKind::FieldRemoved,
                 severity: Severity::Breaking,
-                description: Some(format!("Response property '{}' was removed", prop_name)),
+                description: Some(format!("{} '{}' was removed", field_noun, prop_name)),
             });
         }
     }
@@ -631,7 +763,7 @@ fn diff_schema_properties(
                 path: format!("{} \u{2192} {}.{}", op_path, prefix, prop_name),
                 kind: ChangeKind::FieldAdded,
                 severity: Severity::Safe,
-                description: Some(format!("Response property '{}' was added", prop_name)),
+                description: Some(format!("{} '{}' was added", field_noun, prop_name)),
             });
         }
     }
@@ -690,29 +822,43 @@ fn diff_schema_properties(
             }
         }
 
-        // Required status changed?
+        // Required status changed? Severity is direction-aware: in a REQUEST body,
+        // making a field required breaks clients that omit it (Breaking) and
+        // relaxing it is Safe; in a RESPONSE, making a field required is Safe and
+        // dropping the guarantee (required→optional) is risky for consumers.
         let base_required = base_obj.required.contains(prop_name);
         let head_required = head_obj.required.contains(prop_name);
+        let request_ctx = is_request_context(prefix);
 
-        if base_required && !head_required {
-            // required → optional: NonBreakingRisky
+        if !base_required && head_required {
+            // optional → required
             changes.push(DiffChange {
                 path: format!("{} \u{2192} {}.{}", op_path, prefix, prop_name),
                 kind: ChangeKind::RequiredChanged,
-                severity: Severity::NonBreakingRisky,
+                severity: if request_ctx {
+                    Severity::Breaking
+                } else {
+                    Severity::Safe
+                },
                 description: Some(format!(
-                    "Property '{}' changed from required to optional",
+                    "{} '{}' changed from optional to required",
+                    if request_ctx { "Request field" } else { "Response field" },
                     prop_name
                 )),
             });
-        } else if !base_required && head_required {
-            // optional → required: Safe
+        } else if base_required && !head_required {
+            // required → optional
             changes.push(DiffChange {
                 path: format!("{} \u{2192} {}.{}", op_path, prefix, prop_name),
                 kind: ChangeKind::RequiredChanged,
-                severity: Severity::Safe,
+                severity: if request_ctx {
+                    Severity::Safe
+                } else {
+                    Severity::NonBreakingRisky
+                },
                 description: Some(format!(
-                    "Property '{}' changed from optional to required",
+                    "{} '{}' changed from required to optional",
+                    if request_ctx { "Request field" } else { "Response field" },
                     prop_name
                 )),
             });
@@ -1899,5 +2045,343 @@ paths:
             "Expected path to mention 'id', got: {}",
             type_changed[0].path
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // M-4 B1: request body field optional → required is Breaking
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_request_field_optional_to_required_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /items:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: string }
+                name: { type: string }
+      responses:
+        '201': { description: created }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /items:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, name]
+              properties:
+                id: { type: string }
+                name: { type: string }
+      responses:
+        '201': { description: created }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        let breaking: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::RequiredChanged && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(
+            breaking.len(),
+            1,
+            "request field optional→required must be Breaking, got: {:?}",
+            changes
+        );
+        assert!(breaking[0].path.contains("name"));
+    }
+
+    // -----------------------------------------------------------------------
+    // M-4: request body field required → optional is Safe (relaxation)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_request_field_required_to_optional_is_safe() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /items:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, name]
+              properties:
+                id: { type: string }
+                name: { type: string }
+      responses:
+        '201': { description: created }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /items:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: string }
+                name: { type: string }
+      responses:
+        '201': { description: created }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        let req: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::RequiredChanged)
+            .collect();
+        assert_eq!(req.len(), 1, "got: {:?}", changes);
+        assert_eq!(req[0].severity, Severity::Safe);
+    }
+
+    // -----------------------------------------------------------------------
+    // M-4: response field optional → required stays Safe (direction guard)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_response_field_optional_to_required_is_safe() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: { type: string }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        let req: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::RequiredChanged)
+            .collect();
+        assert_eq!(req.len(), 1, "got: {:?}", changes);
+        assert_eq!(req[0].severity, Severity::Safe);
+    }
+
+    // -----------------------------------------------------------------------
+    // M-4 B3: query parameter optional → required is Breaking
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_param_optional_to_required_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      parameters:
+        - { name: filter, in: query, required: false, schema: { type: string } }
+      responses:
+        '200': { description: ok }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      parameters:
+        - { name: filter, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: ok }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        let breaking: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::RequiredChanged && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(breaking.len(), 1, "param optional→required must be Breaking, got: {:?}", changes);
+        assert!(breaking[0].path.contains("filter"));
+    }
+
+    // -----------------------------------------------------------------------
+    // M-4 B2: requestBody.required false → true is Breaking
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_request_body_required_flip_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /items:
+    post:
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '201': { description: created }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /items:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '201': { description: created }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        let breaking: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::RequiredChanged && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(breaking.len(), 1, "requestBody.required flip must be Breaking, got: {:?}", changes);
+    }
+
+    // -----------------------------------------------------------------------
+    // M-4 B4: response dropping application/json is Breaking
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_response_drops_json_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { type: object }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/xml:
+              schema: { type: object }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        let breaking: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(breaking.len(), 1, "dropping JSON response must be Breaking, got: {:?}", changes);
+    }
+
+    // -----------------------------------------------------------------------
+    // M-4 B7: renaming a path template variable is not remove + add
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_path_template_rename_is_not_operation_change() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users/{id}:
+    get:
+      responses:
+        '200': { description: ok }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users/{userId}:
+    get:
+      responses:
+        '200': { description: ok }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        assert!(
+            !changes
+                .iter()
+                .any(|c| c.kind == ChangeKind::OperationRemoved
+                    || c.kind == ChangeKind::OperationAdded),
+            "template rename must not produce operation add/remove, got: {:?}",
+            changes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M-4 B5: a path-item-level required parameter is diffed
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_path_level_required_param_removed_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    parameters:
+      - { name: tenant, in: query, required: true, schema: { type: string } }
+    get:
+      responses:
+        '200': { description: ok }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200': { description: ok }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        let removed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::ParameterRemoved && c.severity == Severity::Breaking)
+            .collect();
+        assert_eq!(removed.len(), 1, "path-level required param removal must be Breaking, got: {:?}", changes);
+        assert!(removed[0].path.contains("tenant"));
     }
 }
