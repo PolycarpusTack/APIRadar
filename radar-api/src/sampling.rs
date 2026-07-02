@@ -40,7 +40,14 @@ pub(crate) async fn load_sampling(
 
     match row {
         Some(r) => {
-            let rate: f64 = r.try_get("sample_rate").unwrap_or(1.0);
+            // `sample_rate` is a REAL column (migration 017). SQLite REAL is an
+            // 8-byte double (decodes as f64); Postgres REAL is 4-byte (decodes as
+            // f32). Try f64 first, then fall back to f32 so both backends read
+            // the stored rate instead of silently defaulting to 1.0.
+            let rate: f64 = r
+                .try_get::<f64, _>("sample_rate")
+                .or_else(|_| r.try_get::<f32, _>("sample_rate").map(|v| v as f64))
+                .unwrap_or(1.0);
             let deny_raw: String = r.try_get("field_deny_list").unwrap_or_default();
             let deny: Vec<String> = deny_raw
                 .split(',')

@@ -420,8 +420,17 @@ fn build_slack_block_kit(diff_payload: &serde_json::Value) -> serde_json::Value 
 /// Build an absolute "View Diff" URL from RADAR_PUBLIC_BASE_URL, or None when the
 /// base URL is unset/empty so the caller can omit the (invalid-if-relative) button.
 fn slack_diff_url(diff_id: &str) -> Option<String> {
-    let base = std::env::var("RADAR_PUBLIC_BASE_URL").ok()?;
-    let base = base.trim().trim_end_matches('/');
+    diff_url_from_base(
+        std::env::var("RADAR_PUBLIC_BASE_URL").ok().as_deref(),
+        diff_id,
+    )
+}
+
+/// Pure core of [`slack_diff_url`]: given an optional base URL, return the
+/// absolute diff link or None. Kept free of env reads so tests exercise it
+/// hermetically without racing on the process-global RADAR_PUBLIC_BASE_URL.
+fn diff_url_from_base(base: Option<&str>, diff_id: &str) -> Option<String> {
+    let base = base?.trim().trim_end_matches('/');
     if base.is_empty() {
         return None;
     }
@@ -806,18 +815,18 @@ mod tests {
 
     #[test]
     fn slack_diff_url_absolute_when_base_set() {
-        std::env::set_var("RADAR_PUBLIC_BASE_URL", "https://radar.example.com/");
+        // Exercise the pure core so the test never mutates the process-global
+        // RADAR_PUBLIC_BASE_URL (which would race sibling tests in parallel).
         assert_eq!(
-            slack_diff_url("abc-123"),
+            diff_url_from_base(Some("https://radar.example.com/"), "abc-123"),
             Some("https://radar.example.com/diffs/abc-123".to_string()),
         );
-        std::env::remove_var("RADAR_PUBLIC_BASE_URL");
     }
 
     #[test]
     fn slack_diff_url_none_when_base_unset() {
-        std::env::remove_var("RADAR_PUBLIC_BASE_URL");
-        assert_eq!(slack_diff_url("abc-123"), None);
+        assert_eq!(diff_url_from_base(None, "abc-123"), None);
+        assert_eq!(diff_url_from_base(Some("  "), "abc-123"), None);
     }
 
     #[test]

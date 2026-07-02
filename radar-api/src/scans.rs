@@ -726,6 +726,20 @@ mod tests {
         captured_at: &str,
         yaml: &str,
     ) {
+        // spec_version.service_id references service(id). SQLite's test pool has
+        // FKs off, but Postgres always enforces them, so ensure the parent row
+        // exists first (idempotent — several specs share one service).
+        q!(
+            "INSERT INTO service (id, name, repo_url, owner_team, spec_format) \
+             VALUES (?, ?, 'https://example.com/repo', 'team', 'openapi') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(service_id)
+        .bind(service_id)
+        .execute(pool)
+        .await
+        .expect("insert service");
+
         q!(
             "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
              VALUES (?, ?, 'test', ?, 'openapi', ?)",

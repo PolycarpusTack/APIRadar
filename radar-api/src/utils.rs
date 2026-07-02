@@ -12,6 +12,14 @@ use uuid::Uuid;
 /// When `RADAR_ALLOWED_HOSTS` is unset or empty, all non-SSRF hosts are allowed.
 pub(crate) fn is_host_allowed(url_str: &str) -> bool {
     let allowlist = std::env::var("RADAR_ALLOWED_HOSTS").unwrap_or_default();
+    host_matches_allowlist(url_str, &allowlist)
+}
+
+/// Pure matcher: does `url_str`'s host match `allowlist` (comma-separated
+/// glob-style patterns)? An empty allowlist permits all hosts (SSRF guard still
+/// applies at the call site). Kept free of process-global env reads so tests can
+/// exercise it hermetically without racing on `RADAR_ALLOWED_HOSTS`.
+fn host_matches_allowlist(url_str: &str, allowlist: &str) -> bool {
     if allowlist.trim().is_empty() {
         return true; // no restriction beyond SSRF guard
     }
@@ -465,32 +473,41 @@ mod tests {
         assert!(is_ssrf_blocked("https://[fe80::1]/hook"));
     }
 
-    // is_host_allowed — covers empty list, exact match, wildcard subdomain
+    // host_matches_allowlist — covers empty list, exact match, wildcard
+    // subdomain. Uses the pure matcher (not is_host_allowed) so the tests never
+    // mutate the process-global RADAR_ALLOWED_HOSTS and cannot race each other.
     #[test]
     fn host_allowed_empty_list_permits_all() {
-        std::env::remove_var("RADAR_ALLOWED_HOSTS");
-        assert!(is_host_allowed("https://api.github.com/hook"));
-        assert!(is_host_allowed("https://example.com/hook"));
+        assert!(host_matches_allowlist("https://api.github.com/hook", ""));
+        assert!(host_matches_allowlist("https://example.com/hook", "  "));
     }
 
     #[test]
     fn host_allowed_exact_match() {
-        std::env::set_var("RADAR_ALLOWED_HOSTS", "api.github.com,hooks.slack.com");
-        assert!(is_host_allowed("https://api.github.com/hook"));
-        assert!(is_host_allowed(
-            "https://hooks.slack.com/services/T0/B0/xyz"
+        let list = "api.github.com,hooks.slack.com";
+        assert!(host_matches_allowlist("https://api.github.com/hook", list));
+        assert!(host_matches_allowlist(
+            "https://hooks.slack.com/services/T0/B0/xyz",
+            list
         ));
-        assert!(!is_host_allowed("https://evil.com/hook"));
-        std::env::remove_var("RADAR_ALLOWED_HOSTS");
+        assert!(!host_matches_allowlist("https://evil.com/hook", list));
     }
 
     #[test]
     fn host_allowed_wildcard_subdomain() {
-        std::env::set_var("RADAR_ALLOWED_HOSTS", "*.internal");
-        assert!(is_host_allowed("https://api.internal/hook"));
-        assert!(is_host_allowed("https://build.ci.internal/hook"));
-        assert!(!is_host_allowed("https://notinternal.com/hook"));
-        assert!(!is_host_allowed("https://evil.internal.attacker.com/hook"));
-        std::env::remove_var("RADAR_ALLOWED_HOSTS");
+        let list = "*.internal";
+        assert!(host_matches_allowlist("https://api.internal/hook", list));
+        assert!(host_matches_allowlist(
+            "https://build.ci.internal/hook",
+            list
+        ));
+        assert!(!host_matches_allowlist(
+            "https://notinternal.com/hook",
+            list
+        ));
+        assert!(!host_matches_allowlist(
+            "https://evil.internal.attacker.com/hook",
+            list
+        ));
     }
 }
