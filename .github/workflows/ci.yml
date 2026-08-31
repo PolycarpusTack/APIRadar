@@ -122,11 +122,6 @@ jobs:
           # Root CA
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
             -keyout ca.key -out ca.crt -subj "/CN=radar-test-ca"
-          # A second, unrelated CA: the negative test points verify-full at
-          # this and must be refused. Using a real-but-wrong CA keeps the
-          # expected outcome identical here and on a developer machine.
-          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-            -keyout other-ca.key -out other-ca.crt -subj "/CN=unrelated-ca"
           # Server cert signed by that CA, with a SAN for localhost
           openssl req -newkey rsa:2048 -nodes \
             -keyout server.key -out server.csr -subj "/CN=localhost"
@@ -165,18 +160,32 @@ jobs:
           done
           docker exec pg-tls psql -U postgres -c "SHOW ssl;" | grep -q on
 
+      # `rustls` is required here: with --no-default-features sqlx-cli is built
+      # with no TLS support at all and fails with "TLS upgrade required by
+      # connect options but SQLx was built without TLS support enabled".
       - name: Install sqlx-cli
-        run: cargo install sqlx-cli --no-default-features --features sqlite,postgres
+        run: cargo install sqlx-cli --no-default-features --features sqlite,postgres,rustls
 
+      # sslmode=require, not verify-full: sqlx-cli's `rustls` feature maps to
+      # runtime-tokio-rustls, which trusts webpki roots rather than the OS
+      # store, so it would not accept our test CA. Proving the migration path
+      # works over TLS is enough here — certificate verification is what the
+      # Rust tests below cover, against radar-api's own native-roots stack.
       - name: Run migrations over TLS
         env:
-          DATABASE_URL: postgres://postgres:postgres@localhost/radar_test?sslmode=verify-full
+          DATABASE_URL: postgres://postgres:postgres@localhost/radar_test?sslmode=require
         run: sqlx migrate run --source radar-api/migrations
 
       - name: Connect from sqlx over TLS and assert the session is encrypted
         env:
+          # No sslrootcert: verification must succeed via the SYSTEM trust
+          # store alone, which is what tls-rustls-ring-native-roots provides.
           RADAR_TEST_PG_TLS_URL: postgres://postgres:postgres@localhost/radar_test?sslmode=verify-full
-          RADAR_TEST_PG_TLS_BAD_CA: /tmp/pgtls/other-ca.crt
+          # 127.0.0.2 is loopback but is NOT in the certificate's SAN, so
+          # verify-full must reject it. Hostname mismatch is independent of
+          # what is trusted, unlike an "untrusted CA" which sslrootcert only
+          # augments rather than replaces.
+          RADAR_TEST_PG_TLS_WRONGHOST_URL: postgres://postgres:postgres@127.0.0.2/radar_test?sslmode=verify-full
         run: cargo test -p radar-api --test postgres_tls -- --nocapture
 
       - name: Tear down

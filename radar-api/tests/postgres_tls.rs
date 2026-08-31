@@ -57,23 +57,29 @@ async fn connects_over_tls_and_session_is_encrypted() {
     );
 }
 
-/// The negative half: pointed at a CA that did not sign the server's
-/// certificate, `verify-full` must refuse the connection.
+/// The negative half: `verify-full` must reject a certificate whose SAN does
+/// not cover the host we asked for.
 ///
-/// Without this, the positive test above could pass simply because
-/// verification is being skipped. Using an unrelated CA (rather than a missing
-/// file, or relying on the trust store's contents) makes the expected outcome
-/// identical locally and in CI.
+/// Two earlier attempts at this test were wrong, and both were wrong in the
+/// direction that would have made the positive test above meaningless:
+///
+///   1. Pointing `sslrootcert` at a nonexistent file — undefined once the URL
+///      already carries an `sslrootcert`.
+///   2. Pointing `sslrootcert` at a real-but-unrelated CA — this still
+///      CONNECTS whenever the genuine CA is present in the OS trust store,
+///      because `sslrootcert` *augments* the trust anchors rather than
+///      replacing them. Verified against a live server: it is not a way to
+///      simulate an untrusted chain.
+///
+/// Hostname mismatch is independent of what happens to be trusted, so it
+/// behaves identically on a developer machine and on a CI runner where the
+/// test CA has been installed system-wide.
 #[tokio::test]
-async fn verify_full_rejects_a_certificate_from_an_untrusted_ca() {
-    let (Some(base), Ok(bad_ca)) = (tls_url(), std::env::var("RADAR_TEST_PG_TLS_BAD_CA")) else {
-        eprintln!("Postgres TLS env not set — skipping untrusted-CA test");
+async fn verify_full_rejects_a_hostname_the_certificate_does_not_cover() {
+    let Ok(url) = std::env::var("RADAR_TEST_PG_TLS_WRONGHOST_URL") else {
+        eprintln!("RADAR_TEST_PG_TLS_WRONGHOST_URL unset — skipping hostname-mismatch test");
         return;
     };
-
-    // Rebuild the URL from scratch so there is exactly one sslrootcert.
-    let stripped = base.split('?').next().unwrap_or(&base);
-    let url = format!("{stripped}?sslmode=verify-full&sslrootcert={bad_ca}");
 
     let result = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
@@ -81,7 +87,10 @@ async fn verify_full_rejects_a_certificate_from_an_untrusted_ca() {
         .await;
 
     match result {
-        Ok(_) => panic!("verify-full accepted a certificate from an untrusted CA"),
-        Err(e) => eprintln!("correctly rejected untrusted CA: {e}"),
+        Ok(_) => panic!(
+            "verify-full accepted a certificate that does not cover the requested host — \
+             certificate verification is not actually happening"
+        ),
+        Err(e) => eprintln!("correctly rejected hostname mismatch: {e}"),
     }
 }
