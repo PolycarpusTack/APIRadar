@@ -306,15 +306,18 @@ async fn execute_scan(
     .execute(&pool)
     .await;
 
-    let http = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent("radar-api/scheduled-scan")
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
+    // F-08: pin to the addresses the SSRF guard approved for this exact URL, so
+    // the connection cannot be re-resolved to a private address after the check.
+    let http = match crate::utils::ssrf_pinned_client(
+        &spec_url,
+        std::time::Duration::from_secs(30),
+        Some("radar-api/scheduled-scan"),
+    )
+    .ok_or("spec_url failed SSRF validation")
     {
         Ok(c) => c,
         Err(e) => {
-            set_scan_status(&pool, &scan_id, &now, "failed", Some(&e.to_string())).await;
+            set_scan_status(&pool, &scan_id, &now, "failed", Some(e)).await;
             return;
         }
     };

@@ -335,9 +335,12 @@ async fn set_job_running(pool: &sqlx::AnyPool, job_id: &str) {
         .await;
 }
 
+/// Fallback client, used only on the test SSRF-bypass path where the target is
+/// an in-process echo server on 127.0.0.1 and there is nothing to pin.
+///
+/// Production requests go through [`crate::utils::ssrf_pinned_client`] instead
+/// — see the per-row pin in `dispatch_row`.
 fn build_http_client() -> reqwest::Client {
-    // Disable redirect following: a public URL could redirect to a private IP after
-    // the SSRF pre-check passes, bypassing the guard entirely.
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
@@ -547,6 +550,20 @@ async fn build_and_send(
     body: &str,
     capture_body: bool,
 ) -> Result<(u16, Option<String>), reqwest::Error> {
+    // F-08: pin to the addresses just approved for THIS url. Re-resolving the
+    // name at connect time is the rebinding window; a per-row client with a DNS
+    // override closes it. On the test bypass path there is nothing to pin, so
+    // the shared client is used as-is.
+    #[cfg(not(test))]
+    let pinned = crate::utils::ssrf_pinned_client(url, std::time::Duration::from_secs(10), None);
+    #[cfg(test)]
+    let pinned = if SSRF_BYPASS.with(|v| v.get()) {
+        None
+    } else {
+        crate::utils::ssrf_pinned_client(url, std::time::Duration::from_secs(10), None)
+    };
+    let client = pinned.as_ref().unwrap_or(client);
+
     let req = build_request(client, method, url, headers, row, body);
     let resp = req.send().await?;
     let status = resp.status().as_u16();

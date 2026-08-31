@@ -5018,6 +5018,10 @@ mod tests {
     // Verifies that dispatch_diff_event fires a real HTTP POST to the registered URL.
     #[tokio::test]
     async fn test_webhook_delivery_reaches_echo_server() {
+        // Delivery is now SSRF-checked and DNS-pinned at send time (F-08), not
+        // only at registration, so it refuses 127.0.0.1. Opt out for the echo
+        // server the same way csv_runner's tests do.
+        crate::webhooks::SSRF_BYPASS.with(|v| v.set(true));
         let echo = test_helpers::spawn_echo_server().await;
         let url = format!("http://127.0.0.1:{}/hook", echo.addr.port());
 
