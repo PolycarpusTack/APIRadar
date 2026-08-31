@@ -151,3 +151,20 @@ Every task must be labelled with exactly one hat before implementation begins:
 - `pnpm-lock.yaml` is committed and must never be `.gitignore`d
 - Clippy warnings are treated as errors (`-D warnings`) in CI
 - Test counts (approximate): radar-scanner 27, radar-api 171, radar-cli (unit + integration) ~55+
+
+---
+
+## Global governance (added 2026-08-31)
+
+Machine-wide defaults live in `~/.claude/CLAUDE.md` — always-on guardrails
+(anti-hallucination, anti-overengineering, anti-scope-creep, anti-duplication,
+anti-refactoring-without-tests) plus a domain-indexed guardrail library at
+`~/.claude/gpm/guardrails/`. Project rules above win where they conflict.
+
+Backlog/task structure extensions — story-AC traceability at task level, mandatory ST0
+SPIKE on `Confidence: Low`, PREPARATORY/REFACTORING sub-task buckets, and
+PARALLEL/SEQUENTIAL execution flags — are in
+`~/.claude/gpm/docs/backlog-builder-v5.2-extensions.md` (extends Backlog Builder v5.1).
+
+Agent library: `~/.claude/gpm/Agents/` (70), catalogued in `~/.claude/gpm/docs/AGENT-INDEX.md`.
+14 are globally active; symlink extras into this repo's `.claude/agents/` as the stage needs.
