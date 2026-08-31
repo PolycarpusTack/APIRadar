@@ -34,7 +34,7 @@ metrics-exporter-prometheus = { workspace = true }
 serde_yml = { workspace = true }
 percent-encoding = "2"
 base64 = "0.22"
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.10"
 hex = "0.4"
 url = "2"
