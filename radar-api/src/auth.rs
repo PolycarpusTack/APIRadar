@@ -106,6 +106,29 @@ struct OidcState {
     exp: usize,
 }
 
+/// Derive the tenant `org_id` from the identity provider's claims.
+///
+/// Returns `None` when the provider supplied nothing usable. That distinction
+/// is a security boundary, not a convenience: an empty `org_id` is this
+/// system's "no isolation" wildcard — [`require_org_owned`] short-circuits to
+/// `Ok` on it, [`assert_org_access`] skips its check, and the reporting
+/// queries spell it out as `(? = '' OR s.org_id = ?)`. A session carrying an
+/// empty org therefore reads *every* tenant's data, so callers must reject the
+/// login on `None` rather than substituting a default.
+fn derive_org_id(userinfo: &OidcUserInfo, org_claim: &str) -> Option<String> {
+    let candidate = if org_claim == "hd" {
+        userinfo.hd.clone().unwrap_or_else(|| userinfo.sub.clone())
+    } else {
+        userinfo.sub.clone()
+    };
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Sign a JwtClaims struct into an HS256 JWT string.
 pub(crate) fn sign_jwt(claims: &JwtClaims, secret: &str) -> Option<String> {
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -338,14 +361,43 @@ pub(crate) async fn oidc_callback(
     // Fetch user info
     let userinfo_url = disc.userinfo_endpoint.as_deref().unwrap_or("").to_string();
     let userinfo: OidcUserInfo = if !userinfo_url.is_empty() {
-        match client
+        // A failed userinfo call must abort the login. Defaulting here would
+        // yield `sub: ""` / `hd: None`, which derives an EMPTY org_id — and an
+        // empty org_id is this system's "no isolation" wildcard, so a provider
+        // hiccup (or a 403 from a declined `profile` scope) would mint a
+        // session able to read every org's data.
+        let resp = match client
             .get(&userinfo_url)
             .bearer_auth(&token_resp.access_token)
             .send()
             .await
         {
-            Ok(r) => r.json().await.unwrap_or_default(),
-            Err(_) => OidcUserInfo::default(),
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": format!("userinfo request failed: {e}")})),
+                )
+                    .into_response()
+            }
+        };
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("userinfo endpoint returned HTTP {status}")})),
+            )
+                .into_response();
+        }
+        match resp.json::<OidcUserInfo>().await {
+            Ok(u) => u,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": format!("userinfo parse failed: {e}")})),
+                )
+                    .into_response()
+            }
         }
     } else {
         // No userinfo endpoint — must verify id_token signature via JWKS before trusting
@@ -444,11 +496,16 @@ pub(crate) async fn oidc_callback(
         }
     };
 
-    // Derive org_id from configured claim
-    let org_id = if cfg.org_claim == "hd" {
-        userinfo.hd.clone().unwrap_or_else(|| userinfo.sub.clone())
-    } else {
-        userinfo.sub.clone()
+    // Derive org_id from the configured claim. `None` means the provider gave
+    // us nothing usable — fail the login rather than mint a cross-tenant
+    // session (see `derive_org_id`).
+    let Some(org_id) = derive_org_id(&userinfo, &cfg.org_claim) else {
+        tracing::warn!("OIDC login rejected: provider returned no usable org/sub claim");
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "identity provider returned no usable org claim"})),
+        )
+            .into_response();
     };
 
     let sub = userinfo
@@ -739,5 +796,86 @@ pub(crate) async fn require_org_owned(
             assert_org_access(&resource_org, caller_org_id, resource.desc())
         }
         None => Ok(()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F-01 regression: the OIDC callback must never mint an empty-org session.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bug: `userinfo` failures used to fall back to `OidcUserInfo::default()`,
+    /// which derives an EMPTY org_id — and an empty org_id disables tenant
+    /// isolation across the whole API. The default value must never yield a
+    /// usable org.
+    #[test]
+    fn default_userinfo_yields_no_org() {
+        let empty = OidcUserInfo::default();
+        assert_eq!(
+            derive_org_id(&empty, "hd"),
+            None,
+            "a defaulted userinfo must not produce an org_id — an empty org_id \
+             is the cross-tenant wildcard"
+        );
+        assert_eq!(derive_org_id(&empty, "sub"), None);
+    }
+
+    /// Whitespace-only claims are just as dangerous as empty ones once trimmed.
+    #[test]
+    fn blank_claims_yield_no_org() {
+        let blank = OidcUserInfo {
+            sub: "   ".to_string(),
+            hd: Some("\t".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(derive_org_id(&blank, "hd"), None);
+        assert_eq!(derive_org_id(&blank, "sub"), None);
+    }
+
+    #[test]
+    fn hd_claim_is_preferred_when_configured() {
+        let u = OidcUserInfo {
+            sub: "user-123".to_string(),
+            hd: Some("acme.example".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(derive_org_id(&u, "hd"), Some("acme.example".to_string()));
+    }
+
+    #[test]
+    fn hd_falls_back_to_sub_when_absent() {
+        let u = OidcUserInfo {
+            sub: "user-123".to_string(),
+            hd: None,
+            ..Default::default()
+        };
+        assert_eq!(derive_org_id(&u, "hd"), Some("user-123".to_string()));
+    }
+
+    #[test]
+    fn non_hd_claim_uses_sub_and_ignores_hd() {
+        let u = OidcUserInfo {
+            sub: "user-123".to_string(),
+            hd: Some("acme.example".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(derive_org_id(&u, "sub"), Some("user-123".to_string()));
+    }
+
+    /// Why the old `r.json().await.unwrap_or_default()` was exploitable: an
+    /// OAuth error body does not carry `sub`, so deserialization fails and the
+    /// old code silently substituted the all-access default. This test pins the
+    /// fact that such a body is NOT a valid identity.
+    #[test]
+    fn oauth_error_body_is_not_a_valid_identity() {
+        let err_body = r#"{"error":"insufficient_scope","error_description":"missing profile"}"#;
+        let parsed: Result<OidcUserInfo, _> = serde_json::from_str(err_body);
+        assert!(
+            parsed.is_err(),
+            "an OAuth error body must not deserialize into an identity"
+        );
     }
 }
