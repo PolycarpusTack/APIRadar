@@ -4,9 +4,34 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum BlockOn {
     Never,
-    AnyBreak,
+    /// Block on any breaking change, regardless of who we know about.
+    ///
+    /// This is the default: on a fresh install nobody has instrumented
+    /// anything, so `ActiveConsumers` would let every breaking change through
+    /// while reporting success. A team earns the narrower policy once its
+    /// evidence coverage is real.
     #[default]
+    AnyBreak,
     ActiveConsumers,
+}
+
+/// What we actually know about consumers of the service being checked.
+///
+/// The previous `has_active_consumers: bool` collapsed two very different
+/// situations into `false`: "we looked and nobody uses this" and "nobody has
+/// told us anything yet". Only the first is a reason to let a breaking change
+/// through; the second is the absence of an answer, and treating it as a pass
+/// is what made a fresh install silently permissive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumerEvidence {
+    /// At least one consumer appears in the blast radius.
+    Affected,
+    /// The blast radius is empty AND this service has evidence on file, so the
+    /// emptiness is a real answer.
+    NoneAffected,
+    /// The blast radius is empty and there is no evidence for this service at
+    /// all — we do not know who calls it.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -28,6 +53,9 @@ pub enum Verdict {
     Warn,
     Block,
     Overridden,
+    /// Blocked because there is no evidence for this service, so an empty
+    /// blast radius cannot be trusted to mean "nobody is affected".
+    InsufficientCoverage,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +124,39 @@ pub fn load_config(path: Option<&std::path::Path>) -> anyhow::Result<DriftConfig
     Ok(config)
 }
 
+impl Verdict {
+    /// The value persisted via `POST /v1/policy-decisions` and used in PR
+    /// comments.
+    ///
+    /// `InsufficientCoverage` reports as `"block"` on the wire: the
+    /// `policy_decision` table documents only pass|warn|block|overridden, and
+    /// the dashboard switches on those four. It *is* a block, so this is
+    /// accurate rather than merely convenient — but recording the distinction
+    /// server-side (so teams can count how often checks are blocked for lack
+    /// of instrumentation rather than for a real breaking change) needs a
+    /// migration and a UI change, and is deliberately left as a follow-up.
+    pub fn wire_str(&self) -> &'static str {
+        match self {
+            Verdict::Pass => "pass",
+            Verdict::Warn => "warn",
+            Verdict::Block | Verdict::InsufficientCoverage => "block",
+            Verdict::Overridden => "overridden",
+        }
+    }
+
+    /// Human-facing label, which does distinguish the two blocking reasons —
+    /// one is fixed by changing the API, the other by instrumenting consumers.
+    pub fn human_str(&self) -> &'static str {
+        match self {
+            Verdict::Pass => "PASS",
+            Verdict::Warn => "WARN",
+            Verdict::Block => "BLOCKED",
+            Verdict::Overridden => "OVERRIDDEN",
+            Verdict::InsufficientCoverage => "BLOCKED (insufficient evidence coverage)",
+        }
+    }
+}
+
 /// Determine the process exit code given the changes and policy.
 ///
 /// `has_label_override` should be `true` when `policy.allow_override_with` is configured and
@@ -103,7 +164,7 @@ pub fn load_config(path: Option<&std::path::Path>) -> anyhow::Result<DriftConfig
 pub fn exit_code(
     changes: &[radar_core::diff::DiffChange],
     policy: &PolicyConfig,
-    has_active_consumers: bool,
+    consumers: ConsumerEvidence,
     has_label_override: bool,
 ) -> i32 {
     use radar_core::models::Severity;
@@ -124,10 +185,18 @@ pub fn exit_code(
             }
         }
         BlockOn::ActiveConsumers => {
-            if has_breaking && has_active_consumers {
-                1
-            } else {
-                0
+            if !has_breaking {
+                return 0;
+            }
+            match consumers {
+                // Someone we know about is affected.
+                ConsumerEvidence::Affected => 1,
+                // We have evidence for this service and none of it points at
+                // the changed surface — an informed pass.
+                ConsumerEvidence::NoneAffected => 0,
+                // No evidence at all. The blast radius being empty tells us
+                // nothing, so treat it as unresolved rather than as safe.
+                ConsumerEvidence::Unknown => 1,
             }
         }
     }
@@ -140,7 +209,7 @@ pub fn decide(
     changes: &[radar_core::diff::DiffChange],
     policy: &PolicyConfig,
     fail_mode: &FailMode,
-    has_active_consumers: bool,
+    consumers: ConsumerEvidence,
     has_label_override: bool,
     api_error: bool,
 ) -> PolicyDecision {
@@ -179,7 +248,7 @@ pub fn decide(
                     }
                 }
             } else {
-                exit_code(changes, policy, has_active_consumers, has_label_override)
+                exit_code(changes, policy, consumers, has_label_override)
             };
             PolicyDecision {
                 verdict: Verdict::Warn,
@@ -202,9 +271,16 @@ pub fn decide(
                     exit_code: 0,
                 };
             }
-            let code = exit_code(changes, policy, has_active_consumers, has_label_override);
+            let code = exit_code(changes, policy, consumers, has_label_override);
             let verdict = if code == 0 {
                 Verdict::Pass
+            } else if matches!(policy.block_on, BlockOn::ActiveConsumers)
+                && consumers == ConsumerEvidence::Unknown
+            {
+                // Distinguish "we found an affected consumer" from "we have no
+                // idea who the consumers are". Both block, but only the second
+                // is fixed by instrumenting rather than by changing the API.
+                Verdict::InsufficientCoverage
             } else {
                 Verdict::Block
             };
@@ -230,7 +306,14 @@ mod tests {
     #[test]
     fn fail_mode_warn_always_exits_zero_with_warn_verdict() {
         let p = PolicyConfig::default();
-        let d = decide(&[breaking()], &p, &FailMode::Warn, true, false, false);
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Warn,
+            ConsumerEvidence::Affected,
+            false,
+            false,
+        );
         assert_eq!(d.exit_code, 0, "warn mode must never block");
         assert_eq!(d.verdict, Verdict::Warn);
     }
@@ -238,7 +321,14 @@ mod tests {
     #[test]
     fn fail_mode_open_api_error_uses_local_diff_breaking() {
         let p = PolicyConfig::default();
-        let d = decide(&[breaking()], &p, &FailMode::Open, false, false, true);
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Open,
+            ConsumerEvidence::NoneAffected,
+            false,
+            true,
+        );
         assert_eq!(d.exit_code, 1, "local breaking diff in open mode → exit 1");
         assert_eq!(
             d.verdict,
@@ -250,7 +340,14 @@ mod tests {
     #[test]
     fn fail_mode_open_api_error_uses_local_diff_clean() {
         let p = PolicyConfig::default();
-        let d = decide(&[], &p, &FailMode::Open, false, false, true);
+        let d = decide(
+            &[],
+            &p,
+            &FailMode::Open,
+            ConsumerEvidence::NoneAffected,
+            false,
+            true,
+        );
         assert_eq!(d.exit_code, 0, "clean diff in open mode → exit 0");
         assert_eq!(d.verdict, Verdict::Warn);
     }
@@ -258,9 +355,146 @@ mod tests {
     #[test]
     fn fail_mode_closed_api_error_blocks() {
         let p = PolicyConfig::default();
-        let d = decide(&[breaking()], &p, &FailMode::Closed, false, false, true);
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Closed,
+            ConsumerEvidence::NoneAffected,
+            false,
+            true,
+        );
         assert_eq!(d.exit_code, 1, "closed mode + api error → blocked");
         assert_eq!(d.verdict, Verdict::Block);
+    }
+
+    // ---- FIT-01: coverage-aware ActiveConsumers ----
+
+    /// The heart of the finding: on a fresh install nobody has instrumented
+    /// anything, so the blast radius is empty — and the old default let the
+    /// breaking change through while showing a green check.
+    #[test]
+    fn block_on_default_is_any_break() {
+        assert!(
+            matches!(BlockOn::default(), BlockOn::AnyBreak),
+            "the default must not depend on evidence nobody has collected yet"
+        );
+    }
+
+    #[test]
+    fn active_consumers_blocks_when_coverage_is_unknown() {
+        let p = PolicyConfig {
+            block_on: BlockOn::ActiveConsumers,
+            ..Default::default()
+        };
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Closed,
+            ConsumerEvidence::Unknown,
+            false,
+            false,
+        );
+        assert_eq!(d.exit_code, 1, "no evidence at all must not read as safe");
+        assert_eq!(d.verdict, Verdict::InsufficientCoverage);
+    }
+
+    #[test]
+    fn active_consumers_passes_when_evidence_exists_but_nobody_is_affected() {
+        let p = PolicyConfig {
+            block_on: BlockOn::ActiveConsumers,
+            ..Default::default()
+        };
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Closed,
+            ConsumerEvidence::NoneAffected,
+            false,
+            false,
+        );
+        assert_eq!(
+            d.exit_code, 0,
+            "an informed 'nobody uses this' is a real pass"
+        );
+        assert_eq!(d.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn active_consumers_blocks_when_a_consumer_is_affected() {
+        let p = PolicyConfig {
+            block_on: BlockOn::ActiveConsumers,
+            ..Default::default()
+        };
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Closed,
+            ConsumerEvidence::Affected,
+            false,
+            false,
+        );
+        assert_eq!(d.exit_code, 1);
+        assert_eq!(d.verdict, Verdict::Block);
+    }
+
+    /// Unknown coverage is only a problem when something breaking is present.
+    #[test]
+    fn unknown_coverage_does_not_block_a_safe_diff() {
+        let p = PolicyConfig {
+            block_on: BlockOn::ActiveConsumers,
+            ..Default::default()
+        };
+        let d = decide(
+            &[],
+            &p,
+            &FailMode::Closed,
+            ConsumerEvidence::Unknown,
+            false,
+            false,
+        );
+        assert_eq!(d.exit_code, 0);
+        assert_eq!(d.verdict, Verdict::Pass);
+    }
+
+    /// An explicit label override still wins — coverage does not create a new
+    /// way to be stuck.
+    #[test]
+    fn label_override_still_beats_insufficient_coverage() {
+        let p = PolicyConfig {
+            block_on: BlockOn::ActiveConsumers,
+            allow_override_with: Some("radar-override".into()),
+            ..Default::default()
+        };
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Closed,
+            ConsumerEvidence::Unknown,
+            true,
+            false,
+        );
+        assert_eq!(d.exit_code, 0);
+        assert_eq!(d.verdict, Verdict::Overridden);
+    }
+
+    #[test]
+    fn insufficient_coverage_is_a_block_on_the_wire() {
+        // The dashboard and policy_decision table know only four values, so the
+        // new verdict must not leak an unrecognised string into either.
+        assert_eq!(Verdict::InsufficientCoverage.wire_str(), "block");
+        assert_eq!(Verdict::Block.wire_str(), "block");
+        assert_eq!(Verdict::Pass.wire_str(), "pass");
+        assert_eq!(Verdict::Warn.wire_str(), "warn");
+        assert_eq!(Verdict::Overridden.wire_str(), "overridden");
+    }
+
+    #[test]
+    fn humans_can_tell_the_two_blocking_reasons_apart() {
+        assert_ne!(
+            Verdict::InsufficientCoverage.human_str(),
+            Verdict::Block.human_str(),
+            "one is fixed by changing the API, the other by instrumenting consumers"
+        );
     }
 
     #[test]
@@ -284,7 +518,10 @@ mod tests {
             lookback_days: 30,
             allow_override_with: None,
         };
-        assert_eq!(exit_code(&[breaking()], &p, true, false), 0);
+        assert_eq!(
+            exit_code(&[breaking()], &p, ConsumerEvidence::Affected, false),
+            0
+        );
     }
 
     #[test]
@@ -293,7 +530,10 @@ mod tests {
             block_on: BlockOn::AnyBreak,
             ..Default::default()
         };
-        assert_eq!(exit_code(&[breaking()], &p, false, false), 1);
+        assert_eq!(
+            exit_code(&[breaking()], &p, ConsumerEvidence::NoneAffected, false),
+            1
+        );
     }
 
     #[test]
@@ -302,8 +542,14 @@ mod tests {
             block_on: BlockOn::ActiveConsumers,
             ..Default::default()
         };
-        assert_eq!(exit_code(&[breaking()], &p, false, false), 0);
-        assert_eq!(exit_code(&[breaking()], &p, true, false), 1);
+        assert_eq!(
+            exit_code(&[breaking()], &p, ConsumerEvidence::NoneAffected, false),
+            0
+        );
+        assert_eq!(
+            exit_code(&[breaking()], &p, ConsumerEvidence::Affected, false),
+            1
+        );
     }
 
     #[test]
@@ -314,9 +560,15 @@ mod tests {
             ..Default::default()
         };
         // Without override label → blocks
-        assert_eq!(exit_code(&[breaking()], &p, false, false), 1);
+        assert_eq!(
+            exit_code(&[breaking()], &p, ConsumerEvidence::NoneAffected, false),
+            1
+        );
         // With override label → passes
-        assert_eq!(exit_code(&[breaking()], &p, false, true), 0);
+        assert_eq!(
+            exit_code(&[breaking()], &p, ConsumerEvidence::NoneAffected, true),
+            0
+        );
     }
 
     #[test]
@@ -327,7 +579,10 @@ mod tests {
             ..Default::default()
         };
         // has_label_override=true but no override configured → still blocks
-        assert_eq!(exit_code(&[breaking()], &p, false, true), 1);
+        assert_eq!(
+            exit_code(&[breaking()], &p, ConsumerEvidence::NoneAffected, true),
+            1
+        );
     }
 
     // ── A-4: FailMode::Open must apply block_on policy when API is reachable ──
@@ -339,7 +594,14 @@ mod tests {
             block_on: BlockOn::ActiveConsumers,
             ..Default::default()
         };
-        let d = decide(&[breaking()], &p, &FailMode::Open, false, false, false);
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Open,
+            ConsumerEvidence::NoneAffected,
+            false,
+            false,
+        );
         assert_eq!(
             d.exit_code, 0,
             "no active consumers → should not block in open mode"
@@ -353,7 +615,14 @@ mod tests {
             block_on: BlockOn::ActiveConsumers,
             ..Default::default()
         };
-        let d = decide(&[breaking()], &p, &FailMode::Open, true, false, false);
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Open,
+            ConsumerEvidence::Affected,
+            false,
+            false,
+        );
         assert_eq!(
             d.exit_code, 1,
             "active consumers + breaking → exit 1 in open mode"
@@ -367,7 +636,14 @@ mod tests {
             block_on: BlockOn::AnyBreak,
             ..Default::default()
         };
-        let d = decide(&[breaking()], &p, &FailMode::Open, false, false, false);
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Open,
+            ConsumerEvidence::NoneAffected,
+            false,
+            false,
+        );
         assert_eq!(
             d.exit_code, 1,
             "block_on=AnyBreak + breaking → exit 1 in open mode"
@@ -381,7 +657,14 @@ mod tests {
             block_on: BlockOn::Never,
             ..Default::default()
         };
-        let d = decide(&[breaking()], &p, &FailMode::Open, true, false, false);
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Open,
+            ConsumerEvidence::Affected,
+            false,
+            false,
+        );
         assert_eq!(
             d.exit_code, 0,
             "block_on=Never → always exit 0 regardless of consumers"
@@ -402,7 +685,14 @@ mod tests {
             allow_override_with: Some("label:drift-ack".to_string()),
             ..Default::default()
         };
-        let d = decide(&[breaking()], &p, &FailMode::Open, false, true, true);
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Open,
+            ConsumerEvidence::NoneAffected,
+            true,
+            true,
+        );
         assert_eq!(
             d.exit_code, 0,
             "valid label override honored in fail-open despite api error"
@@ -417,7 +707,14 @@ mod tests {
             block_on: BlockOn::Never,
             ..Default::default()
         };
-        let d = decide(&[breaking()], &p, &FailMode::Open, false, false, true);
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Open,
+            ConsumerEvidence::NoneAffected,
+            false,
+            true,
+        );
         assert_eq!(
             d.exit_code, 0,
             "block_on=never honored in fail-open despite api error"
@@ -433,7 +730,14 @@ mod tests {
             allow_override_with: None,
             ..Default::default()
         };
-        let d = decide(&[breaking()], &p, &FailMode::Open, false, true, true);
+        let d = decide(
+            &[breaking()],
+            &p,
+            &FailMode::Open,
+            ConsumerEvidence::NoneAffected,
+            true,
+            true,
+        );
         assert_eq!(
             d.exit_code, 1,
             "override not configured → breaking still blocks"

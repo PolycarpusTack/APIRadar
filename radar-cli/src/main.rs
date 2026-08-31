@@ -395,7 +395,12 @@ async fn main() -> Result<()> {
             }
 
             // Post diff and fetch blast radius when api_url and service_id are both set.
-            let mut has_active_consumers = false;
+            //
+            // FIT-01: an empty blast radius is ambiguous on its own — it means
+            // either "nobody is affected" or "nobody has instrumented anything
+            // yet". Start from Unknown and only downgrade to NoneAffected once
+            // the coverage query proves this service actually has evidence.
+            let mut consumers = policy::ConsumerEvidence::Unknown;
             let mut api_error = false;
             let mut posted_diff_id: Option<String> = None;
             let mut blast_radius_data: Option<render::BlastRadiusResponse> = None;
@@ -423,7 +428,29 @@ async fn main() -> Result<()> {
                         }
                         match api_client::get_blast_radius(url, &diff_id, token_ref).await {
                             Ok(br) => {
-                                has_active_consumers = !br.entries.is_empty();
+                                consumers = if br.entries.is_empty() {
+                                    // Ask whether we have ANY evidence for this
+                                    // service. Only then is "no entries" an answer.
+                                    match api_client::get_evidence_coverage_count(
+                                        url, svc_id, token_ref,
+                                    )
+                                    .await
+                                    {
+                                        Ok(0) => policy::ConsumerEvidence::Unknown,
+                                        Ok(_) => policy::ConsumerEvidence::NoneAffected,
+                                        Err(e) => {
+                                            if !json {
+                                                eprintln!(
+                                                    "Warning: could not read evidence coverage ({e}); \
+                                                     treating consumer data as unknown"
+                                                );
+                                            }
+                                            policy::ConsumerEvidence::Unknown
+                                        }
+                                    }
+                                } else {
+                                    policy::ConsumerEvidence::Affected
+                                };
                                 if !json {
                                     render::print_blast_radius(&br, use_color);
                                 }
@@ -476,7 +503,7 @@ async fn main() -> Result<()> {
                 &changes,
                 &pol,
                 &fail_mode,
-                has_active_consumers,
+                consumers,
                 has_label_override,
                 api_error,
             );
@@ -488,14 +515,28 @@ async fn main() -> Result<()> {
                 );
             }
 
+            // FIT-01: a block for want of evidence is fixed differently from a
+            // block for a genuinely affected consumer, so say which one it is
+            // and what to do about it.
+            if decision.verdict == policy::Verdict::InsufficientCoverage && !json {
+                let svc = service_id.as_deref().unwrap_or("<unknown>");
+                eprintln!(
+                    "{}.\n\n\
+                     This diff contains a breaking change, and Radar holds no evidence \
+                     for service '{svc}'. The blast radius is therefore empty because \
+                     nobody has told us who calls this API — not because nobody does.\n\n\
+                     Resolve it by either:\n  \
+                     * instrumenting consumers (OTel traces, `radar scan`, or Postman \
+                     collections) so the blast radius becomes meaningful, or\n  \
+                     * setting `policy.block_on: any_break` in .radar.yml to block on \
+                     breaking changes regardless of who we know about.",
+                    decision.verdict.human_str()
+                );
+            }
+
             // Post policy decision to radar-api when api_url is set.
             if let Some(ref url) = api_url {
-                let verdict_str = match &decision.verdict {
-                    policy::Verdict::Pass => "pass",
-                    policy::Verdict::Warn => "warn",
-                    policy::Verdict::Block => "block",
-                    policy::Verdict::Overridden => "overridden",
-                };
+                let verdict_str = decision.verdict.wire_str();
                 let fm_str = match &decision.fail_mode {
                     policy::FailMode::Closed => "closed",
                     policy::FailMode::Open => "open",
@@ -521,12 +562,7 @@ async fn main() -> Result<()> {
             if post_comment {
                 match github::GithubContext::from_env() {
                     Some(ctx) => {
-                        let verdict_str = match &decision.verdict {
-                            policy::Verdict::Pass => "pass",
-                            policy::Verdict::Warn => "warn",
-                            policy::Verdict::Block => "block",
-                            policy::Verdict::Overridden => "overridden",
-                        };
+                        let verdict_str = decision.verdict.wire_str();
                         let fm_str = match &decision.fail_mode {
                             policy::FailMode::Closed => "closed",
                             policy::FailMode::Open => "open",
@@ -576,12 +612,7 @@ async fn main() -> Result<()> {
                     .as_ref()
                     .map(|br| br.entries.len())
                     .unwrap_or(0);
-                let verdict_str = match &decision.verdict {
-                    policy::Verdict::Pass => "pass",
-                    policy::Verdict::Warn => "warn",
-                    policy::Verdict::Block => "block",
-                    policy::Verdict::Overridden => "overridden",
-                };
+                let verdict_str = decision.verdict.wire_str();
                 let dashboard_url =
                     if let (Some(ref url), Some(ref did)) = (&api_url, &posted_diff_id) {
                         Some(format!("{url}/app/diffs/{did}"))

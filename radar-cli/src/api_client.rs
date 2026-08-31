@@ -352,6 +352,46 @@ pub async fn check_diff_acknowledged(
 }
 
 /// GET /v1/diffs/{diff_id}/blast-radius — returns the parsed blast radius response.
+/// How many evidence rows exist for a service, across all consumers and
+/// sources.
+///
+/// This is what separates "we looked and nobody is affected" from "nobody has
+/// told us anything yet". An empty blast radius means the first only when this
+/// returns a non-zero count; otherwise the emptiness is simply the absence of
+/// data and must not be read as a pass.
+pub async fn get_evidence_coverage_count(
+    api_url: &str,
+    service_id: &str,
+    token: Option<&str>,
+) -> Result<usize> {
+    let (client, headers) = build_client(token)?;
+
+    let url = format!("{api_url}/v1/evidence/coverage?service_id={service_id}");
+    let resp = client
+        .get(&url)
+        .headers(headers)
+        .send()
+        .await
+        .context("failed to GET evidence coverage")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_else(|_| "<unreadable>".into());
+        bail!(
+            "API error fetching evidence coverage: {} — {}",
+            status,
+            text
+        );
+    }
+
+    let rows: Vec<serde_json::Value> = resp
+        .json()
+        .await
+        .context("failed to parse evidence coverage response")?;
+
+    Ok(rows.len())
+}
+
 pub async fn get_blast_radius(
     api_url: &str,
     diff_id: &str,
