@@ -605,7 +605,12 @@ pub fn build_router(
                 next.run(req).await
             }
         }))
-        .layer(cors);
+        .layer(cors)
+        // F-07: outermost, so a panic anywhere inside — handler, extractor or
+        // inner layer — becomes a 500 for that one request instead of taking
+        // the process down. This only works because the release profile
+        // unwinds; with `panic = "abort"` there is nothing to catch.
+        .layer(tower_http::catch_panic::CatchPanicLayer::new());
 
     if let Some(dir) = static_dir {
         // SPA fallback: serve index.html for any path not found in the static directory
@@ -2260,6 +2265,37 @@ mod tests {
             json2["entries"].as_array().unwrap().len(),
             0,
             "consumer with 10-day-old evidence must be excluded by max_age_days=7"
+        );
+    }
+
+    // ── F-07: panic isolation ────────────────────────────────────────────────
+
+    /// A panicking handler must become a 500 for that one request rather than
+    /// killing the process. This only works while the release profile unwinds
+    /// — if someone reinstates `panic = "abort"` in Cargo.toml, there is
+    /// nothing for CatchPanicLayer to catch and a single panic takes the whole
+    /// API down.
+    #[tokio::test]
+    async fn panicking_handler_is_contained_by_catch_panic_layer() {
+        // A named fn with an explicit return type: a bare `panic!()` in a
+        // closure leaves the never type to fall back, which 1.98 rejects.
+        async fn boom() -> &'static str {
+            panic!("deliberate test panic")
+        }
+
+        let app = axum::Router::new()
+            .route("/boom", axum::routing::get(boom))
+            .layer(tower_http::catch_panic::CatchPanicLayer::new());
+
+        let req = HttpRequest::builder()
+            .uri("/boom")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a panic must surface as 500, not abort the process"
         );
     }
 
