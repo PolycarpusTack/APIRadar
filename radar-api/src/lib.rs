@@ -33,6 +33,7 @@ pub(crate) mod webhooks;
 pub(crate) use ai_tests::templates_from_changes;
 pub(crate) use auth::{
     auth_middleware, oidc_callback, oidc_login, oidc_logout, oidc_me, JwtSecretExt, RequireAuth,
+    SingleTenantMode,
 };
 #[cfg(test)]
 pub(crate) use auth::{sign_jwt, JwtClaims};
@@ -525,10 +526,20 @@ pub fn build_router(
         // Outermost layer: inject RequireAuth + JwtSecretExt before auth_middleware runs.
         .layer(middleware::from_fn({
             let jwt_secret = jwt_secret.clone();
+            // F-02: a server has no tenant concept only when nothing enforces
+            // identity — no JWT secret, no service token, no require_auth.
+            // Decided once here rather than per request, so a stray env var
+            // cannot widen a caller's scope at runtime.
+            let single_tenant = !require_auth
+                && jwt_secret.as_deref().unwrap_or_default().is_empty()
+                && std::env::var("RADAR_SERVICE_TOKEN")
+                    .unwrap_or_default()
+                    .is_empty();
             move |mut req: Request, next: Next| {
                 let s = jwt_secret.clone();
                 async move {
                     req.extensions_mut().insert(RequireAuth(require_auth));
+                    req.extensions_mut().insert(SingleTenantMode(single_tenant));
                     req.extensions_mut().insert(JwtSecretExt(s));
                     next.run(req).await
                 }

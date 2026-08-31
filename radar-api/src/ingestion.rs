@@ -1,4 +1,4 @@
-use crate::auth::JwtClaims;
+use crate::auth::CallerOrg;
 use crate::errors::ApiError;
 use crate::sampling::load_sampling;
 use crate::utils::{field_in_deny_list, normalise_path, otlp_attr, sample_keep};
@@ -55,7 +55,7 @@ fn call_site_id(
 // POST /v1/usage/events
 pub(crate) async fn ingest_usage_event(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(events): Json<Vec<UsageEventRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     if events.len() > 500 {
@@ -64,7 +64,7 @@ pub(crate) async fn ingest_usage_event(
         ));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let now = Utc::now().to_rfc3339();
 
     // Phase 1 — filtering (reads only). Done before the transaction is opened so we
@@ -171,10 +171,10 @@ pub(crate) async fn upsert_call_sites(
 /// POST /v1/otlp/v1/traces — accept OTLP JSON trace export.
 pub(crate) async fn ingest_otlp_traces(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<Value>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let now = Utc::now().to_rfc3339();
     let mut accepted = 0usize;
 
@@ -284,7 +284,7 @@ pub(crate) async fn ingest_otlp_traces(
 /// POST /v1/gateway/logs
 pub(crate) async fn ingest_gateway_logs(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(entries): Json<Vec<GatewayLogEntry>>,
 ) -> Result<impl IntoResponse, ApiError> {
     if entries.len() > 5000 {
@@ -293,7 +293,7 @@ pub(crate) async fn ingest_gateway_logs(
         ));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let now = Utc::now().to_rfc3339();
     let mut accepted = 0usize;
 

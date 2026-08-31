@@ -1,4 +1,4 @@
-use crate::auth::{assert_org_access, JwtClaims};
+use crate::auth::{assert_org_access, CallerOrg};
 use crate::errors::ApiError;
 use axum::{
     extract::{Path, State},
@@ -40,10 +40,10 @@ fn mask_token(t: &str) -> String {
 // GET /v1/sandbox-envs
 pub(crate) async fn list_sandbox_envs(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let rows = q!(
         "SELECT id, name, base_url, bearer_token, description, created_at, updated_at \
@@ -77,14 +77,14 @@ pub(crate) async fn list_sandbox_envs(
 // POST /v1/sandbox-envs
 pub(crate) async fn create_sandbox_env(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<SandboxEnvBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.name.trim().is_empty() {
         return Err(ApiError::Unprocessable("name is required".into()));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let token = body.bearer_token.as_deref().unwrap_or("");
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -121,7 +121,7 @@ pub(crate) async fn create_sandbox_env(
 // PUT /v1/sandbox-envs/:id
 pub(crate) async fn update_sandbox_env(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Path(id): Path<String>,
     Json(body): Json<SandboxEnvBody>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -130,7 +130,7 @@ pub(crate) async fn update_sandbox_env(
         return Err(ApiError::Unprocessable("name is required".into()));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     // Verify ownership and fetch the current token so we can preserve it when
@@ -177,10 +177,10 @@ pub(crate) async fn update_sandbox_env(
 // DELETE /v1/sandbox-envs/:id
 pub(crate) async fn delete_sandbox_env(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let result = q!("DELETE FROM sandbox_env WHERE id = ? AND org_id = ?")
         .bind(&id)
@@ -198,12 +198,12 @@ pub(crate) async fn delete_sandbox_env(
 // GET /v1/spec-versions
 pub(crate) async fn list_spec_versions(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
     // Org isolation: mirror get_spec_version_raw — authenticated callers only see
     // spec versions for their own services. Empty org (desktop/no-auth) sees all.
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let rows = q!(
         r#"SELECT sv.id, sv.service_id, s.name AS service_name, sv.git_ref,
                   sv.spec_format, sv.captured_at
@@ -240,7 +240,7 @@ pub(crate) async fn list_spec_versions(
 pub(crate) async fn get_spec_version_raw(
     State(pool): State<sqlx::AnyPool>,
     Path(id): Path<String>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
     let row = q!(
@@ -254,7 +254,7 @@ pub(crate) async fn get_spec_version_raw(
     .await?
     .ok_or_else(|| ApiError::NotFound("spec version not found".into()))?;
 
-    let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let caller_org_id = caller.sql_scope().to_string();
     let row_org_id: String = row.try_get("service_org_id").unwrap_or_default();
     assert_org_access(&row_org_id, &caller_org_id, "spec version")?;
 

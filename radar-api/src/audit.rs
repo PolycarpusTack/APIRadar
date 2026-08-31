@@ -1,9 +1,9 @@
 // Audit event table — append-only via record_event(), read via GET /v1/audit-events.
 // POST /v1/audit-events lets external callers (CLI, integrations) record events too.
 
-use crate::auth::JwtClaims;
+use crate::auth::CallerOrg;
 use axum::{
-    extract::{Extension, Query, State},
+    extract::{Query, State},
     http::StatusCode,
     Json,
 };
@@ -130,14 +130,14 @@ fn row_to_json(
 
 pub(crate) async fn list_audit_events(
     State(pool): State<AnyPool>,
-    org: Option<Extension<JwtClaims>>,
+    caller: CallerOrg,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     // Org isolation: read events scoped to the caller's org. Empty org
     // (desktop/no-auth) reads only the events written in that same empty-org
     // mode — consistent with create_audit_event / record_event, which now bind
     // the caller's org rather than a hardcoded "default".
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let org_id = org_id.as_str();
 
     let base = "SELECT id, org_id, actor, action, entity_type, entity_id, meta, created_at \
@@ -180,10 +180,10 @@ pub(crate) async fn list_audit_events(
 
 pub(crate) async fn create_audit_event(
     State(pool): State<AnyPool>,
-    org: Option<Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<CreateBody>,
 ) -> (StatusCode, Json<Value>) {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     record_event(
         &pool,
         &org_id,

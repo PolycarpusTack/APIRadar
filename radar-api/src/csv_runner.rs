@@ -10,7 +10,7 @@ use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::auth::JwtClaims;
+use crate::auth::CallerOrg;
 use crate::errors::ApiError;
 use crate::utils::{is_host_allowed, is_ssrf_blocked};
 
@@ -104,7 +104,7 @@ struct RowOutcome {
 // POST /v1/csv-runs
 pub(crate) async fn create_csv_run(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<CreateCsvRunBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.rows.is_empty() {
@@ -135,7 +135,7 @@ pub(crate) async fn create_csv_run(
         }
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let total_rows = body.rows.len() as i64;
@@ -197,9 +197,9 @@ pub(crate) async fn create_csv_run(
 // GET /v1/csv-runs
 pub(crate) async fn list_csv_runs(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let rows = q!(
         "SELECT id, name, status, total_rows, completed_rows, error_count, error_message, \
@@ -217,10 +217,10 @@ pub(crate) async fn list_csv_runs(
 // GET /v1/csv-runs/:id
 pub(crate) async fn get_csv_run(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let row = q!(
         "SELECT id, name, status, total_rows, completed_rows, error_count, error_message, \
@@ -239,10 +239,10 @@ pub(crate) async fn get_csv_run(
 // DELETE /v1/csv-runs/:id
 pub(crate) async fn cancel_csv_run(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let result = q!("UPDATE csv_run_job SET status = 'cancelled' \
          WHERE id = ? AND org_id = ? AND status IN ('pending', 'running')",)
@@ -263,11 +263,11 @@ pub(crate) async fn cancel_csv_run(
 // GET /v1/csv-runs/:id/results
 pub(crate) async fn get_csv_run_results(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Path(id): Path<String>,
     Query(params): Query<ResultsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let exists = q!("SELECT 1 FROM csv_run_job WHERE id = ? AND org_id = ?")
         .bind(&id)

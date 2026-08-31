@@ -186,9 +186,9 @@ pub(crate) fn render_digest_html(data: &DigestData) -> String {
 
 pub(crate) async fn preview_digest(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<crate::auth::JwtClaims>>,
+    caller: crate::auth::CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let data = aggregate_digest(&pool, &org_id)
         .await
         .map_err(|_| ApiError::Unprocessable("failed to aggregate digest data".into()))?;

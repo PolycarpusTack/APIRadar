@@ -12,7 +12,7 @@ use sha2::Sha256;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::auth::JwtClaims;
+use crate::auth::CallerOrg;
 use crate::errors::ApiError;
 use crate::utils::{is_host_allowed, is_ssrf_blocked};
 
@@ -109,10 +109,10 @@ fn row_to_response(row: &sqlx::any::AnyRow, reveal_secret: bool) -> WebhookRespo
 
 pub(crate) async fn create_webhook(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<CreateWebhookBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     if is_ssrf_blocked(&body.url) || !is_host_allowed(&body.url) {
         return Err(ApiError::Unprocessable(
@@ -179,9 +179,9 @@ pub(crate) async fn create_webhook(
 
 pub(crate) async fn list_webhooks(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let rows = q!(
         "SELECT id, org_id, url, events, secret, active, created_at, type FROM webhook WHERE org_id = ? ORDER BY created_at DESC",
@@ -200,10 +200,10 @@ pub(crate) async fn list_webhooks(
 
 pub(crate) async fn delete_webhook(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let row = q!("SELECT id FROM webhook WHERE id = ? AND org_id = ?")
         .bind(&id)
@@ -230,10 +230,10 @@ pub(crate) async fn delete_webhook(
 
 pub(crate) async fn test_webhook(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let row =
         q!("SELECT id, url, secret, type FROM webhook WHERE id = ? AND org_id = ? AND active = 1",)
@@ -560,10 +560,10 @@ async fn deliver_webhook_event(t: DeliveryTask) {
 
 pub(crate) async fn list_deliveries(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     // Verify webhook belongs to caller's org
     let row = q!("SELECT id FROM webhook WHERE id = ? AND org_id = ?")

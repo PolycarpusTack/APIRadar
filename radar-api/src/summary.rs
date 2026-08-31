@@ -1,4 +1,4 @@
-use crate::auth::JwtClaims;
+use crate::auth::CallerOrg;
 use crate::errors::ApiError;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use chrono::{Duration, Utc};
@@ -7,7 +7,7 @@ use serde_json::json;
 // GET /v1/summary — KPI stats for the dashboard home page
 pub(crate) async fn get_summary(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
@@ -16,7 +16,7 @@ pub(crate) async fn get_summary(
     // `(? = '' OR ...)` guard makes the filter a no-op for the empty/desktop
     // org so single-tenant use still counts all rows. The org value is bound
     // twice because sqlx `Any` uses positional `?` placeholders.
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let breaking_row = q!(r#"
         SELECT COUNT(*) AS cnt FROM change c

@@ -1,4 +1,4 @@
-use crate::auth::{require_org_owned, JwtClaims, OrgResource};
+use crate::auth::{require_org_owned, CallerOrg, OrgResource};
 use crate::errors::ApiError;
 use axum::{
     extract::{Path, Query, State},
@@ -25,7 +25,7 @@ pub(crate) struct CreateAcknowledgementBody {
 /// POST /v1/acknowledgements — create a formal acknowledgement of a breaking change impact.
 pub(crate) async fn create_acknowledgement(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<CreateAcknowledgementBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.acknowledged_by.is_empty() {
@@ -34,7 +34,7 @@ pub(crate) async fn create_acknowledgement(
         ));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     // Org isolation: the referenced resources must belong to the caller's org
     // before we record an acknowledgement (or post a GitHub status) for them.
@@ -108,10 +108,10 @@ pub(crate) async fn create_acknowledgement(
 /// Excludes rows where expires_at is in the past.
 pub(crate) async fn list_diff_acknowledgements(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Path(diff_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let now = Utc::now().to_rfc3339();
 
     let rows = q!(
@@ -151,10 +151,10 @@ pub(crate) async fn list_diff_acknowledgements(
 /// GET /v1/acknowledgements — list all acknowledgements for the org (paginated).
 pub(crate) async fn list_acknowledgements(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let limit: i64 = params
         .get("limit")
         .and_then(|v| v.parse().ok())

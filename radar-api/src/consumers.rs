@@ -1,4 +1,4 @@
-use crate::auth::{assert_org_access, require_org_owned, JwtClaims, OrgResource};
+use crate::auth::{assert_org_access, require_org_owned, CallerOrg, OrgResource};
 use crate::errors::ApiError;
 use crate::utils::collection_evidence_id;
 use axum::{
@@ -51,11 +51,11 @@ pub(crate) struct CreateSubscriptionBody {
 pub(crate) async fn list_consumers(
     Path(service_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     // Org isolation: authenticated callers may only list consumers of their own services.
     if !org_id.is_empty() {
@@ -97,14 +97,14 @@ pub(crate) async fn list_consumers(
 // POST /v1/consumers
 pub(crate) async fn create_consumer(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<CreateConsumerBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.name.trim().is_empty() {
         return Err(ApiError::Unprocessable("name must not be empty".into()));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let id = Uuid::new_v4().to_string();
 
     q!(r#"
@@ -153,7 +153,7 @@ pub(crate) async fn create_consumer(
 // POST /v1/consumers/upsert — auto-register a consumer by name (idempotent on org_id+name).
 pub(crate) async fn upsert_consumer_by_name(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<UpsertConsumerByNameBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
@@ -163,7 +163,7 @@ pub(crate) async fn upsert_consumer_by_name(
         return Err(ApiError::Unprocessable("name must not be empty".into()));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     // Atomic upsert: INSERT ... ON CONFLICT (org_id, name) DO NOTHING, then
     // fetch back the (possibly pre-existing) row. This avoids the TOCTOU race
@@ -205,7 +205,7 @@ pub(crate) async fn upsert_consumer_by_name(
 // POST /v1/evidence/collection — write impact_evidence rows from a collection file scan.
 pub(crate) async fn ingest_collection_evidence(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(items): Json<Vec<CollectionEvidenceItem>>,
 ) -> Result<impl IntoResponse, ApiError> {
     if items.len() > 1000 {
@@ -214,7 +214,7 @@ pub(crate) async fn ingest_collection_evidence(
         ));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let now = Utc::now().to_rfc3339();
     let mut inserted = 0usize;
 
@@ -281,13 +281,13 @@ pub(crate) async fn ingest_collection_evidence(
 pub(crate) async fn create_subscription(
     Path(service_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<CreateSubscriptionBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
     // Org isolation: both the service and the consumer must belong to the caller's org.
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     require_org_owned(&pool, OrgResource::Service, &service_id, &org_id).await?;
     require_org_owned(&pool, OrgResource::Consumer, &body.consumer_id, &org_id).await?;
 
@@ -361,11 +361,11 @@ pub(crate) async fn create_subscription(
 // GET /v1/consumers — list all registered Consumer services
 pub(crate) async fn list_all_consumers(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let rows = if !org_id.is_empty() {
         q!(
