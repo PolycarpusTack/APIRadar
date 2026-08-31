@@ -51,11 +51,20 @@ jobs:
       - name: Run tests
         run: cargo test --all
 
-      # D-11: security audit — fails CI on known vulnerabilities
+      # D-11 / F-16: security audit — ADVISORY here, blocking in the nightly
+      # security-audit workflow.
+      #
+      # `cargo audit` checks Cargo.lock against the live RustSec advisory
+      # database, so its result depends on when it runs, not on what the PR
+      # changed. A new advisory published against any of ~395 transitive
+      # dependencies would otherwise red-light every open PR, blaming authors
+      # for something outside their change. Nightly still fails loudly, so the
+      # debt surfaces within a day.
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      - name: Security audit
+      - name: Security audit (advisory)
+        continue-on-error: true
         run: cargo audit
 
       - name: Build release binary (push to main only)
