@@ -24,7 +24,7 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tower-http = { version = "0.5", features = ["cors", "fs", "trace", "timeout"] }
 openapiv3 = "2"
-serde_yml = "0.0.12"
+serde_yml = "0.0.13"
 indexmap = { version = "2", features = ["serde"] }
 colored = "3"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
