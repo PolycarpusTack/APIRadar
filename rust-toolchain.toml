@@ -1,4 +1,9 @@
 [toolchain]
-channel = "stable"
+# Pinned to an exact release, not the floating "stable" channel.
+# CI runs `cargo clippy -- -D warnings`, so a floating channel means a new
+# clippy release can turn a lint into a hard build failure with no change to
+# this repo — which is exactly what broke `main` between 2026-07-02 and
+# 2026-08-31. Bump this deliberately and fix any new lints in the same PR.
+channel = "1.98.0"
 components = ["rustfmt", "clippy"]
 targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-apple-darwin"]

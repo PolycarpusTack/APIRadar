@@ -183,29 +183,24 @@ fn collect(
 /// Handles openapi-typescript-codegen and orval method naming patterns.
 /// Returns None when the name does not follow a recognized verb prefix.
 pub fn method_name_to_operation(name: &str) -> Option<String> {
-    let (http_method, rest) = if let Some(r) = name.strip_prefix("get") {
-        ("GET", r)
-    } else if let Some(r) = name.strip_prefix("list") {
-        ("GET", r)
-    } else if let Some(r) = name.strip_prefix("create") {
-        ("POST", r)
-    } else if let Some(r) = name.strip_prefix("post") {
-        ("POST", r)
-    } else if let Some(r) = name.strip_prefix("add") {
-        ("POST", r)
-    } else if let Some(r) = name.strip_prefix("update") {
-        ("PUT", r)
-    } else if let Some(r) = name.strip_prefix("put") {
-        ("PUT", r)
-    } else if let Some(r) = name.strip_prefix("patch") {
-        ("PATCH", r)
-    } else if let Some(r) = name.strip_prefix("delete") {
-        ("DELETE", r)
-    } else if let Some(r) = name.strip_prefix("remove") {
-        ("DELETE", r)
-    } else {
-        return None;
-    };
+    // Verb prefixes in match order — the first prefix that matches wins, so
+    // entries stay ordered even though no prefix here is a prefix of another.
+    const VERB_PREFIXES: &[(&str, &str)] = &[
+        ("get", "GET"),
+        ("list", "GET"),
+        ("create", "POST"),
+        ("post", "POST"),
+        ("add", "POST"),
+        ("update", "PUT"),
+        ("put", "PUT"),
+        ("patch", "PATCH"),
+        ("delete", "DELETE"),
+        ("remove", "DELETE"),
+    ];
+
+    let (http_method, rest) = VERB_PREFIXES
+        .iter()
+        .find_map(|(prefix, method)| name.strip_prefix(prefix).map(|rest| (*method, rest)))?;
 
     if rest.is_empty() {
         return None;
