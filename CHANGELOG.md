@@ -7,6 +7,115 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.3.0] — 2026-08-31
+
+Security and reliability work from a second full-codebase review, plus the
+dependency backlog that had accumulated while CI was red. **One default changes
+behaviour — see Breaking below before upgrading.**
+
+> **Version note:** the `0.2.1` entry below was written but the crate versions
+> were never bumped — every crate stayed at `0.2.0` and no git tag was created.
+> This release moves all crates and packages to `0.3.0` and tags it, so the
+> changelog and the code agree again.
+
+### Breaking
+
+- **`policy.block_on` now defaults to `any_break`** (was `active_consumers`).
+
+  Previously, a breaking change exited **0** whenever the blast radius was
+  empty — which on a fresh install it always is, because nobody has
+  instrumented anything yet. Radar was at its most permissive exactly when a
+  team had the least protection, and it reported success while doing it.
+
+  Repos relying on the old default **will start failing** on breaking changes.
+  To keep the previous behaviour:
+
+  ```yaml
+  # .radar.yml
+  policy:
+    block_on: active_consumers
+  ```
+
+- **Existing dashboard sessions are invalidated.** Session and OIDC CSRF-state
+  tokens are now signed with purpose-derived keys, so tokens issued before this
+  release no longer validate. Users sign in again once; in-flight logins simply
+  restart.
+
+- **`radar-api` refuses to start** when no authentication is configured and
+  `--bind` is reachable from outside the machine. Set `RADAR_JWT_SECRET`,
+  `RADAR_SERVICE_TOKEN`, or `RADAR_REQUIRE_AUTH=true`; bind to `127.0.0.1` for
+  desktop/local use; or set `RADAR_ALLOW_UNAUTHENTICATED=true` to keep serving
+  an open API deliberately.
+
+### Security
+
+- **OIDC login could mint a cross-tenant session.** The callback checked
+  neither the HTTP status nor the parse result of the `userinfo` response and
+  fell back to a default identity, producing an empty `org_id` — this system's
+  "no isolation" wildcard — in a valid 24-hour session cookie. Any
+  non-conforming body triggered it, including a `403 insufficient_scope` from a
+  user who declined the `profile` scope. The login now fails closed, and a
+  session is never signed without a usable org.
+- **id_token verification hardened** — the algorithm is pinned to an allowlist
+  of asymmetric algorithms instead of being read from the token header; the
+  issuer is pinned from discovery; and an OIDC `nonce` is now sent and asserted,
+  making an intercepted id_token non-replayable.
+- **Token confusion made structurally impossible** — session tokens and CSRF
+  state tokens previously shared one HS256 key and were kept apart only by
+  which fields serde happened to require. Each purpose now derives its own key.
+- **Session cookie `Secure` flag** is settable via `RADAR_COOKIE_SECURE`, rather
+  than inferred from the redirect URI — which silently dropped the flag behind a
+  TLS-terminating proxy.
+
+### Reliability
+
+- **A panic in one request no longer kills the server.** The release profile set
+  `panic = "abort"`, so any handler panic terminated the process; with no
+  unwinding, no catch-panic layer could intervene. Removed, and `CatchPanicLayer`
+  added, so a panic becomes a 500 for that request.
+- **New `insufficient coverage` verdict.** With `block_on: active_consumers`, an
+  empty blast radius for a service with *no evidence at all* is now reported as
+  unresolved rather than as a pass, with guidance on how to fix it.
+
+### Dependencies
+
+- Coordinated upgrades that Dependabot could not raise as single PRs, because
+  each crate only compiles alongside its siblings: **hmac 0.13 + sha2 0.11**,
+  **metrics 0.24 + metrics-exporter-prometheus 0.18**, and **tree-sitter 0.26 +
+  the python and go grammars**. HMAC signatures and spec hashes are unchanged
+  and now pinned by known-answer tests.
+- **crossbeam-epoch 0.9.20** for RUSTSEC-2026-0204.
+- **TLS unified on rustls.** `sqlx` and `lettre` moved off native-tls, removing
+  OpenSSL from the dependency graph entirely — so no system OpenSSL is needed to
+  build. Trust remains anchored in the OS certificate store, so a Postgres
+  server presenting a private CA still verifies.
+
+### Build and CI
+
+- **The toolchain is pinned to an exact release** (`1.98.0`). It tracked the
+  floating `stable` channel while CI runs `clippy -- -D warnings`, so a new
+  clippy release turned a lint into a hard build failure with no change to this
+  repo. `main` had been unbuildable since 2026-07-02 as a result.
+- **`cargo audit` is advisory on pull requests and blocking on a nightly
+  schedule.** It compares `Cargo.lock` against the live RustSec database, so its
+  result changes with time rather than with the code under review; a new
+  advisory against any transitive dependency used to red-light every open PR.
+- **PostgreSQL TLS is now tested** — a CI job connects with `sslmode=verify-full`
+  against a server whose CA is installed in the system trust store, and asserts
+  both that the session is encrypted and that a hostname mismatch is rejected.
+- **`/metrics` has its first test.** The endpoint had no coverage at all.
+
+### Fixed
+
+- `ApiError::BadRequest` renamed to `ApiError::Unprocessable` — it renders as
+  HTTP 422, not 400.
+- `radar-desktop/out/` build artefacts untracked (they were committed before the
+  ignore rule landed).
+- Dead `drop(pool)` calls and an unused `State` extractor removed from the auth
+  middleware.
+
+---
+
 ## [0.2.1] — 2026-07-02
 
 Security, correctness, and reliability hardening from a full-codebase review (EPIC M). No new user-facing features; existing behaviour is unchanged except where noted.
