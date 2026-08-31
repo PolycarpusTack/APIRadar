@@ -34,7 +34,7 @@ const KEY_DOMAIN_OIDC_STATE: &str = "radar.oidc-state.v1";
 
 /// Derive a purpose-specific signing key from the configured secret.
 fn derive_key(secret: &str, domain: &str) -> Vec<u8> {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
         .expect("HMAC accepts a key of any length");

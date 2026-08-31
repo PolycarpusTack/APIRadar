@@ -373,7 +373,10 @@ async fn execute_scan(
         }
     };
 
-    let hash = format!("{:x}", Sha256::digest(spec_text.as_bytes()));
+    // digest 0.11 returns `Array<u8, N>`, which no longer implements LowerHex.
+    // hex::encode produces the identical lowercase hex string, so hashes stored
+    // by earlier versions still compare equal.
+    let hash = hex::encode(Sha256::digest(spec_text.as_bytes()));
 
     // No change — mark ok and done.
     if last_spec_hash.as_deref() == Some(hash.as_str()) {
@@ -695,6 +698,22 @@ pub(crate) async fn run_history(
 
 #[cfg(test)]
 mod tests {
+    /// Known-answer test for the spec-content hash. digest 0.11 changed the
+    /// return type from GenericArray to Array, which dropped LowerHex and
+    /// forced the `format!("{:x}", ..)` call to become `hex::encode`. Those
+    /// must produce identical strings, because this hash is persisted and
+    /// compared against rows written by earlier versions.
+    ///
+    /// Reference: hashlib.sha256(b"openapi: 3.0.0").hexdigest()
+    #[test]
+    fn spec_hash_matches_known_answer() {
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            hex::encode(Sha256::digest(b"openapi: 3.0.0")),
+            "e02589bb1d473868dcf7b3aa04606ea7f19b148b307abc35f62cc83860ad2a1a"
+        );
+    }
+
     use super::fetch_previous_spec;
 
     async fn test_pool() -> sqlx::AnyPool {
