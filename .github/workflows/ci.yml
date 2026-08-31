@@ -192,6 +192,39 @@ jobs:
         if: always()
         run: docker rm -f pg-tls || true
 
+  # Performance SLOs. The bench file has declared these targets since EPIC B,
+  # but nothing ever ran it, so a regression could land unnoticed:
+  #
+  #   blast-radius query   p95 < 300 ms
+  #   usage ingest batch   p99 < 100 ms  (batch of 100)
+  #
+  # Criterion measures rather than asserts, so tests/slo_guard.rs does the
+  # asserting, and it runs --release because an SLO describes production.
+  # Headroom in release is 56x and 11x, so this gates real regressions without
+  # being a flaky timing test.
+  slo:
+    name: Performance SLOs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Enforce SLO bounds
+        run: cargo test --release -p radar-api --test slo_guard -- --nocapture
+
+      # Compile the criterion benches too. They are not executed here — a full
+      # measurement run takes minutes and its numbers would be noisy on a
+      # shared runner — but building them stops them rotting, which is how they
+      # came to be unrunnable in the first place.
+      - name: Build benchmarks (no run)
+        run: cargo bench --workspace --no-run
+
   # Rust (Postgres): gate migrations AND the full query layer on a real Postgres
   # 16 instance (portability regression guard).
   #
