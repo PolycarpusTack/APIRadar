@@ -91,6 +91,98 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
+  # F-39: prove TLS to PostgreSQL actually works, and actually verifies.
+  #
+  # The plain `rust-postgres` job connects without TLS, so nothing exercised the
+  # TLS path when sqlx moved from native-tls to rustls. This job connects with
+  # sslmode=verify-full against a Postgres presenting a certificate signed by a
+  # CA installed in the SYSTEM trust store — which is precisely the behaviour
+  # `tls-rustls-ring-native-roots` was chosen to preserve. If someone later
+  # switches to the `runtime-tokio-rustls` shorthand (webpki roots), this job
+  # goes red instead of the failure surfacing in production.
+  rust-postgres-tls:
+    name: Rust (Postgres over TLS)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Issue a CA and a server certificate for localhost
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pgtls
+          cd /tmp/pgtls
+          # Root CA
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout ca.key -out ca.crt -subj "/CN=radar-test-ca"
+          # A second, unrelated CA: the negative test points verify-full at
+          # this and must be refused. Using a real-but-wrong CA keeps the
+          # expected outcome identical here and on a developer machine.
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout other-ca.key -out other-ca.crt -subj "/CN=unrelated-ca"
+          # Server cert signed by that CA, with a SAN for localhost
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout server.key -out server.csr -subj "/CN=localhost"
+          printf "subjectAltName=DNS:localhost,IP:127.0.0.1\n" > san.ext
+          openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \
+            -CAcreateserial -out server.crt -days 1 -extfile san.ext
+          # Postgres refuses to start if the key is group/world readable.
+          sudo chmod 600 server.key
+          sudo chown 999:999 server.key server.crt
+
+      - name: Trust the CA system-wide
+        run: |
+          set -euo pipefail
+          sudo cp /tmp/pgtls/ca.crt /usr/local/share/ca-certificates/radar-test-ca.crt
+          sudo update-ca-certificates
+          # This is the load-bearing bit: verify-full below must succeed ONLY
+          # because the CA is in the OS store, not because verification is off.
+
+      - name: Start PostgreSQL with TLS enabled
+        run: |
+          set -euo pipefail
+          docker run -d --name pg-tls \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=radar_test \
+            -p 5432:5432 \
+            -v /tmp/pgtls:/certs:ro \
+            postgres:16 \
+            -c ssl=on \
+            -c ssl_cert_file=/certs/server.crt \
+            -c ssl_key_file=/certs/server.key
+          for i in $(seq 1 30); do
+            if docker exec pg-tls pg_isready -U postgres >/dev/null 2>&1; then
+              echo "postgres ready"; break
+            fi
+            sleep 2
+          done
+          docker exec pg-tls psql -U postgres -c "SHOW ssl;" | grep -q on
+
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features sqlite,postgres
+
+      - name: Run migrations over TLS
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost/radar_test?sslmode=verify-full
+        run: sqlx migrate run --source radar-api/migrations
+
+      - name: Connect from sqlx over TLS and assert the session is encrypted
+        env:
+          RADAR_TEST_PG_TLS_URL: postgres://postgres:postgres@localhost/radar_test?sslmode=verify-full
+          RADAR_TEST_PG_TLS_BAD_CA: /tmp/pgtls/other-ca.crt
+        run: cargo test -p radar-api --test postgres_tls -- --nocapture
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f pg-tls || true
+
   # Rust (Postgres): gate migrations AND the full query layer on a real Postgres
   # 16 instance (portability regression guard).
   #
