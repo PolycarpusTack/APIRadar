@@ -5,7 +5,7 @@ use axum::{
     Json,
 };
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Sha256;
@@ -750,6 +750,23 @@ async fn retry_pending_delivery(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Known-answer test. The other signing tests only assert determinism and
+    /// that different inputs differ — they would all still pass if the
+    /// algorithm itself changed. This pins the exact bytes against a value
+    /// computed independently with Python's hashlib:
+    ///
+    ///   hmac.new(b"test-secret", b'{"event":"ping"}', hashlib.sha256).hexdigest()
+    ///
+    /// Webhook consumers verify this signature, so a change here silently
+    /// breaks every existing integration.
+    #[test]
+    fn sign_payload_matches_known_answer() {
+        assert_eq!(
+            sign_payload("test-secret", br#"{"event":"ping"}"#),
+            "sha256=1948becfc8e40fd416f0431da9555961532a0de3b28a4e74200e91a0ead6c60d"
+        );
+    }
 
     #[test]
     fn sign_payload_starts_with_sha256_prefix() {
