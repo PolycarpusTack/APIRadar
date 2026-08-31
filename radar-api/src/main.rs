@@ -67,6 +67,19 @@ struct Args {
     max_body_size_mb: u32,
 }
 
+/// Does this bind address accept connections from outside this machine?
+///
+/// `0.0.0.0` was the only case the old warning caught; `[::]`, a LAN address
+/// and a hostname are equally reachable. Anything that fails to parse is
+/// treated as public, because guessing "local" on an address we do not
+/// understand is the dangerous direction to be wrong in.
+fn binds_publicly(bind: &str) -> bool {
+    match bind.parse::<std::net::SocketAddr>() {
+        Ok(addr) => !addr.ip().is_loopback(),
+        Err(_) => true,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -79,15 +92,46 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     info!(db_url = %redact_db_url(&args.db), bind = %args.bind, "starting radar-api");
 
-    // Warn when auth is disabled and the server is binding to all interfaces.
-    // In desktop sidecar mode, pass --bind 127.0.0.1:8080 to suppress this warning.
     let require_auth = std::env::var("RADAR_REQUIRE_AUTH")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    if !require_auth && args.bind.starts_with("0.0.0.0") {
+
+    // F-09: refuse to serve an unauthenticated API on a reachable address.
+    //
+    // Auth can be switched on three different ways, and the middleware honours
+    // all of them, so all three must count as "configured" here — checking
+    // only RADAR_REQUIRE_AUTH would refuse to start deployments that are
+    // perfectly well authenticated via a JWT secret or a service token.
+    let auth_configured = require_auth
+        || !std::env::var("RADAR_JWT_SECRET")
+            .unwrap_or_default()
+            .is_empty()
+        || !std::env::var("RADAR_SERVICE_TOKEN")
+            .unwrap_or_default()
+            .is_empty();
+    let allow_unauthenticated = std::env::var("RADAR_ALLOW_UNAUTHENTICATED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if !auth_configured && binds_publicly(&args.bind) && !allow_unauthenticated {
+        eprintln!(
+            "REFUSING TO START: no authentication is configured and --bind {} is reachable \
+             from outside this machine.\n\n\
+             Pick one:\n  \
+             * set RADAR_JWT_SECRET=<secret>        (OIDC / JWT sessions)\n  \
+             * set RADAR_SERVICE_TOKEN=<token>      (static bearer token)\n  \
+             * set RADAR_REQUIRE_AUTH=true          (reject unauthenticated requests)\n  \
+             * pass --bind 127.0.0.1:<port>         (desktop / local-only)\n\n\
+             To serve an unauthenticated API on purpose, set \
+             RADAR_ALLOW_UNAUTHENTICATED=true.",
+            args.bind
+        );
+        std::process::exit(2);
+    }
+    if !auth_configured && allow_unauthenticated {
         tracing::warn!(
-            "SECURITY: RADAR_REQUIRE_AUTH is not set — API is unauthenticated on {}. \
-             Set RADAR_REQUIRE_AUTH=true or pass --bind 127.0.0.1:<port> for local-only access.",
+            "SECURITY: serving an UNAUTHENTICATED API on {} because \
+             RADAR_ALLOW_UNAUTHENTICATED is set.",
             args.bind
         );
     }
@@ -153,4 +197,39 @@ async fn main() -> Result<()> {
         max_body_bytes,
     )
     .await
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::binds_publicly;
+
+    #[test]
+    fn loopback_is_not_public() {
+        assert!(!binds_publicly("127.0.0.1:8080"));
+        assert!(!binds_publicly("127.0.0.1:17380"));
+        assert!(!binds_publicly("[::1]:8080"));
+    }
+
+    #[test]
+    fn wildcard_is_public() {
+        // The only case the old `starts_with("0.0.0.0")` check caught...
+        assert!(binds_publicly("0.0.0.0:8080"));
+        // ...and the one it missed entirely.
+        assert!(binds_publicly("[::]:8080"));
+    }
+
+    #[test]
+    fn lan_address_is_public() {
+        assert!(binds_publicly("192.168.1.50:8080"));
+        assert!(binds_publicly("10.0.0.5:8080"));
+    }
+
+    #[test]
+    fn unparseable_is_treated_as_public() {
+        // Fail safe: guessing "local" for an address we cannot parse is the
+        // dangerous direction to be wrong in.
+        assert!(binds_publicly("localhost:8080"));
+        assert!(binds_publicly("not-an-address"));
+        assert!(binds_publicly(""));
+    }
 }

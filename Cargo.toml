@@ -7,7 +7,11 @@ opt-level    = 3       # maximum speed
 lto          = "thin"  # link-time optimisation (smaller binary, faster startup)
 codegen-units = 1      # single codegen unit for better inlining
 strip        = "symbols"  # remove debug symbols → ~60% smaller binary on Linux/Mac
-panic        = "abort" # no unwinding tables → smaller binary
+# NOTE: `panic = "abort"` was removed deliberately (F-07). It is a reasonable
+# trade for a CLI, but radar-api is a long-running server: with `abort`, a
+# panic in ONE request terminates the whole process, and no catch-panic layer
+# can intervene because there is no unwinding to catch. Unwinding costs some
+# binary size and buys per-request fault isolation.
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -26,7 +30,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-tower-http = { version = "0.5", features = ["cors", "fs", "trace", "timeout"] }
+tower-http = { version = "0.5", features = ["cors", "fs", "trace", "timeout", "catch-panic"] }
 openapiv3 = "2"
 serde_yml = "0.0.13"
 indexmap = { version = "2", features = ["serde"] }

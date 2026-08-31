@@ -610,10 +610,16 @@ pub(crate) async fn oidc_callback(
         }
     };
 
-    let secure_flag = if cfg.redirect_uri.starts_with("https") {
-        "; Secure"
-    } else {
-        ""
+    // F-14: behind a TLS-terminating proxy the redirect_uri is often plain
+    // http even though the browser connection is https, and inferring the
+    // flag from it silently drops `Secure` exactly where it matters most.
+    // RADAR_COOKIE_SECURE settles it explicitly; the old heuristic remains the
+    // default so local http development keeps working untouched.
+    let secure_flag = match std::env::var("RADAR_COOKIE_SECURE") {
+        Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => "; Secure",
+        Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => "",
+        _ if cfg.redirect_uri.starts_with("https") => "; Secure",
+        _ => "",
     };
     let session_cookie = format!(
         "radar_session={session_token}; HttpOnly; SameSite=Lax; Max-Age=86400; Path=/{secure_flag}"
