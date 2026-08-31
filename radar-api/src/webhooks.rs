@@ -16,6 +16,31 @@ use crate::auth::CallerOrg;
 use crate::errors::ApiError;
 use crate::utils::{is_host_allowed, is_ssrf_blocked};
 
+// Delivery now validates the target at send time, not only at registration —
+// a URL registered days ago can resolve somewhere else by the time a webhook
+// fires, which is the rebinding window F-08 is about. Tests deliver to an
+// in-process echo server on 127.0.0.1, so they opt out explicitly.
+// Compiled out of non-test builds; never reachable in production.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SSRF_BYPASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Client for one webhook delivery: pinned to validated addresses in
+/// production, plain in tests that target a local echo server.
+fn delivery_client(url: &str, user_agent: &str) -> Option<reqwest::Client> {
+    #[cfg(test)]
+    if SSRF_BYPASS.with(|v| v.get()) {
+        return reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .user_agent(user_agent)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .ok();
+    }
+    crate::utils::ssrf_pinned_client(url, std::time::Duration::from_secs(10), Some(user_agent))
+}
+
 // ---------------------------------------------------------------------------
 // HMAC-SHA256 payload signing (ADR-K-2)
 // ---------------------------------------------------------------------------
@@ -475,12 +500,18 @@ async fn deliver_webhook_event(t: DeliveryTask) {
     .execute(&pool)
     .await;
 
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .user_agent("radar-api/webhook")
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap_or_default();
+    // F-08: pin to the addresses the SSRF guard approved for this webhook's URL.
+    // Webhook targets are user-supplied and delivery is retried, so re-resolving
+    // the hostname on each attempt would give a rebinding attacker several
+    // chances to be handed a private address after passing validation at
+    // registration time.
+    let Some(http) = delivery_client(&url, "radar-api/webhook") else {
+        tracing::warn!(
+            webhook_url = %url,
+            "refusing webhook delivery: URL no longer resolves to a public address"
+        );
+        return;
+    };
 
     // Retry with exponential backoff: 1s, 4s, 16s
     let delays = [0u64, 1, 4, 16];
@@ -674,12 +705,18 @@ async fn retry_pending_delivery(
     let body = serde_json::to_string(&payload).unwrap_or_default();
     let now = Utc::now().to_rfc3339();
 
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .user_agent("radar-api/webhook-outbox")
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap_or_default();
+    // F-08: pin to the addresses the SSRF guard approved for this webhook's URL.
+    // Webhook targets are user-supplied and delivery is retried, so re-resolving
+    // the hostname on each attempt would give a rebinding attacker several
+    // chances to be handed a private address after passing validation at
+    // registration time.
+    let Some(http) = delivery_client(&url, "radar-api/webhook-outbox") else {
+        tracing::warn!(
+            webhook_url = %url,
+            "refusing webhook delivery: URL no longer resolves to a public address"
+        );
+        return;
+    };
 
     let delays = [0u64, 1, 4, 16];
     let mut last_error: Option<String> = None;

@@ -77,21 +77,70 @@ pub(crate) fn clamp_pagination(limit: Option<i64>, offset: Option<i64>) -> (i64,
 
 /// Returns true if the URL must be blocked (non-HTTPS, private address space, or unresolvable).
 /// Shared by webhook creation and scheduled-scan registration/execution.
-pub(crate) fn is_ssrf_blocked(url_str: &str) -> bool {
-    let Ok(url) = url::Url::parse(url_str) else {
-        return true;
-    };
+/// Resolve a URL's host **once** and return every address it maps to, having
+/// verified that none of them is private.
+///
+/// The address list is the point. `is_ssrf_blocked` on its own is a
+/// validate-then-fetch design: it resolves the name, approves it, and then
+/// reqwest resolves the same name *again* when the request is made. A domain
+/// under an attacker's control with a short TTL can answer with a public
+/// address for the check and `127.0.0.1` for the connection — the guard passes
+/// and the request still reaches the loopback interface. Handing the caller the
+/// exact addresses that were approved, so it can pin them, is what closes that
+/// window.
+///
+/// Returns `None` when the URL must not be fetched at all.
+pub(crate) fn ssrf_validated_addrs(url_str: &str) -> Option<(String, Vec<std::net::SocketAddr>)> {
+    let url = url::Url::parse(url_str).ok()?;
     if url.scheme() != "https" {
-        return true;
+        return None;
     }
-    let Some(host) = url.host_str() else {
-        return true;
-    };
+    let host = url.host_str()?.to_string();
+    let port = url.port_or_known_default().unwrap_or(443);
+
     use std::net::ToSocketAddrs;
-    match (host, 443u16).to_socket_addrs() {
-        Ok(addrs) => addrs.into_iter().any(|a| is_rfc1918_or_loopback(a.ip())),
-        Err(_) => true, // fail-safe: block if DNS resolution fails
+    let addrs: Vec<std::net::SocketAddr> = (host.as_str(), port).to_socket_addrs().ok()?.collect();
+    if addrs.is_empty() {
+        return None;
     }
+    // Every resolved address must be public: a name that returns one public and
+    // one private address is exactly the rebinding case, and approving the
+    // public one would let the connection pick the other.
+    if addrs.iter().any(|a| is_rfc1918_or_loopback(a.ip())) {
+        return None;
+    }
+    Some((host, addrs))
+}
+
+/// A reqwest client pinned to the addresses [`ssrf_validated_addrs`] approved.
+///
+/// `resolve_to_addrs` installs a DNS override for this host, so the connection
+/// cannot land anywhere other than an address that was checked — the name is
+/// never resolved a second time. Redirects are disabled because a redirect
+/// would reach a *different* host, which this pin says nothing about.
+pub(crate) fn ssrf_pinned_client(
+    url_str: &str,
+    timeout: std::time::Duration,
+    user_agent: Option<&str>,
+) -> Option<reqwest::Client> {
+    let (host, addrs) = ssrf_validated_addrs(url_str)?;
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .resolve_to_addrs(&host, &addrs);
+    if let Some(ua) = user_agent {
+        builder = builder.user_agent(ua);
+    }
+    builder.build().ok()
+}
+
+/// Whether this URL must not be fetched.
+///
+/// Kept as the cheap predicate for call sites that only need a yes/no. Anything
+/// that goes on to make the request should use [`ssrf_pinned_client`] instead,
+/// so the address it connects to is the address that was approved.
+pub(crate) fn is_ssrf_blocked(url_str: &str) -> bool {
+    ssrf_validated_addrs(url_str).is_none()
 }
 
 fn is_rfc1918_or_loopback(ip: std::net::IpAddr) -> bool {
@@ -317,6 +366,7 @@ pub(crate) fn parse_codeowners(content: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn constant_time_eq_matches_semantics() {
@@ -471,6 +521,80 @@ mod tests {
     fn ssrf_blocked_ipv6_link_local() {
         // fe80::/10 — link-local (equivalent to 169.254.0.0/16 for IPv6).
         assert!(is_ssrf_blocked("https://[fe80::1]/hook"));
+    }
+
+    // ---- F-08: validated addresses are returned so callers can pin them ----
+
+    #[test]
+    fn validated_addrs_returns_the_addresses_it_approved() {
+        // A literal resolves without external DNS, so this is hermetic.
+        let (host, addrs) =
+            ssrf_validated_addrs("https://93.184.216.34/spec.yaml").expect("public literal");
+        assert_eq!(host, "93.184.216.34");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].port(), 443, "https default port");
+        assert_eq!(addrs[0].ip().to_string(), "93.184.216.34");
+    }
+
+    #[test]
+    fn validated_addrs_honours_an_explicit_port() {
+        let (_, addrs) = ssrf_validated_addrs("https://93.184.216.34:8443/x").expect("public");
+        assert_eq!(
+            addrs[0].port(),
+            8443,
+            "pinning must target the port actually requested, not 443"
+        );
+    }
+
+    #[test]
+    fn validated_addrs_refuses_everything_the_guard_refuses() {
+        // The pin must never widen what is reachable relative to the predicate.
+        for blocked in [
+            "https://127.0.0.1/x",
+            "https://10.0.0.1/x",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://[::1]/x",
+            "http://93.184.216.34/x",
+            "not-a-url",
+            "",
+        ] {
+            assert!(
+                ssrf_validated_addrs(blocked).is_none(),
+                "{blocked} must not yield pinnable addresses"
+            );
+            assert!(is_ssrf_blocked(blocked), "{blocked} must stay blocked");
+        }
+    }
+
+    #[test]
+    fn the_predicate_and_the_pin_agree() {
+        // is_ssrf_blocked is implemented in terms of ssrf_validated_addrs, so a
+        // future change cannot let one accept what the other rejects.
+        for url in [
+            "https://93.184.216.34/x",
+            "https://127.0.0.1/x",
+            "http://93.184.216.34/x",
+            "https://[fd00::1]/x",
+        ] {
+            assert_eq!(
+                is_ssrf_blocked(url),
+                ssrf_validated_addrs(url).is_none(),
+                "predicate and pin disagree for {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pinned_client_is_only_built_for_an_allowed_url() {
+        let ua = Some("radar-api/test");
+        assert!(
+            ssrf_pinned_client("https://93.184.216.34/x", Duration::from_secs(1), ua).is_some(),
+            "a public https URL must yield a client"
+        );
+        assert!(
+            ssrf_pinned_client("https://127.0.0.1/x", Duration::from_secs(1), ua).is_none(),
+            "a loopback URL must yield no client at all"
+        );
     }
 
     // host_matches_allowlist — covers empty list, exact match, wildcard

@@ -47,14 +47,19 @@ fn validate_catalog_target(url: &str, token_env: Option<&str>) -> Result<(), Str
     Ok(())
 }
 
-/// HTTP client for catalog sync: no redirect following (redirects can escape the
-/// SSRF/host checks) and a bounded timeout so a hung endpoint can't stall a task.
-fn catalog_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+/// HTTP client for catalog sync, pinned to the addresses the SSRF guard
+/// approved for `url`.
+///
+/// F-08: the guard used to validate a hostname and then let reqwest resolve it
+/// again at connect time, so a short-TTL attacker domain could answer public
+/// for the check and private for the request. The client returned here carries
+/// a DNS override for that host, so the connection can only reach an address
+/// that was checked. Redirects stay disabled — a redirect targets a different
+/// host, which this pin says nothing about.
+///
+/// `None` means the URL failed validation and must not be fetched.
+fn catalog_http_client(url: &str) -> Option<reqwest::Client> {
+    crate::utils::ssrf_pinned_client(url, std::time::Duration::from_secs(15), None)
 }
 
 #[derive(serde::Deserialize)]
@@ -227,7 +232,13 @@ async fn sync_codeowners_source(
     url: &str,
     token: Option<&str>,
 ) -> (usize, Option<String>) {
-    let mut req = catalog_http_client().get(url);
+    let Some(client) = catalog_http_client(url) else {
+        return (
+            0,
+            Some("url blocked by SSRF guard (must be HTTPS to a public host)".to_string()),
+        );
+    };
+    let mut req = client.get(url);
     if let Some(t) = token {
         req = req.bearer_auth(t);
     }
@@ -300,7 +311,13 @@ async fn sync_backstage_source(
         base_url.trim_end_matches('/')
     );
 
-    let mut req = catalog_http_client().get(&url);
+    let Some(client) = catalog_http_client(&url) else {
+        return (
+            0,
+            Some("url blocked by SSRF guard (must be HTTPS to a public host)".to_string()),
+        );
+    };
+    let mut req = client.get(&url);
     if let Some(t) = token {
         req = req.bearer_auth(t);
     }
