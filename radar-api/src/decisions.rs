@@ -1,4 +1,4 @@
-use crate::auth::JwtClaims;
+use crate::auth::CallerOrg;
 use crate::errors::ApiError;
 use axum::{
     extract::{Query, State},
@@ -23,10 +23,10 @@ pub(crate) struct CreatePolicyDecisionBody {
 /// GET /v1/policy-decisions — list policy decisions for the org (paginated).
 pub(crate) async fn list_policy_decisions(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let limit: i64 = params
         .get("limit")
         .and_then(|v| v.parse().ok())
@@ -71,7 +71,7 @@ pub(crate) async fn list_policy_decisions(
 // POST /v1/policy-decisions — persist a policy verdict from a drift check run
 pub(crate) async fn create_policy_decision(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<CreatePolicyDecisionBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.verdict.is_empty() {
@@ -83,7 +83,7 @@ pub(crate) async fn create_policy_decision(
         ));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 

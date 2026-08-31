@@ -1,4 +1,4 @@
-use crate::auth::{assert_org_access, JwtClaims};
+use crate::auth::{assert_org_access, CallerOrg};
 use crate::errors::ApiError;
 use crate::utils::apply_evolution_rules;
 use crate::PaginationParams;
@@ -210,9 +210,9 @@ mod tests {
 pub(crate) async fn list_diffs(
     Path(service_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     if !org_id.is_empty() {
         let svc_org: Option<String> = qs!("SELECT org_id FROM service WHERE id = ?")
@@ -272,7 +272,7 @@ pub(crate) async fn list_diffs(
 pub(crate) async fn create_diff(
     Path(service_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<CreateDiffBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.from_git_ref.is_empty() {
@@ -282,7 +282,7 @@ pub(crate) async fn create_diff(
         return Err(ApiError::Unprocessable("to_git_ref is required".into()));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let now = Utc::now().to_rfc3339();
 
     // Org isolation: reject if an existing service with this ID belongs to a different org.
@@ -439,11 +439,11 @@ pub(crate) async fn create_diff(
 pub(crate) async fn get_diff(
     Path(diff_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
-    let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let caller_org_id = caller.sql_scope().to_string();
 
     let row = q!(r#"
         SELECT d.id, sv_from.git_ref AS from_git_ref, sv_to.git_ref AS to_git_ref,
@@ -602,12 +602,12 @@ pub(crate) async fn get_shared_diff(
 pub(crate) async fn blast_radius(
     Path(diff_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Query(params): Query<BlastRadiusParams>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
-    let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let caller_org_id = caller.sql_scope().to_string();
 
     let diff_row = q!("SELECT id, from_version, to_version FROM diff WHERE id = ?")
         .bind(&diff_id)
@@ -959,11 +959,11 @@ pub(crate) async fn blast_radius(
 pub(crate) async fn list_all_diffs(
     State(pool): State<sqlx::AnyPool>,
     Query(page): Query<PaginationParams>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let limit = page.limit.clamp(1, 200);
     let offset = page.offset.max(0);
 
@@ -1030,7 +1030,7 @@ pub(crate) async fn list_all_diffs(
 pub(crate) async fn compare_specs(
     Path(service_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<CompareSpecsBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.base_ref.is_empty() {
@@ -1040,7 +1040,7 @@ pub(crate) async fn compare_specs(
         return Err(ApiError::Unprocessable("head_ref is required".into()));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let format = body.spec_format.to_lowercase();
 
     // Parse both specs and compute the diff.
@@ -1281,7 +1281,7 @@ struct BatchResultItem {
 
 pub(crate) async fn batch_compare(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(items): Json<Vec<BatchCompareItem>>,
 ) -> Result<impl IntoResponse, ApiError> {
     if items.len() > 50 {
@@ -1290,7 +1290,7 @@ pub(crate) async fn batch_compare(
         ));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .user_agent("radar-api/batch-compare")

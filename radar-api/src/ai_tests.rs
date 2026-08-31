@@ -1,5 +1,5 @@
 use crate::ai::{build_both_formats, detect_provider};
-use crate::auth::{assert_org_access, require_org_owned, JwtClaims, OrgResource};
+use crate::auth::{assert_org_access, require_org_owned, CallerOrg, OrgResource};
 use crate::errors::ApiError;
 use crate::PaginationParams;
 use axum::{
@@ -33,13 +33,13 @@ fn default_base_url() -> String {
 // POST /v1/generate-tests
 pub(crate) async fn generate_tests(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<GenerateTestsBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
     // Org isolation: any referenced diff/service/consumer must belong to the caller.
-    let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let caller_org_id = caller.sql_scope().to_string();
     if let Some(ref diff_id) = body.diff_id {
         require_org_owned(&pool, OrgResource::Diff, diff_id, &caller_org_id).await?;
     }
@@ -255,14 +255,14 @@ pub(crate) async fn generate_tests(
 // GET /v1/generate-tests
 pub(crate) async fn list_test_suites(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Query(page): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
     let limit = page.limit.clamp(1, 200);
     let offset = page.offset.max(0);
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     // Org isolation: authenticated callers only see suites whose service belongs
     // to their org. Empty org (desktop/no-auth) sees all.
@@ -319,10 +319,10 @@ pub(crate) async fn list_test_suites(
 pub(crate) async fn list_diff_test_suites(
     Path(diff_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
-    let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let caller_org_id = caller.sql_scope().to_string();
     require_org_owned(&pool, OrgResource::Diff, &diff_id, &caller_org_id).await?;
     let rows = q!(
         r#"SELECT id, collection_name, test_count, happy_count, negative_count, consumer_id, created_at
@@ -356,11 +356,11 @@ pub(crate) async fn list_diff_test_suites(
 pub(crate) async fn get_test_suite(
     Path(suite_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
-    let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let caller_org_id = caller.sql_scope().to_string();
 
     let row = q!(
         r#"SELECT ts.id, ts.service_id, ts.jira_key, ts.jira_summary, ts.collection_name,

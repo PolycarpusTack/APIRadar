@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::auth::JwtClaims;
+use crate::auth::CallerOrg;
 use crate::errors::ApiError;
 use crate::utils::{is_host_allowed, is_ssrf_blocked};
 use crate::webhooks::dispatch_diff_event;
@@ -77,10 +77,10 @@ fn row_to_response(row: &sqlx::any::AnyRow) -> ScanResponse {
 
 pub(crate) async fn create_scan(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<CreateScanBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     if body.interval_minutes < 15 {
         return Err(ApiError::Unprocessable(
@@ -164,9 +164,9 @@ pub(crate) async fn create_scan(
 
 pub(crate) async fn list_scans(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let rows = q!(
         "SELECT id, org_id, service_id, spec_url, format, interval_minutes, last_run_at, last_run_status, last_run_error, active, created_at FROM scheduled_scan WHERE org_id = ? ORDER BY created_at DESC",
@@ -185,10 +185,10 @@ pub(crate) async fn list_scans(
 
 pub(crate) async fn delete_scan(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let row = q!("SELECT id FROM scheduled_scan WHERE id = ? AND org_id = ?")
         .bind(&id)
@@ -661,9 +661,9 @@ async fn create_scan_diff(
 // GET /v1/scheduled-scans/run-history (basic: last_run_at per scan)
 pub(crate) async fn run_history(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     // NULLS LAST is PostgreSQL-only syntax; use CASE to sort nulls last on both SQLite and PostgreSQL.
     let rows = q!(
         "SELECT id, service_id, spec_url, last_run_at, last_run_status, last_run_error, last_spec_hash \

@@ -1,4 +1,4 @@
-use crate::auth::JwtClaims;
+use crate::auth::CallerOrg;
 use crate::errors::ApiError;
 use axum::{
     extract::{Path, State},
@@ -36,7 +36,7 @@ pub(crate) struct CreateEvolutionRuleBody {
 /// POST /v1/evolution-rules
 pub(crate) async fn create_evolution_rule(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<CreateEvolutionRuleBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.name.is_empty() {
@@ -54,7 +54,7 @@ pub(crate) async fn create_evolution_rule(
         ));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -88,10 +88,10 @@ pub(crate) async fn create_evolution_rule(
 /// GET /v1/evolution-rules
 pub(crate) async fn list_evolution_rules(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let rows = q!(
         "SELECT id, name, change_kind, path_pattern, severity_override, enabled, created_at
@@ -125,9 +125,9 @@ pub(crate) async fn list_evolution_rules(
 pub(crate) async fn delete_evolution_rule(
     Path(rule_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let result = q!("DELETE FROM evolution_rule WHERE id = ? AND org_id = ?")
         .bind(&rule_id)
@@ -148,10 +148,10 @@ pub(crate) async fn delete_evolution_rule(
 pub(crate) async fn toggle_evolution_rule(
     Path(rule_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let enabled: i64 = body
         .get("enabled")
         .and_then(|v| v.as_bool())

@@ -1,4 +1,4 @@
-use crate::auth::JwtClaims;
+use crate::auth::CallerOrg;
 use crate::errors::ApiError;
 use axum::{
     extract::{Path, Query, State},
@@ -70,9 +70,9 @@ pub(crate) async fn load_sampling(
 pub(crate) async fn get_sampling(
     Path(service_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let config = load_sampling(&pool, &service_id, &org_id).await;
     Ok((
         StatusCode::OK,
@@ -88,7 +88,7 @@ pub(crate) async fn get_sampling(
 pub(crate) async fn put_sampling(
     Path(service_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<ServiceSamplingBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if !(0.0..=1.0).contains(&body.sample_rate) {
@@ -96,7 +96,7 @@ pub(crate) async fn put_sampling(
             "sample_rate must be between 0.0 and 1.0".into(),
         ));
     }
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let deny_str = body.field_deny_list.join(",");
     let now = Utc::now().to_rfc3339();
 
@@ -132,11 +132,11 @@ pub(crate) async fn put_sampling(
 /// Field names match the TypeScript `CoverageRow` interface in `EvidenceCoveragePage.tsx`.
 pub(crate) async fn evidence_coverage(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let service_id = params.get("service_id").cloned().unwrap_or_default();
 
     // "Stale" = no recent evidence in the past 7 days.

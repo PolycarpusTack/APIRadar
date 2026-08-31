@@ -769,6 +769,102 @@ pub(crate) async fn auth_middleware(mut req: Request, next: Next) -> Response {
 }
 
 // ---------------------------------------------------------------------------
+// F-02: the caller's org, in a form that cannot silently become a wildcard
+// ---------------------------------------------------------------------------
+
+/// Whether this server was started without any tenant concept.
+///
+/// Decided once at router-build time from the auth configuration, never read
+/// from the environment per request. `true` only when no authentication is
+/// configured at all — desktop and single-tenant deployments.
+#[derive(Clone, Copy)]
+pub(crate) struct SingleTenantMode(pub(crate) bool);
+
+/// Who is asking.
+///
+/// This type exists because the previous representation — a bare `String`
+/// obtained with `org.map(..).unwrap_or_default()` — made the dangerous value
+/// the *easiest* one to produce. An absent or malformed claim yielded `""`,
+/// and `""` is this system's "every org" wildcard: `require_org_owned`
+/// short-circuits on it, `assert_org_access` skips its check, and the
+/// reporting queries read `(? = '' OR s.org_id = ?)`. F-01 was exactly that
+/// bug, reached through a single `unwrap_or_default()`.
+///
+/// Here the wildcard has its own variant, and that variant is only reachable
+/// when the server is explicitly in single-tenant mode. In a multi-tenant
+/// deployment a missing claim is an error, not an empty string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CallerOrg {
+    /// A specific tenant. Every org-scoped query must filter by this.
+    Tenant(String),
+    /// No tenant concept on this server, so isolation is meaningless and the
+    /// scope is deliberately unrestricted.
+    SingleTenant,
+}
+
+impl CallerOrg {
+    /// Resolve the caller's org, or `None` when the request must be rejected.
+    ///
+    /// Returning `None` rather than an empty string is the whole point: there
+    /// is no value a caller can end up with that quietly means "everything".
+    pub(crate) fn resolve(claims: Option<&JwtClaims>, mode: SingleTenantMode) -> Option<Self> {
+        match claims {
+            // A signed claim with a usable org.
+            Some(c) if !c.org_id.trim().is_empty() => {
+                Some(CallerOrg::Tenant(c.org_id.trim().to_string()))
+            }
+            // A signed claim with an empty org should be impossible since
+            // F-01, because the login refuses to mint one. Treat it as hostile
+            // rather than as the wildcard it used to become.
+            Some(_) => None,
+            // No claims: legitimate only when there are no tenants at all.
+            None if mode.0 => Some(CallerOrg::SingleTenant),
+            None => None,
+        }
+    }
+
+    /// The value to bind into an org-scoped `WHERE` clause.
+    ///
+    /// `SingleTenant` yields `""`, which the `(? = '' OR org_id = ?)` guards
+    /// read as "no filter". That is still a wildcard — but it is now only
+    /// produced by a variant that cannot exist unless the operator configured
+    /// a server with no tenants.
+    pub(crate) fn sql_scope(&self) -> &str {
+        match self {
+            CallerOrg::Tenant(id) => id,
+            CallerOrg::SingleTenant => "",
+        }
+    }
+}
+
+/// Extracting `CallerOrg` directly is what makes F-02 a compile-time property
+/// rather than a convention: a handler cannot obtain an org string without
+/// going through [`CallerOrg::resolve`], and a request that resolves to
+/// nothing is rejected here rather than silently scoped to every tenant.
+#[axum::async_trait]
+impl<S> axum::extract::FromRequestParts<S> for CallerOrg
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let claims = parts.extensions.get::<JwtClaims>();
+        // Absent extension → assume multi-tenant. Failing closed matters more
+        // than convenience if the layer is ever mis-ordered.
+        let mode = parts
+            .extensions
+            .get::<SingleTenantMode>()
+            .copied()
+            .unwrap_or(SingleTenantMode(false));
+        CallerOrg::resolve(claims, mode).ok_or(ApiError::Unauthorized)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // C-2: Org-isolation guard — single canonical check for all handlers
 // ---------------------------------------------------------------------------
 
@@ -943,6 +1039,68 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(derive_org_id(&u, "sub"), Some("user-123".to_string()));
+    }
+
+    // ---- F-02: the caller's org can never silently become a wildcard ----
+
+    fn claims_with(org: &str) -> JwtClaims {
+        JwtClaims {
+            sub: "user@example.com".into(),
+            org_id: org.into(),
+            exp: 9_999_999_999,
+        }
+    }
+
+    const MULTI: SingleTenantMode = SingleTenantMode(false);
+    const SINGLE: SingleTenantMode = SingleTenantMode(true);
+
+    /// The F-01 shape: claims that carry no usable org must be rejected, not
+    /// converted into the empty string that means "every tenant".
+    #[test]
+    fn empty_org_claim_is_rejected_not_widened() {
+        assert_eq!(CallerOrg::resolve(Some(&claims_with("")), MULTI), None);
+        assert_eq!(CallerOrg::resolve(Some(&claims_with("   ")), MULTI), None);
+        // ...and the same in single-tenant mode: a claim that exists but is
+        // unusable is hostile regardless of how the server is configured.
+        assert_eq!(CallerOrg::resolve(Some(&claims_with("")), SINGLE), None);
+    }
+
+    /// Missing claims in a multi-tenant deployment are an authentication
+    /// failure. Previously this produced "" via unwrap_or_default().
+    #[test]
+    fn missing_claims_are_rejected_when_tenants_exist() {
+        assert_eq!(CallerOrg::resolve(None, MULTI), None);
+    }
+
+    #[test]
+    fn missing_claims_are_allowed_only_in_single_tenant_mode() {
+        assert_eq!(
+            CallerOrg::resolve(None, SINGLE),
+            Some(CallerOrg::SingleTenant)
+        );
+    }
+
+    #[test]
+    fn a_real_org_resolves_to_that_tenant() {
+        assert_eq!(
+            CallerOrg::resolve(Some(&claims_with("acme.example")), MULTI),
+            Some(CallerOrg::Tenant("acme.example".into()))
+        );
+        // Surrounding whitespace is trimmed rather than producing a distinct
+        // tenant that matches no rows.
+        assert_eq!(
+            CallerOrg::resolve(Some(&claims_with("  acme.example  ")), MULTI),
+            Some(CallerOrg::Tenant("acme.example".into()))
+        );
+    }
+
+    #[test]
+    fn only_the_single_tenant_variant_yields_an_unrestricted_scope() {
+        assert_eq!(CallerOrg::SingleTenant.sql_scope(), "");
+        assert_eq!(
+            CallerOrg::Tenant("acme.example".into()).sql_scope(),
+            "acme.example"
+        );
     }
 
     // ---- Batch A: token domain separation (F-10) ----

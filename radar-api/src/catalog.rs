@@ -1,4 +1,4 @@
-use crate::auth::JwtClaims;
+use crate::auth::CallerOrg;
 use crate::errors::ApiError;
 use crate::utils::{is_host_allowed, is_ssrf_blocked, parse_codeowners};
 use axum::{
@@ -69,7 +69,7 @@ pub(crate) struct CreateCatalogSourceBody {
 /// POST /v1/catalog-sources — register a new catalog source configuration.
 pub(crate) async fn create_catalog_source(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<CreateCatalogSourceBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if !VALID_CATALOG_KINDS.contains(&body.kind.as_str()) {
@@ -87,7 +87,7 @@ pub(crate) async fn create_catalog_source(
         )));
     }
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let url = body.url.unwrap_or_default();
@@ -126,9 +126,9 @@ pub(crate) async fn create_catalog_source(
 /// GET /v1/catalog-sources — list all catalog sources for the org.
 pub(crate) async fn list_catalog_sources(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let rows = q!(
         "SELECT id, kind, name, url, token_env, sync_interval_secs, last_sync_at, last_sync_status, last_sync_error, created_at \
@@ -163,12 +163,12 @@ pub(crate) async fn list_catalog_sources(
 /// POST /v1/catalog-sources/:id/sync — trigger an immediate sync for a catalog source.
 pub(crate) async fn sync_catalog_source(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Path(source_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let now = Utc::now().to_rfc3339();
 
     let row = q!("SELECT kind, url, token_env FROM catalog_source WHERE id = ? AND org_id = ?")

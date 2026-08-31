@@ -1,4 +1,4 @@
-use crate::auth::{assert_org_access, JwtClaims};
+use crate::auth::{assert_org_access, CallerOrg};
 use crate::errors::ApiError;
 use axum::{
     extract::{Path, State},
@@ -21,13 +21,13 @@ pub(crate) struct CreateServiceBody {
 // POST /v1/services — explicitly register a Producer service
 pub(crate) async fn create_service(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
     Json(body): Json<CreateServiceBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.name.is_empty() {
         return Err(ApiError::Unprocessable("name is required".into()));
     }
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
     let id = body.id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
     // Org isolation: if a service with this ID already exists, ensure it belongs
@@ -80,11 +80,11 @@ pub(crate) async fn create_service(
 pub(crate) async fn get_service(
     Path(service_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
-    let caller_org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let caller_org_id = caller.sql_scope().to_string();
 
     let row =
         q!("SELECT id, name, repo_url, owner_team, spec_format, org_id FROM service WHERE id = ?",)
@@ -120,11 +120,11 @@ pub(crate) async fn get_service(
 // GET /v1/services — list all registered Producer services
 pub(crate) async fn list_services(
     State(pool): State<sqlx::AnyPool>,
-    org: Option<axum::extract::Extension<JwtClaims>>,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
 
-    let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
+    let org_id = caller.sql_scope().to_string();
 
     let rows = if !org_id.is_empty() {
         q!(
