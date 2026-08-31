@@ -115,7 +115,7 @@ pub(crate) async fn create_webhook(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
     if is_ssrf_blocked(&body.url) || !is_host_allowed(&body.url) {
-        return Err(ApiError::BadRequest(
+        return Err(ApiError::Unprocessable(
             "url must be a reachable HTTPS endpoint outside private address space".into(),
         ));
     }

@@ -38,7 +38,7 @@ pub(crate) async fn create_release_note(
 ) -> Result<impl IntoResponse, ApiError> {
     require_org_owned(&pool, OrgResource::Diff, &diff_id, &caller_org(&org)).await?;
     if body.content.is_empty() {
-        return Err(ApiError::BadRequest("content is required".into()));
+        return Err(ApiError::Unprocessable("content is required".into()));
     }
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
@@ -161,7 +161,7 @@ pub(crate) async fn patch_release_note_status(
     require_org_owned(&pool, OrgResource::ReleaseNote, &note_id, &caller_org(&org)).await?;
     const VALID_STATUSES: &[&str] = &["draft", "reviewed", "published", "superseded"];
     if !VALID_STATUSES.contains(&body.status.as_str()) {
-        return Err(ApiError::BadRequest(format!(
+        return Err(ApiError::Unprocessable(format!(
             "invalid status '{}'; must be one of: {}",
             body.status,
             VALID_STATUSES.join(", ")
@@ -188,7 +188,7 @@ pub(crate) async fn patch_release_note_status(
         _ => &["draft"][..],
     };
     if !allowed_next.contains(&body.status.as_str()) {
-        return Err(ApiError::BadRequest(format!(
+        return Err(ApiError::Unprocessable(format!(
             "transition '{current}' → '{}' is not allowed",
             body.status
         )));

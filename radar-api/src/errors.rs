@@ -9,7 +9,10 @@ use std::sync::OnceLock;
 
 pub(crate) enum ApiError {
     Db(sqlx::Error),
-    BadRequest(String),
+    /// Renders as HTTP 422. The request parsed but failed semantic
+    /// validation; named for the status it actually returns rather than for
+    /// 400, which it does not.
+    Unprocessable(String),
     NotFound(String),
     Forbidden(String),
     Unauthorized,
@@ -25,7 +28,7 @@ impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ApiError::Db(e) => write!(f, "database error: {e}"),
-            ApiError::BadRequest(m)
+            ApiError::Unprocessable(m)
             | ApiError::NotFound(m)
             | ApiError::Forbidden(m)
             | ApiError::TooManyRequests(m) => write!(f, "{m}"),
@@ -49,7 +52,7 @@ impl From<sqlx::Error> for ApiError {
 pub(crate) fn map_ingest_db_error(e: sqlx::Error) -> ApiError {
     if let sqlx::Error::Database(db) = &e {
         if db.is_foreign_key_violation() || db.is_check_violation() {
-            return ApiError::BadRequest(
+            return ApiError::Unprocessable(
                 "batch references an unknown consumer_id or service_id".to_string(),
             );
         }
@@ -68,7 +71,7 @@ impl IntoResponse for ApiError {
                 )
                     .into_response()
             }
-            ApiError::BadRequest(msg) => (
+            ApiError::Unprocessable(msg) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({"error": msg})),
             )

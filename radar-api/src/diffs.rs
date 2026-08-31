@@ -276,10 +276,10 @@ pub(crate) async fn create_diff(
     Json(body): Json<CreateDiffBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.from_git_ref.is_empty() {
-        return Err(ApiError::BadRequest("from_git_ref is required".into()));
+        return Err(ApiError::Unprocessable("from_git_ref is required".into()));
     }
     if body.to_git_ref.is_empty() {
-        return Err(ApiError::BadRequest("to_git_ref is required".into()));
+        return Err(ApiError::Unprocessable("to_git_ref is required".into()));
     }
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
@@ -1034,10 +1034,10 @@ pub(crate) async fn compare_specs(
     Json(body): Json<CompareSpecsBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.base_ref.is_empty() {
-        return Err(ApiError::BadRequest("base_ref is required".into()));
+        return Err(ApiError::Unprocessable("base_ref is required".into()));
     }
     if body.head_ref.is_empty() {
-        return Err(ApiError::BadRequest("head_ref is required".into()));
+        return Err(ApiError::Unprocessable("head_ref is required".into()));
     }
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
@@ -1285,7 +1285,9 @@ pub(crate) async fn batch_compare(
     Json(items): Json<Vec<BatchCompareItem>>,
 ) -> Result<impl IntoResponse, ApiError> {
     if items.len() > 50 {
-        return Err(ApiError::BadRequest("batch too large, max 50 items".into()));
+        return Err(ApiError::Unprocessable(
+            "batch too large, max 50 items".into(),
+        ));
     }
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();

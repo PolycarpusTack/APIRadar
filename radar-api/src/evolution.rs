@@ -40,16 +40,16 @@ pub(crate) async fn create_evolution_rule(
     Json(body): Json<CreateEvolutionRuleBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.name.is_empty() {
-        return Err(ApiError::BadRequest("name is required".into()));
+        return Err(ApiError::Unprocessable("name is required".into()));
     }
     if !VALID_CHANGE_KINDS.contains(&body.change_kind.as_str()) {
-        return Err(ApiError::BadRequest(format!(
+        return Err(ApiError::Unprocessable(format!(
             "change_kind must be one of: {}",
             VALID_CHANGE_KINDS.join(", ")
         )));
     }
     if body.severity_override != "safe" && body.severity_override != "non_breaking_risky" {
-        return Err(ApiError::BadRequest(
+        return Err(ApiError::Unprocessable(
             "severity_override must be 'safe' or 'non_breaking_risky'".into(),
         ));
     }
@@ -156,7 +156,7 @@ pub(crate) async fn toggle_evolution_rule(
         .get("enabled")
         .and_then(|v| v.as_bool())
         .map(|b| if b { 1 } else { 0 })
-        .ok_or_else(|| ApiError::BadRequest("body must include enabled: bool".into()))?;
+        .ok_or_else(|| ApiError::Unprocessable("body must include enabled: bool".into()))?;
 
     let result = q!("UPDATE evolution_rule SET enabled = ? WHERE id = ? AND org_id = ?")
         .bind(enabled)

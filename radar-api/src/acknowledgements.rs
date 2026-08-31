@@ -29,7 +29,7 @@ pub(crate) async fn create_acknowledgement(
     Json(body): Json<CreateAcknowledgementBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.acknowledged_by.is_empty() {
-        return Err(ApiError::BadRequest(
+        return Err(ApiError::Unprocessable(
             "acknowledged_by must not be empty".into(),
         ));
     }

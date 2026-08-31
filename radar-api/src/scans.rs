@@ -83,12 +83,12 @@ pub(crate) async fn create_scan(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
 
     if body.interval_minutes < 15 {
-        return Err(ApiError::BadRequest(
+        return Err(ApiError::Unprocessable(
             "interval_minutes must be at least 15".into(),
         ));
     }
     if body.service_id.is_empty() {
-        return Err(ApiError::BadRequest("service_id is required".into()));
+        return Err(ApiError::Unprocessable("service_id is required".into()));
     }
     // Org isolation (authz before any outbound processing): cannot schedule a
     // scan for another org's service.
@@ -100,10 +100,10 @@ pub(crate) async fn create_scan(
     )
     .await?;
     if body.spec_url.is_empty() {
-        return Err(ApiError::BadRequest("spec_url is required".into()));
+        return Err(ApiError::Unprocessable("spec_url is required".into()));
     }
     if is_ssrf_blocked(&body.spec_url) || !is_host_allowed(&body.spec_url) {
-        return Err(ApiError::BadRequest(
+        return Err(ApiError::Unprocessable(
             "spec_url must be a reachable HTTPS endpoint outside private address space".into(),
         ));
     }

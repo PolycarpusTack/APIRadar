@@ -92,7 +92,7 @@ pub(crate) async fn put_sampling(
     Json(body): Json<ServiceSamplingBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if !(0.0..=1.0).contains(&body.sample_rate) {
-        return Err(ApiError::BadRequest(
+        return Err(ApiError::Unprocessable(
             "sample_rate must be between 0.0 and 1.0".into(),
         ));
     }

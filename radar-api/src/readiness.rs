@@ -2,6 +2,16 @@ use axum::{extract::State, response::IntoResponse, Json};
 use serde_json::{json, Value};
 use sqlx::AnyPool;
 
+/// Count rows in a table.
+///
+/// SAFETY (SQL injection): `table` is interpolated directly into the query
+/// because table names cannot be bound as parameters. This is the only
+/// interpolated SQL in the codebase — every other query goes through the
+/// `q!`/`qs!`/`qa!` macros onto bound parameters.
+///
+/// **`table` must only ever be a compile-time literal.** Every current caller
+/// passes one. Never route a request value, path segment, or config string
+/// here; doing so makes this function directly injectable.
 async fn count_table(pool: &AnyPool, table: &str) -> i64 {
     sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM \"{table}\""))
         .fetch_one(pool)
