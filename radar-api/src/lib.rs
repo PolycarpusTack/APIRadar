@@ -1659,6 +1659,44 @@ mod tests {
         assert_eq!(second["cached"], true);
     }
 
+    /// The Prometheus exporter had NO test coverage at all, which was only
+    /// noticed while upgrading metrics 0.23 -> 0.24 and
+    /// metrics-exporter-prometheus 0.15 -> 0.18: the whole workspace suite
+    /// passed without ever touching /metrics, so a silent exporter regression
+    /// would have shipped unremarked.
+    #[tokio::test]
+    async fn test_metrics_endpoint_emits_prometheus_text() {
+        let pool = test_pool().await;
+        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
+
+        // One request first, so at least one observation exists to render.
+        let warm = HttpRequest::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let _ = app.clone().oneshot(warm).await.unwrap();
+
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).expect("metrics output must be UTF-8");
+        assert!(
+            text.contains("request_duration_seconds"),
+            "expected the request_duration_seconds series, got:\n{text}"
+        );
+        assert!(
+            text.contains("# TYPE"),
+            "expected Prometheus TYPE metadata, got:\n{text}"
+        );
+    }
+
     #[tokio::test]
     async fn test_health_returns_ok_with_live_db() {
         let pool = test_pool().await;
