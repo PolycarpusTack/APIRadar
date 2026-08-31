@@ -1,0 +1,41 @@
+name: Security audit
+
+# F-16: the blocking half of the audit split.
+#
+# `cargo audit` compares Cargo.lock against the live RustSec advisory database.
+# Its outcome therefore changes with time rather than with the code, which makes
+# it a poor per-PR gate — a newly published advisory against any transitive
+# dependency would fail unrelated pull requests. Running it on a schedule keeps
+# the signal loud and blocking while attributing it to the repository rather
+# than to whoever happened to open a PR that morning.
+on:
+  schedule:
+    # 05:00 UTC daily, before European working hours.
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      # A dependency change is the one code event that can introduce an
+      # advisory, so gate those at merge time too.
+      - '**/Cargo.toml'
+      - Cargo.lock
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Security audit (blocking)
+        run: cargo audit
