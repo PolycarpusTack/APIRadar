@@ -12,7 +12,11 @@ panic        = "abort" # no unwinding tables → smaller binary
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["macros"] }
-sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "sqlite", "postgres", "uuid", "chrono", "macros", "any"] }
+# TLS: rustls, not native-tls. `tls-rustls-ring-native-roots` (rather than the
+# `runtime-tokio-rustls` shorthand, which selects webpki roots) keeps trust
+# anchored in the OS certificate store — the same behaviour native-tls had, so
+# a Postgres server presenting a private/internal CA still verifies.
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-native-roots", "sqlite", "postgres", "uuid", "chrono", "macros", "any"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive", "env"] }
