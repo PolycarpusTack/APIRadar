@@ -73,58 +73,60 @@ DIFF_ID=$(echo "$DIFF_RESP" | jq -r '.diff_id // empty')
 # ── 4. Register consumers ────────────────────────────────────────────────────
 echo ""
 echo "4. Registering consumers..."
-api POST /consumers/upsert -d '{
+# Capture the ids: the evidence endpoints below key on consumer_id, not name.
+BILLING_ID=$(api POST /consumers/upsert -d '{
   "name": "billing-svc",
   "owner_team": "billing",
   "contact": "billing@example.com"
-}' | jq -r '.id // .error'
+}' | jq -r '.id // empty')
+echo "   billing-svc: ${BILLING_ID:-FAILED}"
 
-api POST /consumers/upsert -d '{
+MOBILE_ID=$(api POST /consumers/upsert -d '{
   "name": "mobile-gateway",
   "owner_team": "mobile",
   "contact": "mobile@example.com"
-}' | jq -r '.id // .error'
+}' | jq -r '.id // empty')
+echo "   mobile-gateway: ${MOBILE_ID:-FAILED}"
+
+if [ -z "$BILLING_ID" ] || [ -z "$MOBILE_ID" ]; then
+  echo "ERROR: consumer registration failed — cannot seed evidence." >&2
+  exit 1
+fi
 
 # ── 5. Seed runtime usage evidence (billing-svc) ─────────────────────────────
 echo ""
 echo "5. Seeding runtime usage evidence for billing-svc..."
-api POST /usage/events -d '{
-  "events": [
-    {
-      "consumer": "billing-svc",
-      "service_id": "payments-api",
-      "operation": "GET /users/{id}",
-      "field_path": "response.body.phone",
-      "observed_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",
-      "source_type": "runtime_usage"
-    },
-    {
-      "consumer": "billing-svc",
-      "service_id": "payments-api",
-      "operation": "GET /users/{id}",
-      "field_path": "response.body.email",
-      "observed_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",
-      "source_type": "runtime_usage"
-    }
-  ]
-}' | jq -r '.accepted // .error'
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+api POST /usage/events -d "[
+  {
+    \"consumer_id\": \"$BILLING_ID\",
+    \"service_id\": \"payments-api\",
+    \"operation\": \"GET /users/{id}\",
+    \"field_path\": \"response.body.phone\",
+    \"observed_at\": \"$NOW\"
+  },
+  {
+    \"consumer_id\": \"$BILLING_ID\",
+    \"service_id\": \"payments-api\",
+    \"operation\": \"GET /users/{id}\",
+    \"field_path\": \"response.body.email\",
+    \"observed_at\": \"$NOW\"
+  }
+]" | jq -r '.accepted // .error'
 
 # ── 6. Seed static call-site evidence (mobile-gateway) ───────────────────────
 echo ""
 echo "6. Seeding static call-site evidence for mobile-gateway..."
-api POST /call-sites -d '{
-  "consumer": "mobile-gateway",
-  "service_id": "payments-api",
-  "call_sites": [
-    {
-      "operation": "GET /users/{id}",
-      "field_path": "response.phone",
-      "file_path": "src/clients/users.ts",
-      "line_number": 14,
-      "confidence": "medium"
-    }
-  ]
-}' | jq -r '.upserted // .error'
+api POST /call-sites -d "[
+  {
+    \"consumer_id\": \"$MOBILE_ID\",
+    \"service_id\": \"payments-api\",
+    \"operation\": \"GET /users/{id}\",
+    \"field_path\": \"response.phone\",
+    \"file_path\": \"src/clients/users.ts\",
+    \"line_number\": 14
+  }
+]" | jq -r '.upserted // .error'
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""
