@@ -75,10 +75,12 @@ pub(crate) async fn create_policy_decision(
     Json(body): Json<CreatePolicyDecisionBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.verdict.is_empty() {
-        return Err(ApiError::BadRequest("verdict must not be empty".into()));
+        return Err(ApiError::Unprocessable("verdict must not be empty".into()));
     }
     if body.fail_mode.is_empty() {
-        return Err(ApiError::BadRequest("fail_mode must not be empty".into()));
+        return Err(ApiError::Unprocessable(
+            "fail_mode must not be empty".into(),
+        ));
     }
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();

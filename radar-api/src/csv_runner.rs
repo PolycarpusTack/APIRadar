@@ -108,13 +108,15 @@ pub(crate) async fn create_csv_run(
     Json(body): Json<CreateCsvRunBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.rows.is_empty() {
-        return Err(ApiError::BadRequest("rows must not be empty".into()));
+        return Err(ApiError::Unprocessable("rows must not be empty".into()));
     }
     if body.rows.len() > 500 {
-        return Err(ApiError::BadRequest("rows exceeds maximum of 500".into()));
+        return Err(ApiError::Unprocessable(
+            "rows exceeds maximum of 500".into(),
+        ));
     }
     if body.request.url.trim().is_empty() {
-        return Err(ApiError::BadRequest("request.url is required".into()));
+        return Err(ApiError::Unprocessable("request.url is required".into()));
     }
 
     // Template-level SSRF check — only when the host position is concrete.
@@ -127,7 +129,7 @@ pub(crate) async fn create_csv_run(
         #[cfg(test)]
         let ssrf_bypass = SSRF_BYPASS.with(|v| v.get());
         if !ssrf_bypass && (is_ssrf_blocked(&stripped) || !is_host_allowed(&stripped)) {
-            return Err(ApiError::BadRequest(
+            return Err(ApiError::Unprocessable(
                 "request URL is blocked by SSRF policy".into(),
             ));
         }
@@ -139,7 +141,7 @@ pub(crate) async fn create_csv_run(
     let total_rows = body.rows.len() as i64;
 
     let request_json = serde_json::to_string(&body.request)
-        .map_err(|_| ApiError::BadRequest("failed to serialize request template".into()))?;
+        .map_err(|_| ApiError::Unprocessable("failed to serialize request template".into()))?;
 
     q!(
         "INSERT INTO csv_run_job \

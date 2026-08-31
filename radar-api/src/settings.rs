@@ -52,17 +52,17 @@ pub(crate) async fn update_settings(
     Json(body): Json<AppSettings>,
 ) -> Result<impl IntoResponse, ApiError> {
     if !["never", "any_break", "active_consumers"].contains(&body.policy_block_on.as_str()) {
-        return Err(ApiError::BadRequest(
+        return Err(ApiError::Unprocessable(
             "policy_block_on must be one of: never, any_break, active_consumers".into(),
         ));
     }
     if !(1..=365).contains(&body.policy_lookback_days) {
-        return Err(ApiError::BadRequest(
+        return Err(ApiError::Unprocessable(
             "policy_lookback_days must be between 1 and 365".into(),
         ));
     }
     if !(1..=3650).contains(&body.retention_days) {
-        return Err(ApiError::BadRequest(
+        return Err(ApiError::Unprocessable(
             "retention_days must be between 1 and 3650".into(),
         ));
     }

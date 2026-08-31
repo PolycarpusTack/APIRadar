@@ -521,10 +521,7 @@ pub fn build_router(
             get(audit::list_audit_events).post(audit::create_audit_event),
         )
         .route("/readiness", get(readiness::get_readiness))
-        .layer(middleware::from_fn_with_state(
-            pool.clone(),
-            auth_middleware,
-        ))
+        .layer(middleware::from_fn(auth_middleware))
         // Outermost layer: inject RequireAuth + JwtSecretExt before auth_middleware runs.
         .layer(middleware::from_fn({
             let jwt_secret = jwt_secret.clone();

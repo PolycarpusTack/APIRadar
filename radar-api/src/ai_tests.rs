@@ -54,7 +54,7 @@ pub(crate) async fn generate_tests(
     let has_diff = body.diff_id.is_some();
 
     if !has_jira && !has_diff && body.spec_yaml.is_none() {
-        return Err(ApiError::BadRequest(
+        return Err(ApiError::Unprocessable(
             "Provide jira_key, jira_text, or diff_id".to_string(),
         ));
     }
@@ -93,7 +93,7 @@ pub(crate) async fn generate_tests(
                 resolve_spec_yaml(&pool, Some(diff_id), body.spec_yaml.as_deref()).await?;
             call_ai_for_tests_from_diff(&context, &spec_yaml)
                 .await
-                .map_err(|e| ApiError::BadRequest(format!("test generation failed: {e}")))?
+                .map_err(|e| ApiError::Unprocessable(format!("test generation failed: {e}")))?
         };
 
         let (collection_json, apitesting_yaml) = build_both_formats(suite_raw, &body.base_url);
@@ -165,7 +165,7 @@ pub(crate) async fn generate_tests(
                         let first = text.lines().next().unwrap_or("").to_string();
                         (first, text)
                     } else {
-                        return Err(ApiError::BadRequest(format!(
+                        return Err(ApiError::Unprocessable(format!(
                             "Jira fetch failed and no jira_text provided: {e}"
                         )));
                     }
@@ -178,7 +178,7 @@ pub(crate) async fn generate_tests(
                 (first, text)
             }
             None => {
-                return Err(ApiError::BadRequest(
+                return Err(ApiError::Unprocessable(
                     "Provide either jira_key or jira_text".to_string(),
                 ))
             }
@@ -190,7 +190,7 @@ pub(crate) async fn generate_tests(
 
     let suite_raw = call_ai_for_tests(&jira_summary, &jira_description, &spec_yaml)
         .await
-        .map_err(|e| ApiError::BadRequest(format!("test generation failed: {e}")))?;
+        .map_err(|e| ApiError::Unprocessable(format!("test generation failed: {e}")))?;
 
     let (collection_json, apitesting_yaml) = build_both_formats(suite_raw, &body.base_url);
 
@@ -482,7 +482,9 @@ async fn resolve_spec_yaml(
         return Ok(s.to_string());
     }
     let Some(did) = diff_id else {
-        return Err(ApiError::BadRequest("Provide spec_yaml or diff_id".into()));
+        return Err(ApiError::Unprocessable(
+            "Provide spec_yaml or diff_id".into(),
+        ));
     };
     let row = q!(
         "SELECT sv.spec_yaml FROM diff d JOIN spec_version sv ON sv.id = d.to_version WHERE d.id = ?",
@@ -492,7 +494,9 @@ async fn resolve_spec_yaml(
     .await?;
     row.and_then(|r| r.try_get::<Option<String>, _>("spec_yaml").ok().flatten())
         .ok_or_else(|| {
-            ApiError::BadRequest("No stored spec for this diff; supply spec_yaml directly.".into())
+            ApiError::Unprocessable(
+                "No stored spec for this diff; supply spec_yaml directly.".into(),
+            )
         })
 }
 

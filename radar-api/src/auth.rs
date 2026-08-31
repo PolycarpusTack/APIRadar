@@ -1,7 +1,7 @@
 use crate::errors::ApiError;
 use axum::http::header::{LOCATION, SET_COOKIE};
 use axum::{
-    extract::{Query, Request, State},
+    extract::{Query, Request},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
@@ -697,11 +697,7 @@ pub(crate) struct RequireAuth(pub(crate) bool);
 #[derive(Clone)]
 pub(crate) struct JwtSecretExt(pub(crate) Option<String>);
 
-pub(crate) async fn auth_middleware(
-    State(pool): State<sqlx::AnyPool>,
-    mut req: Request,
-    next: Next,
-) -> Response {
+pub(crate) async fn auth_middleware(mut req: Request, next: Next) -> Response {
     // This middleware is scoped to the /v1 sub-router; /health and /metrics are
     // on the outer router and never reach here.
     let auth_header = req
@@ -746,7 +742,6 @@ pub(crate) async fn auth_middleware(
             }
         }
 
-        drop(pool);
         return ApiError::Unauthorized.into_response();
     }
 
@@ -760,7 +755,6 @@ pub(crate) async fn auth_middleware(
             .map(|r| r.0)
             .unwrap_or(false);
         if require_auth {
-            drop(pool);
             return ApiError::Unauthorized.into_response();
         }
         return next.run(req).await;
@@ -768,7 +762,6 @@ pub(crate) async fn auth_middleware(
 
     let expected = format!("Bearer {service_token}");
     if !crate::utils::constant_time_eq(auth_header.as_bytes(), expected.as_bytes()) {
-        drop(pool);
         return ApiError::Unauthorized.into_response();
     }
 

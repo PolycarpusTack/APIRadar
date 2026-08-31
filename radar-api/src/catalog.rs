@@ -73,16 +73,16 @@ pub(crate) async fn create_catalog_source(
     Json(body): Json<CreateCatalogSourceBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if !VALID_CATALOG_KINDS.contains(&body.kind.as_str()) {
-        return Err(ApiError::BadRequest(format!(
+        return Err(ApiError::Unprocessable(format!(
             "kind must be one of: {}",
             VALID_CATALOG_KINDS.join(", ")
         )));
     }
     if body.name.is_empty() {
-        return Err(ApiError::BadRequest("name must not be empty".into()));
+        return Err(ApiError::Unprocessable("name must not be empty".into()));
     }
     if !token_env_allowed(body.token_env.as_deref()) {
-        return Err(ApiError::BadRequest(format!(
+        return Err(ApiError::Unprocessable(format!(
             "token_env must reference a variable named {CATALOG_TOKEN_ENV_PREFIX}*"
         )));
     }

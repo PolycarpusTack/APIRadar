@@ -25,7 +25,7 @@ pub(crate) async fn create_service(
     Json(body): Json<CreateServiceBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.name.is_empty() {
-        return Err(ApiError::BadRequest("name is required".into()));
+        return Err(ApiError::Unprocessable("name is required".into()));
     }
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let id = body.id.unwrap_or_else(|| Uuid::new_v4().to_string());

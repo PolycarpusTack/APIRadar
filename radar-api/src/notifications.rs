@@ -191,7 +191,7 @@ pub(crate) async fn preview_digest(
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
     let data = aggregate_digest(&pool, &org_id)
         .await
-        .map_err(|_| ApiError::BadRequest("failed to aggregate digest data".into()))?;
+        .map_err(|_| ApiError::Unprocessable("failed to aggregate digest data".into()))?;
 
     let html = render_digest_html(&data);
 

@@ -81,7 +81,7 @@ pub(crate) async fn create_sandbox_env(
     Json(body): Json<SandboxEnvBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.name.trim().is_empty() {
-        return Err(ApiError::BadRequest("name is required".into()));
+        return Err(ApiError::Unprocessable("name is required".into()));
     }
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
@@ -127,7 +127,7 @@ pub(crate) async fn update_sandbox_env(
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
     if body.name.trim().is_empty() {
-        return Err(ApiError::BadRequest("name is required".into()));
+        return Err(ApiError::Unprocessable("name is required".into()));
     }
 
     let org_id = org.map(|e| e.org_id.clone()).unwrap_or_default();
