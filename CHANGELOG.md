@@ -63,6 +63,14 @@ behaviour — see Breaking below before upgrading.**
 - **Token confusion made structurally impossible** — session tokens and CSRF
   state tokens previously shared one HS256 key and were kept apart only by
   which fields serde happened to require. Each purpose now derives its own key.
+- **The caller's org is now a type, not a string that defaults to "all".** Org
+  scope was obtained everywhere as `org.map(..).unwrap_or_default()`, which made
+  the most dangerous value the easiest one to produce: an absent or malformed
+  claim yielded `""`, and `""` is the "every org" wildcard. `CallerOrg` is now an
+  enum whose unrestricted variant is only reachable when the server is
+  explicitly configured with no tenants, and it is extracted rather than
+  constructed — so a handler cannot obtain an org scope without resolution, and
+  an unresolvable request is rejected instead of being scoped to everything.
 - **Session cookie `Secure` flag** is settable via `RADAR_COOKIE_SECURE`, rather
   than inferred from the redirect URI — which silently dropped the flag behind a
   TLS-terminating proxy.
