@@ -33,4 +33,4 @@ jsonwebtoken = "9"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 clap_complete = "4"
 metrics = "0.23"
-metrics-exporter-prometheus = { version = "0.15", default-features = false }
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
