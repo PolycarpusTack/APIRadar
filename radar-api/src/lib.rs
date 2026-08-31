@@ -8,6 +8,8 @@ mod ai;
 pub(crate) mod ai_tests;
 pub(crate) mod audit;
 mod auth;
+#[doc(hidden)]
+pub mod bench_support;
 pub(crate) mod catalog;
 pub(crate) mod consumers;
 pub(crate) mod csv_runner;
