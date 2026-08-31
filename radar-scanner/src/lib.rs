@@ -168,7 +168,8 @@ fn collect(
             }
         }
     }
-    for i in 0..node.child_count() {
+    // tree-sitter 0.26: Node::child takes u32 while child_count returns usize.
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             collect(&child, source, lang, out);
         }
@@ -320,7 +321,8 @@ fn collect_api_calls_s2(
             }
         }
     }
-    for i in 0..node.child_count() {
+    // tree-sitter 0.26: Node::child takes u32 while child_count returns usize.
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             collect_api_calls_s2(&child, source, lang, out);
         }
@@ -627,7 +629,8 @@ fn collect_ops(
             }
         }
     }
-    for i in 0..node.child_count() {
+    // tree-sitter 0.26: Node::child takes u32 while child_count returns usize.
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             collect_ops(&child, source, lang, derived, http_records);
         }
@@ -662,7 +665,8 @@ fn collect_derived_fields(
             }
         }
     }
-    for i in 0..node.child_count() {
+    // tree-sitter 0.26: Node::child takes u32 while child_count returns usize.
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             collect_derived_fields(&child, source, lang, derived, out);
         }
