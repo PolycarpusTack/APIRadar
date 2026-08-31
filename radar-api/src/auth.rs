@@ -23,10 +23,29 @@ pub struct JwtClaims {
     pub exp: usize,
 }
 
-/// Validate an HS256 JWT using RADAR_JWT_SECRET. Returns claims on success.
+/// Domain-separation labels. Session tokens and short-lived OIDC CSRF-state
+/// tokens are both HS256 and both derived from `RADAR_JWT_SECRET`; deriving a
+/// distinct key per purpose means a token minted for one can never verify as
+/// the other, no matter how the claim structs later evolve. Previously the two
+/// were only kept apart by which fields serde happened to require — an
+/// accidental property that a single `#[serde(default)]` would have removed.
+const KEY_DOMAIN_SESSION: &str = "radar.session.v1";
+const KEY_DOMAIN_OIDC_STATE: &str = "radar.oidc-state.v1";
+
+/// Derive a purpose-specific signing key from the configured secret.
+fn derive_key(secret: &str, domain: &str) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts a key of any length");
+    mac.update(domain.as_bytes());
+    mac.finalize().into_bytes().to_vec()
+}
+
+/// Validate an HS256 session JWT using RADAR_JWT_SECRET. Returns claims on success.
 pub(crate) fn validate_jwt(token: &str, secret: &str) -> Option<JwtClaims> {
     use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
-    let key = DecodingKey::from_secret(secret.as_bytes());
+    let key = DecodingKey::from_secret(&derive_key(secret, KEY_DOMAIN_SESSION));
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
     decode::<JwtClaims>(token, &key, &validation)
@@ -71,6 +90,11 @@ impl OidcConfig {
 struct OidcDiscovery {
     authorization_endpoint: String,
     token_endpoint: String,
+    /// REQUIRED by OIDC Discovery §3. Used to pin the `iss` claim when
+    /// verifying an id_token, so a token minted by a different provider that
+    /// happens to share a JWKS host cannot be replayed at us.
+    #[serde(default)]
+    issuer: Option<String>,
     #[serde(default)]
     userinfo_endpoint: Option<String>,
     /// Used to verify id_token signature when no userinfo_endpoint is available.
@@ -97,6 +121,11 @@ struct OidcUserInfo {
     #[allow(dead_code)]
     #[serde(default)]
     name: Option<String>,
+    /// Present only when these claims came from an id_token. Must equal the
+    /// nonce we put in the authorization request (OIDC Core §3.1.3.7), which
+    /// is what makes an intercepted id_token non-replayable.
+    #[serde(default)]
+    nonce: Option<String>,
 }
 
 /// Short-lived CSRF state token embedded as a signed JWT.
@@ -135,7 +164,7 @@ pub(crate) fn sign_jwt(claims: &JwtClaims, secret: &str) -> Option<String> {
     encode(
         &Header::new(Algorithm::HS256),
         claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
+        &EncodingKey::from_secret(&derive_key(secret, KEY_DOMAIN_SESSION)),
     )
     .ok()
 }
@@ -146,7 +175,7 @@ fn sign_state(state: &OidcState, secret: &str) -> Option<String> {
     encode(
         &Header::new(Algorithm::HS256),
         state,
-        &EncodingKey::from_secret(secret.as_bytes()),
+        &EncodingKey::from_secret(&derive_key(secret, KEY_DOMAIN_OIDC_STATE)),
     )
     .ok()
 }
@@ -154,7 +183,7 @@ fn sign_state(state: &OidcState, secret: &str) -> Option<String> {
 /// Validate an OidcState JWT and return the nonce if valid.
 fn validate_state(token: &str, secret: &str) -> Option<String> {
     use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
-    let key = DecodingKey::from_secret(secret.as_bytes());
+    let key = DecodingKey::from_secret(&derive_key(secret, KEY_DOMAIN_OIDC_STATE));
     let mut v = Validation::new(Algorithm::HS256);
     v.validate_exp = true;
     decode::<OidcState>(token, &key, &v)
@@ -234,11 +263,12 @@ pub(crate) async fn oidc_login() -> Response {
         }
     };
     let auth_url = format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&scope=openid+email+profile&state={}",
+        "{}?response_type=code&client_id={}&redirect_uri={}&scope=openid+email+profile&state={}&nonce={}",
         disc.authorization_endpoint,
         urlencoding_encode(&cfg.client_id),
         urlencoding_encode(&cfg.redirect_uri),
         urlencoding_encode(&state_token),
+        urlencoding_encode(&nonce),
     );
     let state_cookie =
         format!("oidc_state={state_token}; HttpOnly; SameSite=Lax; Max-Age=600; Path=/");
@@ -284,15 +314,16 @@ pub(crate) async fn oidc_callback(
         .unwrap_or("")
         .to_string();
     let state_cookie_val = parse_cookie(&cookie_header, "oidc_state");
-    if state_cookie_val.as_deref() != Some(state_param.as_str())
-        || validate_state(&state_param, &jwt_secret).is_none()
-    {
+    let expected_nonce = validate_state(&state_param, &jwt_secret);
+    if state_cookie_val.as_deref() != Some(state_param.as_str()) || expected_nonce.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "invalid or expired state"})),
         )
             .into_response();
     }
+    // Safe: the `is_none()` arm above already returned.
+    let expected_nonce = expected_nonce.unwrap_or_default();
 
     let code = match params.get("code") {
         Some(c) => c.clone(),
@@ -480,20 +511,70 @@ pub(crate) async fn oidc_callback(
             }
         };
 
+        // F-04: never take the algorithm from the token header — that is the
+        // shape of the classic alg-confusion bug. Pin the asymmetric algorithms
+        // an OIDC provider is allowed to use; anything symmetric (HS*) would
+        // mean the "signature" is verified with a value the token influences.
+        const ALLOWED_ID_TOKEN_ALGS: &[jsonwebtoken::Algorithm] = &[
+            jsonwebtoken::Algorithm::RS256,
+            jsonwebtoken::Algorithm::RS384,
+            jsonwebtoken::Algorithm::RS512,
+            jsonwebtoken::Algorithm::PS256,
+            jsonwebtoken::Algorithm::PS384,
+            jsonwebtoken::Algorithm::PS512,
+            jsonwebtoken::Algorithm::ES256,
+            jsonwebtoken::Algorithm::ES384,
+        ];
+        if !ALLOWED_ID_TOKEN_ALGS.contains(&header.alg) {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(
+                    json!({"error": format!("id_token algorithm {:?} is not permitted", header.alg)}),
+                ),
+            )
+                .into_response();
+        }
+
+        // F-06: pin the issuer from discovery. Verifying an id_token without
+        // checking who minted it accepts any token signed by any key in the
+        // JWKS we happened to fetch.
+        let Some(issuer) = disc.issuer.as_deref().filter(|s| !s.is_empty()) else {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(
+                    json!({"error": "provider discovery omitted `issuer`; cannot verify id_token"}),
+                ),
+            )
+                .into_response();
+        };
+
         let mut validation = jsonwebtoken::Validation::new(header.alg);
+        validation.algorithms = ALLOWED_ID_TOKEN_ALGS.to_vec();
         validation.set_audience(&[cfg.client_id.as_str()]);
+        validation.set_issuer(&[issuer]);
         validation.validate_exp = true;
 
-        match jsonwebtoken::decode::<OidcUserInfo>(id_token_str, &decoding_key, &validation) {
-            Ok(data) => data.claims,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({"error": format!("id_token verification failed: {e}")})),
-                )
-                    .into_response()
-            }
+        let claims: OidcUserInfo =
+            match jsonwebtoken::decode::<OidcUserInfo>(id_token_str, &decoding_key, &validation) {
+                Ok(data) => data.claims,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({"error": format!("id_token verification failed: {e}")})),
+                    )
+                        .into_response()
+                }
+            };
+
+        // F-05: bind the id_token to this authorization request.
+        if claims.nonce.as_deref() != Some(expected_nonce.as_str()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "id_token nonce does not match the authorization request"})),
+            )
+                .into_response();
         }
+        claims
     };
 
     // Derive org_id from the configured claim. `None` means the provider gave
@@ -863,6 +944,81 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(derive_org_id(&u, "sub"), Some("user-123".to_string()));
+    }
+
+    // ---- Batch A: token domain separation (F-10) ----
+
+    const T_SECRET: &str = "batch-a-test-secret";
+
+    #[test]
+    fn key_domains_produce_distinct_keys() {
+        assert_ne!(
+            derive_key(T_SECRET, KEY_DOMAIN_SESSION),
+            derive_key(T_SECRET, KEY_DOMAIN_OIDC_STATE),
+            "session and oidc-state keys must differ, or a token minted for one \
+             purpose can verify as the other"
+        );
+    }
+
+    #[test]
+    fn state_token_does_not_validate_as_session() {
+        let state = OidcState {
+            nonce: "n-1".into(),
+            exp: 9_999_999_999,
+        };
+        let tok = sign_state(&state, T_SECRET).expect("sign_state");
+        assert!(
+            validate_jwt(&tok, T_SECRET).is_none(),
+            "a CSRF-state token must never be accepted as a session"
+        );
+    }
+
+    #[test]
+    fn session_token_does_not_validate_as_state() {
+        let claims = JwtClaims {
+            sub: "user@example.com".into(),
+            org_id: "acme.example".into(),
+            exp: 9_999_999_999,
+        };
+        let tok = sign_jwt(&claims, T_SECRET).expect("sign_jwt");
+        assert!(
+            validate_state(&tok, T_SECRET).is_none(),
+            "a session token must never be accepted as CSRF state"
+        );
+    }
+
+    #[test]
+    fn session_token_round_trips() {
+        let claims = JwtClaims {
+            sub: "user@example.com".into(),
+            org_id: "acme.example".into(),
+            exp: 9_999_999_999,
+        };
+        let tok = sign_jwt(&claims, T_SECRET).expect("sign_jwt");
+        let back = validate_jwt(&tok, T_SECRET).expect("round trip");
+        assert_eq!(back.org_id, "acme.example");
+        assert_eq!(back.sub, "user@example.com");
+    }
+
+    #[test]
+    fn state_nonce_round_trips() {
+        let state = OidcState {
+            nonce: "nonce-abc".into(),
+            exp: 9_999_999_999,
+        };
+        let tok = sign_state(&state, T_SECRET).expect("sign_state");
+        assert_eq!(validate_state(&tok, T_SECRET).as_deref(), Some("nonce-abc"));
+    }
+
+    #[test]
+    fn tokens_do_not_validate_under_a_different_secret() {
+        let claims = JwtClaims {
+            sub: "u".into(),
+            org_id: "o".into(),
+            exp: 9_999_999_999,
+        };
+        let tok = sign_jwt(&claims, T_SECRET).expect("sign_jwt");
+        assert!(validate_jwt(&tok, "a-different-secret").is_none());
     }
 
     /// Why the old `r.json().await.unwrap_or_default()` was exploitable: an
