@@ -12,8 +12,8 @@ service: my-payments-api
 
 # Policy: when to block a PR
 policy:
-  # never | any_break | active_consumers (default)
-  block_on: active_consumers
+  # never | any_break (default) | active_consumers
+  block_on: any_break
 
   # Evidence older than this is ignored for blast-radius decisions
   lookback_days: 30
@@ -36,11 +36,20 @@ collection_paths:
 
 ## `policy.block_on`
 
+> **Default changed:** `block_on` now defaults to `any_break`. It previously
+> defaulted to `active_consumers`, which meant that on a fresh install — where
+> nobody has instrumented anything yet — a genuine breaking change exited 0 and
+> the check went green. Radar was at its most permissive exactly when a team had
+> the least protection, and it reported success while doing it. Teams with real
+> evidence coverage can still opt into `active_consumers`; it is now a setting
+> you choose once instrumentation exists, rather than the starting point.
+
+
 | Value | Behavior |
 |---|---|
 | `never` | Exit 0 always. Breaking changes are surfaced in the PR comment but never block CI. |
 | `any_break` | Exit 1 if any Breaking Change is detected, regardless of consumer evidence. |
-| `active_consumers` (default) | Exit 1 only if at least one active consumer has evidence for the affected field within `lookback_days`. No consumers → exit 0. |
+| `active_consumers` | Exit 1 if an active consumer has evidence for the affected field within `lookback_days`. If the blast radius is empty **and the service has no evidence at all**, exit 1 with verdict `insufficient coverage` — an empty blast radius is only a pass when there is evidence to make it meaningful. |
 
 ## `fail_mode`
 

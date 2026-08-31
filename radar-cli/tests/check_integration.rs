@@ -83,8 +83,16 @@ paths:
 // Tests
 // ---------------------------------------------------------------------------
 
-/// A breaking field removal is detected and printed, but the default policy
-/// (ActiveConsumers) exits 0 when there are no registered consumers (P0).
+/// A breaking field removal is detected, printed, and BLOCKS under the default
+/// policy.
+///
+/// This test previously asserted exit 0, documenting the behaviour FIT-01
+/// fixes: `block_on` defaulted to ActiveConsumers, so with no registered
+/// consumers a genuine breaking change exited 0 and the check went green.
+/// On a fresh install — nobody instrumented, no evidence — that made Radar
+/// most permissive exactly when a team was least protected. The default is now
+/// AnyBreak, and the suite asserts the safe outcome rather than encoding the
+/// unsafe one.
 #[test]
 fn check_detects_breaking_field_removal() {
     let base_file = temp_yaml(BASE_WITH_PHONE);
@@ -102,11 +110,12 @@ fn check_detects_breaking_field_removal() {
         .output()
         .expect("failed to execute drift binary");
 
-    // Default policy = ActiveConsumers, no consumers → exit 0
+    // Default policy = AnyBreak → a breaking change blocks regardless of what
+    // we know about consumers.
     assert_eq!(
         output.status.code(),
-        Some(0),
-        "expected exit 0 (no active consumers), got: {:?}\nstdout: {}\nstderr: {}",
+        Some(1),
+        "expected exit 1 (default block_on=any_break), got: {:?}\nstdout: {}\nstderr: {}",
         output.status.code(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),

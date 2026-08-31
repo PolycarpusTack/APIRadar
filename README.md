@@ -159,8 +159,8 @@ service: my-payments-api
 
 # Policy: when to block a PR
 policy:
-  # never | any_break | active_consumers (default)
-  block_on: active_consumers
+  # never | any_break (default) | active_consumers
+  block_on: any_break
   # Evidence older than this is ignored for blast-radius decisions
   lookback_days: 30
   # GitHub label that, when present on the PR, overrides a block verdict

@@ -43,7 +43,7 @@ fail_mode: warn    →  never block; always warn regardless of confidence
 fail_mode: open    →  block only on high confidence; warn on medium; pass on low
 ```
 
-The policy engine runs `decide(changes, policy, fail_mode, has_active_consumers, ...)` in `radar-cli/src/policy.rs`.
+The policy engine runs `decide(changes, policy, fail_mode, consumers, ...)` in `radar-cli/src/policy.rs`, where `consumers` is a three-state `ConsumerEvidence` (`Affected` / `NoneAffected` / `Unknown`) rather than a boolean — see the `insufficient coverage` verdict in the policy reference.
 
 ## Staleness and expiry
 
