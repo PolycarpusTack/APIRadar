@@ -225,6 +225,129 @@ jobs:
       - name: Build benchmarks (no run)
         run: cargo bench --workspace --no-run
 
+  # Full-stack e2e: a real radar-api behind a real browser, no mocks.
+  #
+  # The e2e/ suite mocks every response with page.route() — fast and
+  # deterministic, but it can only confirm the UI matches our fixtures. When a
+  # response shape changes, the mocks keep passing while the product breaks.
+  # That is not hypothetical: fixtures/seed-demo.sh (the README's five-minute
+  # demo) posted wrapped objects to two endpoints that take bare arrays, and a
+  # consumer name where a consumer id was required. Both failed silently, so
+  # the demo produced an empty blast radius — the one thing it exists to show.
+  fullstack-e2e:
+    name: Full-stack E2E
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build radar-api
+        run: cargo build -p radar-api
+
+      # Port 17380 is what the UI dev server proxies /v1 to, so the proxy
+      # configuration is exercised rather than bypassed.
+      - name: Start radar-api
+        run: |
+          ./target/debug/radar-api --db sqlite:fullstack-e2e.db --bind 127.0.0.1:17380 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:17380/health >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:17380/health || { echo "radar-api did not start"; exit 1; }
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright chromium
+        run: pnpm --filter radar-ui exec playwright install --with-deps chromium
+
+      - name: Run full-stack E2E
+        run: pnpm --filter radar-ui exec playwright test --config=playwright.fullstack.config.ts
+        env:
+          CI: true
+
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fullstack-e2e-traces
+          path: radar-ui/test-results/
+          retention-days: 7
+
+  # Desktop packaging. Previously only `electron-vite build` ran here, with
+  # electron-builder skipped for want of signing certs — so the installer path
+  # itself was never exercised, and it was in fact broken: the Linux AppImage
+  # target had no PNG icon and electron-builder refused the .ico, failing with
+  # "must be at least 256x256".
+  #
+  # Linux AppImage needs no certificates, so it can be packaged unsigned here.
+  # Windows NSIS and macOS DMG still cannot be, but this covers the shared
+  # machinery: bundling the radar-api sidecar, icons, and the electron-builder
+  # config.
+  desktop-package:
+    name: Desktop package (Linux, unsigned)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      # build.config.json bundles this as extraResources; packaging fails
+      # without it.
+      - name: Build radar-api sidecar (release)
+        run: cargo build -p radar-api --release
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build desktop bundles
+        run: pnpm --filter radar-desktop build
+
+      - name: Package AppImage (unsigned)
+        run: pnpm --filter radar-desktop dist
+
+      - name: Verify the AppImage bundles the sidecar
+        run: |
+          test -f radar-desktop/dist/linux-unpacked/resources/radar-api \
+            || { echo "radar-api sidecar missing from the package"; exit 1; }
+          ls -la radar-desktop/dist/*.AppImage
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: radar-desktop-appimage
+          path: radar-desktop/dist/*.AppImage
+          retention-days: 14
+
   # Rust (Postgres): gate migrations AND the full query layer on a real Postgres
   # 16 instance (portability regression guard).
   #
