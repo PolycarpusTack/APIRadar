@@ -111,7 +111,7 @@ fn demo_pr_comment_contains_evidence_and_verdict() {
     let changes = diff_v1_v2();
     let br = blast_radius_fixture();
     let comment =
-        build_comment_with_suites(&changes, "v1", "v2", Some(&br), "block", "closed", &[]);
+        build_comment_with_suites(&changes, "v1", "v2", Some(&br), "block", "closed", &[], false, "drift-ack");
 
     assert!(
         comment.contains("BREAKING"),
@@ -145,7 +145,7 @@ fn demo_pr_comment_structural_sections() {
     let changes = diff_v1_v2();
     let br = blast_radius_fixture();
     let comment =
-        build_comment_with_suites(&changes, "v1", "v2", Some(&br), "block", "closed", &[]);
+        build_comment_with_suites(&changes, "v1", "v2", Some(&br), "block", "closed", &[], false, "drift-ack");
 
     assert!(
         comment.contains("Radar Monitor"),

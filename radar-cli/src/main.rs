@@ -586,6 +586,12 @@ async fn main() -> Result<()> {
                             verdict_str,
                             fm_str,
                             &test_suites,
+                            // O-14: an InsufficientCoverage block collapses to
+                            // "block" on the wire; the comment must still explain
+                            // the real (no-Evidence) reason and name the
+                            // configured override label.
+                            decision.verdict == policy::Verdict::InsufficientCoverage,
+                            pol.allow_override_with.as_deref().unwrap_or("drift-ack"),
                         );
                         match github::post_or_update_comment(&ctx, &comment_body).await {
                             Ok(url) => println!("PR comment posted: {url}"),
