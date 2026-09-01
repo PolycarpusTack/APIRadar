@@ -157,12 +157,6 @@ fn normalize_op_key(method_path: &str) -> String {
     out
 }
 
-/// True when a schema `prefix` refers to a request body (where required/optional
-/// semantics are the mirror image of a response).
-fn is_request_context(prefix: &str) -> bool {
-    prefix == "request_body" || prefix.starts_with("request_body.")
-}
-
 // ---------------------------------------------------------------------------
 // Internal helpers — operation collection
 // ---------------------------------------------------------------------------
@@ -563,6 +557,7 @@ fn diff_request_body(
                     diff_schema_properties(
                         op_path,
                         "request_body",
+                        true,
                         base_schema,
                         head_schema,
                         base_spec,
@@ -702,6 +697,7 @@ fn diff_responses(
                 diff_schema_properties(
                     op_path,
                     "response",
+                    false,
                     base_schema,
                     head_schema,
                     base_spec,
@@ -759,11 +755,15 @@ fn status_code_str(status: &StatusCode) -> String {
 
 /// Recursively compare the properties of two object schemas.
 /// `prefix` is the dot-separated label used after the arrow in DiffChange.path,
-/// e.g. "response" or "response.user".
+/// e.g. "response" or "response.user". `is_request` says whether this schema
+/// sits in a request body — where required/optional semantics are the mirror
+/// image of a response. It is threaded explicitly (O-2): the old prefix
+/// string-sniffing broke inside composed variants ("request_body[0]").
 #[allow(clippy::too_many_arguments)] // recursive schema walker; args are inherent
 fn diff_schema_properties(
     op_path: &str,
     prefix: &str,
+    is_request: bool,
     base_schema: &Schema,
     head_schema: &Schema,
     base_spec: &OpenAPI,
@@ -836,6 +836,7 @@ fn diff_schema_properties(
             diff_object_types(
                 op_path,
                 prefix,
+                is_request,
                 &base_merged,
                 &head_merged,
                 base_spec,
@@ -850,7 +851,7 @@ fn diff_schema_properties(
         (SchemaKind::OneOf { one_of: bv }, SchemaKind::OneOf { one_of: hv })
         | (SchemaKind::AnyOf { any_of: bv }, SchemaKind::AnyOf { any_of: hv }) => {
             diff_composed_variants(
-                op_path, prefix, bv, hv, base_spec, head_spec, changes, visited,
+                op_path, prefix, is_request, bv, hv, base_spec, head_spec, changes, visited,
             );
             visited.remove(&self_ptr);
             return;
@@ -895,7 +896,8 @@ fn diff_schema_properties(
                     resolve_boxed_schema(head_spec, hi),
                 ) {
                     diff_schema_properties(
-                        op_path, prefix, bs, hs, base_spec, head_spec, changes, visited,
+                        op_path, prefix, is_request, bs, hs, base_spec, head_spec, changes,
+                        visited,
                     );
                 }
             }
@@ -909,7 +911,7 @@ fn diff_schema_properties(
     };
 
     diff_object_types(
-        op_path, prefix, base_obj, head_obj, base_spec, head_spec, changes, visited,
+        op_path, prefix, is_request, base_obj, head_obj, base_spec, head_spec, changes, visited,
     );
 
     visited.remove(&self_ptr);
@@ -959,6 +961,7 @@ fn merge_all_of(
 fn diff_composed_variants(
     op_path: &str,
     prefix: &str,
+    is_request: bool,
     base_variants: &[ReferenceOr<Schema>],
     head_variants: &[ReferenceOr<Schema>],
     base_spec: &OpenAPI,
@@ -976,6 +979,7 @@ fn diff_composed_variants(
             diff_schema_properties(
                 op_path,
                 &variant_prefix,
+                is_request,
                 bs,
                 hs,
                 base_spec,
@@ -1011,6 +1015,7 @@ fn diff_composed_variants(
 fn diff_object_types(
     op_path: &str,
     prefix: &str,
+    is_request: bool,
     base_obj: &ObjectType,
     head_obj: &ObjectType,
     base_spec: &OpenAPI,
@@ -1018,7 +1023,7 @@ fn diff_object_types(
     changes: &mut Vec<DiffChange>,
     visited: &mut std::collections::HashSet<*const Schema>,
 ) {
-    let field_noun = if is_request_context(prefix) {
+    let field_noun = if is_request {
         "Request property"
     } else {
         "Response property"
@@ -1141,7 +1146,7 @@ fn diff_object_types(
         // dropping the guarantee (required→optional) is risky for consumers.
         let base_required = base_obj.required.contains(prop_name);
         let head_required = head_obj.required.contains(prop_name);
-        let request_ctx = is_request_context(prefix);
+        let request_ctx = is_request;
 
         if !base_required && head_required {
             // optional → required
@@ -1195,6 +1200,7 @@ fn diff_object_types(
         diff_schema_properties(
             op_path,
             &nested_prefix,
+            is_request,
             base_prop_schema,
             head_prop_schema,
             base_spec,
@@ -3661,6 +3667,101 @@ paths:
                 .any(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking),
             "oneOf → anyOf at the schema root must be a Breaking TypeChanged, got: {:?}",
             changes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // O-2: request/response context must survive composed (oneOf/anyOf) variants
+    // -----------------------------------------------------------------------
+    fn oneof_body_spec(location: &str, required: bool) -> String {
+        // `location` is "requestBody:\n        content" or a response body; built
+        // by the two tests below to keep the variant schema identical.
+        // The two bodies nest at different depths, so the `required:` line
+        // (sibling of `properties:`) needs a per-branch indent.
+        let required_line = if required {
+            if location == "request" {
+                "\n                  required: [name]"
+            } else {
+                "\n                    required: [name]"
+            }
+        } else {
+            ""
+        };
+        match location {
+            "request" => format!(
+                r#"
+openapi: "3.0.0"
+info: {{ title: Test, version: "1" }}
+paths:
+  /orders:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  properties:
+                    name: {{ type: string }}{required_line}
+      responses:
+        '200': {{ description: ok }}
+"#
+            ),
+            _ => format!(
+                r#"
+openapi: "3.0.0"
+info: {{ title: Test, version: "1" }}
+paths:
+  /orders:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      name: {{ type: string }}{required_line}
+"#
+            ),
+        }
+    }
+
+    #[test]
+    fn test_request_oneof_variant_optional_to_required_is_breaking() {
+        let base = parse(&oneof_body_spec("request", false));
+        let head = parse(&oneof_body_spec("request", true));
+        let changes = diff_openapi(&base, &head);
+        let c = changes
+            .iter()
+            .find(|c| c.kind == ChangeKind::RequiredChanged)
+            .unwrap_or_else(|| panic!("expected a RequiredChanged, got: {changes:?}"));
+        assert_eq!(
+            c.severity,
+            Severity::Breaking,
+            "optional → required inside a request oneOf variant breaks callers, got: {c:?}"
+        );
+        assert!(
+            c.description.as_deref().unwrap_or("").contains("Request"),
+            "description must use request wording, got: {c:?}"
+        );
+    }
+
+    #[test]
+    fn test_response_oneof_variant_optional_to_required_is_safe() {
+        let base = parse(&oneof_body_spec("response", false));
+        let head = parse(&oneof_body_spec("response", true));
+        let changes = diff_openapi(&base, &head);
+        let c = changes
+            .iter()
+            .find(|c| c.kind == ChangeKind::RequiredChanged)
+            .unwrap_or_else(|| panic!("expected a RequiredChanged, got: {changes:?}"));
+        assert_eq!(
+            c.severity,
+            Severity::Safe,
+            "optional → required inside a response oneOf variant is a stronger guarantee, got: {c:?}"
         );
     }
 }
