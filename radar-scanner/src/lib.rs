@@ -924,7 +924,13 @@ fn collect_requests(items: &[serde_json::Value], out: &mut Vec<CollectionRequest
 }
 
 fn extract_request(item: &serde_json::Value) -> Option<CollectionRequest> {
-    let item_name = item.get("name")?.as_str()?.to_string();
+    // O-8: `name` is optional in the Postman v2.1 schema — an unnamed item
+    // still carries a request and must not be dropped.
+    let item_name = item
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<unnamed>")
+        .to_string();
     let req = item.get("request")?;
 
     let method = req
@@ -976,34 +982,13 @@ fn extract_operation(req: &serde_json::Value) -> Option<String> {
     // Handles: "http://host/path", "{{base_url}}/path", "{{a}}{{b}}/path"
     let path_part = strip_url_prefix(&raw_url);
 
-    // Drop query string / fragment (everything from the first '?' or '#').
-    let path_part = path_part.split(['?', '#']).next().unwrap_or(path_part);
-
-    // Trim a trailing slash (but never reduce below "/").
-    let path_part = {
-        let trimmed = path_part.trim_end_matches('/');
-        if trimmed.is_empty() {
-            "/"
-        } else {
-            trimmed
-        }
-    };
-
-    // Ensure it starts with /
-    let with_leading_slash = if path_part.starts_with('/') {
-        path_part.to_string()
-    } else {
-        format!("/{path_part}")
-    };
-
-    // Normalise Postman `:var` path segments to brace-style `{var}`.
-    let normalised = normalise_colon_params(&with_leading_slash);
-
-    if normalised.is_empty() {
-        None
-    } else {
-        Some(normalised)
-    }
+    // O-8: convert remaining Postman `{{var}}` (mid-path) to brace-style
+    // `{var}`, then run the SAME normalizer as the code scanner — query/
+    // fragment stripping, `:var`/`${var}` conversion, numeric-id
+    // templatization, trailing-slash handling — so collection operations can
+    // actually match spec operations like `/users/{id}`.
+    let braced = path_part.replace("{{", "{").replace("}}", "}");
+    normalize_http_path(&braced)
 }
 
 /// Build a raw-URL-like string from a URL object's `host` and `path` arrays.
@@ -1030,22 +1015,6 @@ fn build_raw_from_host_path(url_obj: &serde_json::Value) -> String {
     }
 }
 
-/// Normalise Postman `:var` path segments to brace-style `{var}`.
-/// e.g. "/users/:userId/orders/:orderId" → "/users/{userId}/orders/{orderId}".
-fn normalise_colon_params(path: &str) -> String {
-    path.split('/')
-        .map(|seg| {
-            if let Some(var) = seg.strip_prefix(':') {
-                if !var.is_empty() {
-                    return format!("{{{var}}}");
-                }
-            }
-            seg.to_string()
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 /// Strip any scheme://host or leading `{{variable}}` segments, returning the path only.
 fn strip_url_prefix(url: &str) -> &str {
     // Remove scheme://host (e.g. "https://api.example.com")
@@ -1070,10 +1039,23 @@ fn strip_url_prefix(url: &str) -> &str {
         break;
     }
 
-    // If there's still a host (no leading / after stripping variables), strip up to first /
+    // If there's still a host (no leading / after stripping variables), strip
+    // up to the first /. O-8: only when the first segment actually looks like
+    // a host (contains '.' or ':') — a relative URL like "users/1" must keep
+    // its first path segment, and a host-only URL is the root path.
     if !rest.starts_with('/') && !rest.starts_with('{') {
-        if let Some(slash) = rest.find('/') {
-            rest = &rest[slash..];
+        match rest.find('/') {
+            Some(slash) => {
+                let first = &rest[..slash];
+                if first.contains('.') || first.contains(':') {
+                    rest = &rest[slash..];
+                }
+            }
+            None => {
+                if rest.contains('.') || rest.contains(':') {
+                    return "/";
+                }
+            }
         }
     }
 
@@ -1750,6 +1732,71 @@ func process(svc *Service, id string) string {
         ]}"#;
         let (_, reqs) = parse_collection_str(json).expect("parse");
         assert_eq!(reqs[0].operation.as_deref(), Some("/users/{id}"));
+    }
+
+    // --- O-8: Postman operations must normalize like the code scanner's paths ---
+
+    #[test]
+    fn parse_collection_mid_path_variable_normalizes() {
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"name":"R","request":{"method":"GET","url":{"raw":"{{base_url}}/users/{{userId}}"}}}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        assert_eq!(
+            reqs[0].operation.as_deref(),
+            Some("/users/{userId}"),
+            "mid-path {{{{var}}}} must become {{var}} so it can match spec operations"
+        );
+    }
+
+    #[test]
+    fn parse_collection_numeric_segment_templatizes() {
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"name":"R","request":{"method":"GET","url":{"raw":"{{base_url}}/users/12345"}}}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        assert_eq!(
+            reqs[0].operation.as_deref(),
+            Some("/users/{id}"),
+            "literal ids must templatize exactly as the code scanner does"
+        );
+    }
+
+    #[test]
+    fn parse_collection_relative_url_keeps_first_segment() {
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"name":"R","request":{"method":"GET","url":{"raw":"users/1"}}}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        assert_eq!(
+            reqs[0].operation.as_deref(),
+            Some("/users/{id}"),
+            "a relative URL must not lose its first path segment"
+        );
+    }
+
+    #[test]
+    fn parse_collection_host_only_url_yields_root() {
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"name":"R","request":{"method":"GET","url":{"raw":"https://api.example.com"}}}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        assert_eq!(
+            reqs[0].operation.as_deref(),
+            Some("/"),
+            "a host-only URL is the root operation, not a path named after the host"
+        );
+    }
+
+    #[test]
+    fn parse_collection_unnamed_item_still_parsed() {
+        // `name` is optional in the Postman v2.1 schema.
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"request":{"method":"GET","url":{"raw":"{{base_url}}/users"}}}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        assert_eq!(reqs.len(), 1, "an unnamed item must not be dropped");
+        assert_eq!(reqs[0].operation.as_deref(), Some("/users"));
     }
 
     // --- M-11: TypeScript/TSX scanner accuracy ---
