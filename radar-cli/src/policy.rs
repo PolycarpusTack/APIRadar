@@ -293,6 +293,21 @@ pub fn decide(
     }
 }
 
+/// O-13: aggregate a batch run's exit code — the worst row wins.
+///
+/// Each row already carries a full `PolicyDecision` from [`decide`], so the
+/// batch exit is simply "did any row decide to fail". A row whose spec could
+/// not be read or parsed should be fed through `decide` with `api_error =
+/// true` so fail-mode semantics (Closed blocks, Warn warns, Open passes an
+/// unevaluatable row) apply to errors exactly as they do in `drift check`.
+pub fn batch_exit_code(decisions: &[PolicyDecision]) -> i32 {
+    if decisions.iter().any(|d| d.exit_code != 0) {
+        1
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +315,98 @@ mod tests {
         diff::DiffChange,
         models::{ChangeKind, Severity},
     };
+
+    // ── O-13: batch policy semantics ────────────────────────────────────────
+
+    fn breaking_change() -> DiffChange {
+        DiffChange {
+            path: "GET /users \u{2192} response.phone".into(),
+            kind: ChangeKind::FieldRemoved,
+            severity: Severity::Breaking,
+            description: None,
+        }
+    }
+
+    #[test]
+    fn batch_warn_mode_breaking_row_exits_zero() {
+        let d = decide(
+            &[breaking_change()],
+            &PolicyConfig::default(),
+            &FailMode::Warn,
+            ConsumerEvidence::Unknown,
+            false,
+            false,
+        );
+        assert_eq!(d.verdict, Verdict::Warn);
+        assert_eq!(batch_exit_code(&[d]), 0, "warn must not fail the batch");
+    }
+
+    #[test]
+    fn batch_closed_mode_worst_row_wins() {
+        let pass = decide(
+            &[],
+            &PolicyConfig::default(),
+            &FailMode::Closed,
+            ConsumerEvidence::Unknown,
+            false,
+            false,
+        );
+        let block = decide(
+            &[breaking_change()],
+            &PolicyConfig::default(),
+            &FailMode::Closed,
+            ConsumerEvidence::Unknown,
+            false,
+            false,
+        );
+        assert_eq!(batch_exit_code(&[pass.clone()]), 0);
+        assert_eq!(batch_exit_code(&[pass, block]), 1);
+    }
+
+    #[test]
+    fn batch_row_error_follows_fail_mode() {
+        // A row whose spec cannot be read/parsed is an evaluation error:
+        // Closed blocks it, Warn does not.
+        let closed = decide(
+            &[],
+            &PolicyConfig::default(),
+            &FailMode::Closed,
+            ConsumerEvidence::Unknown,
+            false,
+            true,
+        );
+        let warn = decide(
+            &[],
+            &PolicyConfig::default(),
+            &FailMode::Warn,
+            ConsumerEvidence::Unknown,
+            false,
+            true,
+        );
+        assert_eq!(batch_exit_code(&[closed]), 1);
+        assert_eq!(batch_exit_code(&[warn]), 0);
+    }
+
+    #[test]
+    fn batch_block_on_never_breaking_row_exits_zero() {
+        let pol = PolicyConfig {
+            block_on: BlockOn::Never,
+            ..Default::default()
+        };
+        let d = decide(
+            &[breaking_change()],
+            &pol,
+            &FailMode::Closed,
+            ConsumerEvidence::Unknown,
+            false,
+            false,
+        );
+        assert_eq!(
+            batch_exit_code(&[d]),
+            0,
+            "block_on: never must let breaking rows pass, as in drift check"
+        );
+    }
 
     // ── E-3-T1: fail_mode tests ──────────────────────────────────────────────
 

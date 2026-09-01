@@ -279,6 +279,10 @@ enum Commands {
         /// Optional bearer token.
         #[arg(long, env = "RADAR_SERVICE_TOKEN")]
         token: Option<String>,
+
+        /// Path to .radar.yml policy file (defaults to ./.radar.yml).
+        #[arg(long)]
+        policy: Option<PathBuf>,
     },
 
     /// Print shell completion script to stdout.
@@ -762,6 +766,7 @@ async fn main() -> Result<()> {
             no_color,
             api_url,
             token,
+            policy: policy_path,
         } => {
             let content = std::fs::read_to_string(&csv)
                 .map_err(|e| anyhow::anyhow!("cannot read '{}': {e}", csv.display()))?;
@@ -773,6 +778,16 @@ async fn main() -> Result<()> {
                 );
             }
 
+            // O-13: batch rows go through the same policy engine as `check` —
+            // .radar.yml (block_on, fail_mode) decides the exit code, and each
+            // row's verdict is posted as a policy decision when an API is
+            // configured. Previously batch exited on raw breaking counts,
+            // failing CI that a `fail_mode: warn` policy would allow, with no
+            // audit row.
+            let config = policy::load_config(policy_path.as_deref())?;
+            let pol = config.policy();
+            let fail_mode = config.fail_mode();
+
             let use_color = !no_color && std::env::var("NO_COLOR").is_err();
 
             struct RowResult {
@@ -781,8 +796,22 @@ async fn main() -> Result<()> {
                 breaking: usize,
                 diff_id: Option<String>,
                 error: Option<String>,
+                decision: policy::PolicyDecision,
             }
             let mut row_results: Vec<RowResult> = Vec::new();
+
+            // Batch never fetches Blast Radius, so consumer coverage is
+            // honestly Unknown for every row (FIT-01 semantics apply).
+            let row_error_decision = || {
+                policy::decide(
+                    &[],
+                    &pol,
+                    &fail_mode,
+                    policy::ConsumerEvidence::Unknown,
+                    false,
+                    true, // evaluation error: fail-mode decides
+                )
+            };
 
             for row in &rows {
                 let base_content = match std::fs::read_to_string(&row.base) {
@@ -795,6 +824,7 @@ async fn main() -> Result<()> {
                             breaking: 0,
                             diff_id: None,
                             error: Some(format!("cannot read '{}': {e}", row.base)),
+                            decision: row_error_decision(),
                         });
                         continue;
                     }
@@ -809,6 +839,7 @@ async fn main() -> Result<()> {
                             breaking: 0,
                             diff_id: None,
                             error: Some(format!("cannot read '{}': {e}", row.head)),
+                            decision: row_error_decision(),
                         });
                         continue;
                     }
@@ -848,6 +879,7 @@ async fn main() -> Result<()> {
                             breaking: 0,
                             diff_id: None,
                             error: Some(e.to_string()),
+                            decision: row_error_decision(),
                         });
                         continue;
                     }
@@ -891,12 +923,44 @@ async fn main() -> Result<()> {
                     }
                 }
 
+                let decision = policy::decide(
+                    &changes,
+                    &pol,
+                    &fail_mode,
+                    policy::ConsumerEvidence::Unknown,
+                    false,
+                    false,
+                );
+
+                // CLAUDE.md rule: always post the policy decision after a check.
+                if let Some(ref url) = api_url {
+                    let fm_str = match &decision.fail_mode {
+                        policy::FailMode::Closed => "closed",
+                        policy::FailMode::Open => "open",
+                        policy::FailMode::Warn => "warn",
+                    };
+                    if let Err(e) = api_client::post_policy_decision(
+                        url,
+                        posted_diff_id.as_deref(),
+                        row.service_id.as_deref(),
+                        decision.verdict.wire_str(),
+                        fm_str,
+                        "radar-cli",
+                        token.as_deref(),
+                    )
+                    .await
+                    {
+                        eprintln!("  Warning: failed to post policy decision: {e}");
+                    }
+                }
+
                 row_results.push(RowResult {
                     label: row.label.clone(),
                     total: changes.len(),
                     breaking,
                     diff_id: posted_diff_id,
                     error: None,
+                    decision,
                 });
             }
 
@@ -910,6 +974,7 @@ async fn main() -> Result<()> {
                             "breaking": r.breaking,
                             "diff_id":  r.diff_id,
                             "error":    r.error,
+                            "verdict":  r.decision.verdict.wire_str(),
                         })
                     })
                     .collect();
@@ -932,19 +997,20 @@ async fn main() -> Result<()> {
                     } else {
                         "PASS"
                     };
+                    let verdict = r.decision.verdict.wire_str();
                     println!(
-                        "{:<42} {:>7} {:>10}  {}",
-                        r.label, r.total, r.breaking, status
+                        "{:<42} {:>7} {:>10}  {status} ({verdict})",
+                        r.label, r.total, r.breaking
                     );
                 }
                 println!("{sep}");
             }
 
-            let has_failures = row_results
-                .iter()
-                .any(|r| r.breaking > 0 || r.error.is_some());
-            if has_failures {
-                std::process::exit(1);
+            let decisions: Vec<policy::PolicyDecision> =
+                row_results.iter().map(|r| r.decision.clone()).collect();
+            let code = policy::batch_exit_code(&decisions);
+            if code != 0 {
+                std::process::exit(code);
             }
         }
 
@@ -1184,8 +1250,14 @@ fn split_csv_line(line: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    for ch in line.chars() {
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
         match ch {
+            // RFC 4180: a doubled quote inside a quoted field is a literal quote.
+            '"' if in_quotes && chars.peek() == Some(&'"') => {
+                chars.next();
+                current.push('"');
+            }
             '"' => in_quotes = !in_quotes,
             ',' if !in_quotes => {
                 result.push(current.trim().to_owned());
@@ -1196,4 +1268,27 @@ fn split_csv_line(line: &str) -> Vec<String> {
     }
     result.push(current.trim().to_owned());
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_csv_line;
+
+    // O-13: escaped quotes per RFC 4180 — previously `""` toggled the quote
+    // state twice and the literal quote was lost.
+    #[test]
+    fn split_csv_line_handles_escaped_quotes() {
+        assert_eq!(
+            split_csv_line(r#""a""b",c"#),
+            vec![r#"a"b"#.to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_csv_line_quoted_comma_stays_one_field() {
+        assert_eq!(
+            split_csv_line(r#""specs/base, v1.yaml",head.yaml"#),
+            vec!["specs/base, v1.yaml".to_string(), "head.yaml".to_string()]
+        );
+    }
 }
