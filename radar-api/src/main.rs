@@ -162,17 +162,41 @@ async fn main() -> Result<()> {
         let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             interval.tick().await;
-            // Read retention_days from settings each tick so UI changes take effect.
-            let days: u32 =
-                sqlx::query_scalar("SELECT value FROM settings WHERE key = 'retention.days'")
-                    .fetch_optional(&pool_for_retention)
+            // N-29: retention is per-org. Each org that configured its own
+            // window is purged with that window; every other org falls back to
+            // the default. One tenant's setting can no longer purge another's
+            // history.
+            let configured = radar_api::configured_retention_days(&pool_for_retention)
+                .await
+                .unwrap_or_default();
+
+            for (org, days) in &configured {
+                let scope = radar_api::RetentionScope::Org(org);
+                match radar_api::purge_old_usage_events_scoped(&pool_for_retention, *days, &scope)
                     .await
-                    .ok()
-                    .flatten()
-                    .and_then(|v: String| v.parse().ok())
-                    .unwrap_or(RETENTION_DEFAULT_DAYS);
-            match radar_api::purge_old_usage_events(&pool_for_retention, days).await {
-                Ok(n) => tracing::info!("retention: purged {n} old usage events (window={days}d)"),
+                {
+                    Ok(n) => tracing::info!(
+                        "retention: purged {n} old usage events (org={org}, window={days}d)"
+                    ),
+                    Err(e) => tracing::warn!("retention job failed for org={org}: {e}"),
+                }
+                match radar_api::purge_old_csv_runs_scoped(&pool_for_retention, *days, &scope).await
+                {
+                    Ok(n) => tracing::info!(
+                        "retention: purged {n} old csv run jobs (org={org}, window={days}d)"
+                    ),
+                    Err(e) => tracing::warn!("csv run retention job failed for org={org}: {e}"),
+                }
+            }
+
+            let configured_orgs: Vec<String> =
+                configured.iter().map(|(org, _)| org.clone()).collect();
+            let rest = radar_api::RetentionScope::UnconfiguredOrgs(&configured_orgs);
+            let days = RETENTION_DEFAULT_DAYS;
+            match radar_api::purge_old_usage_events_scoped(&pool_for_retention, days, &rest).await {
+                Ok(n) => tracing::info!(
+                    "retention: purged {n} old usage events (default window={days}d)"
+                ),
                 Err(e) => tracing::warn!("retention job failed: {e}"),
             }
             match radar_api::expire_old_evidence(&pool_for_retention).await {
@@ -181,8 +205,10 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => tracing::warn!("evidence expiry job failed: {e}"),
             }
-            match radar_api::purge_old_csv_runs(&pool_for_retention, days).await {
-                Ok(n) => tracing::info!("retention: purged {n} old csv run jobs (window={days}d)"),
+            match radar_api::purge_old_csv_runs_scoped(&pool_for_retention, days, &rest).await {
+                Ok(n) => tracing::info!(
+                    "retention: purged {n} old csv run jobs (default window={days}d)"
+                ),
                 Err(e) => tracing::warn!("csv run retention job failed: {e}"),
             }
         }

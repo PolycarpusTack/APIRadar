@@ -45,7 +45,10 @@ pub use csv_runner::purge_old_csv_runs;
 pub(crate) use errors::get_prometheus_handle;
 #[cfg(test)]
 pub(crate) use serde_json::Value;
-pub use settings::{expire_old_evidence, purge_old_usage_events};
+pub use settings::{
+    configured_retention_days, expire_old_evidence, purge_old_csv_runs_scoped,
+    purge_old_usage_events_scoped, RetentionScope,
+};
 #[cfg(test)]
 pub(crate) use utils::{
     apply_evolution_rules, field_in_deny_list, is_severity_downgrade, normalise_path,
@@ -847,6 +850,98 @@ mod tests {
         assert_eq!(json["accepted"], 2);
     }
 
+    // N-29: settings are per-org — one tenant's PUT must not rewrite another's
+    // policy, and the retention job must not purge across org boundaries.
+    #[tokio::test]
+    async fn settings_are_scoped_per_org() {
+        let pool = test_pool().await;
+        let acme = test_helpers::TestClient::new_with_jwt(pool.clone(), "acme");
+        let globex = test_helpers::TestClient::new_with_jwt(pool.clone(), "globex");
+
+        let body = serde_json::json!({
+            "policy_block_on": "never",
+            "policy_lookback_days": 7,
+            "policy_allow_override_with": "acme-ack",
+            "retention_days": 5
+        });
+        assert_eq!(acme.put_json("/v1/settings", &body).await.status(), 200);
+
+        let acme_view = acme.get("/v1/settings").await.json();
+        assert_eq!(acme_view["policy_block_on"], "never");
+        assert_eq!(acme_view["retention_days"], 5);
+
+        // The other tenant still sees defaults — not acme's values.
+        let globex_view = globex.get("/v1/settings").await.json();
+        assert_eq!(
+            globex_view["policy_block_on"], "active_consumers",
+            "one org's settings must not leak into another's: {globex_view}"
+        );
+        assert_eq!(globex_view["retention_days"], 90);
+    }
+
+    #[tokio::test]
+    async fn retention_purge_does_not_cross_orgs() {
+        let pool = test_pool().await;
+
+        for (svc, org) in [("svc-acme", "acme"), ("svc-globex", "globex")] {
+            q!("INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) VALUES (?, ?, ?, ?, ?, ?)")
+                .bind(svc)
+                .bind(svc)
+                .bind("https://example.test/repo")
+                .bind("team")
+                .bind("openapi")
+                .bind(org)
+                .execute(&pool)
+                .await
+                .unwrap();
+            q!("INSERT INTO consumer (id, name, repo_url, owner_team, contact, org_id) VALUES (?, ?, ?, ?, ?, ?)")
+                .bind(format!("con-{org}"))
+                .bind(format!("con-{org}"))
+                .bind("https://example.test/consumer")
+                .bind("team")
+                .bind("a@example.test")
+                .bind(org)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let old_ts = (Utc::now() - Duration::days(100)).to_rfc3339();
+            q!("INSERT INTO usage_event (id, consumer_id, service_id, operation, recorded_at) VALUES (?, ?, ?, ?, ?)")
+                .bind(Uuid::new_v4().to_string())
+                .bind(format!("con-{org}"))
+                .bind(svc)
+                .bind("GET /x")
+                .bind(&old_ts)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // Purge acme only — globex's event must survive.
+        let scope = RetentionScope::Org("acme");
+        let deleted = purge_old_usage_events_scoped(&pool, 30, &scope)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1, "exactly acme's event should be purged");
+
+        let remaining: i64 =
+            qs!("SELECT COUNT(*) FROM usage_event WHERE service_id = 'svc-globex'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            remaining, 1,
+            "another org's history must survive a tenant's retention window"
+        );
+
+        // The default pass covers every org EXCEPT the configured one.
+        let configured = vec!["acme".to_string()];
+        let rest = RetentionScope::UnconfiguredOrgs(&configured);
+        let deleted_rest = purge_old_usage_events_scoped(&pool, 30, &rest)
+            .await
+            .unwrap();
+        assert_eq!(deleted_rest, 1, "globex falls under the default window");
+    }
+
     // O-4: RADAR_SERVICE_TOKEN mode is an advertised deployment mode; a correct
     // bearer token must authorize CallerOrg endpoints (it 401'd them after the
     // F-02 refactor — the first test for this mode).
@@ -997,7 +1092,10 @@ mod tests {
         .unwrap();
 
         // Purge rows older than 30 days — should delete the 100-day-old row.
-        let deleted = purge_old_usage_events(&pool, 30).await.unwrap();
+        let all_orgs = RetentionScope::UnconfiguredOrgs(&[]);
+        let deleted = purge_old_usage_events_scoped(&pool, 30, &all_orgs)
+            .await
+            .unwrap();
         assert!(
             deleted >= 1,
             "expected at least 1 deleted row, got {deleted}"
@@ -1019,7 +1117,9 @@ mod tests {
         .unwrap();
 
         // Purge again — fresh event should NOT be deleted.
-        let deleted2 = purge_old_usage_events(&pool, 30).await.unwrap();
+        let deleted2 = purge_old_usage_events_scoped(&pool, 30, &all_orgs)
+            .await
+            .unwrap();
         assert_eq!(
             deleted2, 0,
             "fresh event should not be purged, but got {deleted2} deletions"
