@@ -896,8 +896,7 @@ fn diff_schema_properties(
                     resolve_boxed_schema(head_spec, hi),
                 ) {
                     diff_schema_properties(
-                        op_path, prefix, is_request, bs, hs, base_spec, head_spec, changes,
-                        visited,
+                        op_path, prefix, is_request, bs, hs, base_spec, head_spec, changes, visited,
                     );
                 }
             }
@@ -3524,11 +3523,9 @@ paths:
 "#;
         let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
         assert!(
-            changes
-                .iter()
-                .any(|c| c.kind == ChangeKind::TypeChanged
-                    && c.severity == Severity::Breaking
-                    && c.path == "GET /users \u{2192} response"),
+            changes.iter().any(|c| c.kind == ChangeKind::TypeChanged
+                && c.severity == Severity::Breaking
+                && c.path == "GET /users \u{2192} response"),
             "array → object at the response root must be a Breaking TypeChanged, got: {:?}",
             changes
         );

@@ -724,14 +724,33 @@ mod tests {
 
     #[test]
     fn comment_contains_marker() {
-        let body =
-            build_comment_with_suites(&sample_changes(), "abc", "def", None, "pass", "closed", &[], false, "drift-ack");
+        let body = build_comment_with_suites(
+            &sample_changes(),
+            "abc",
+            "def",
+            None,
+            "pass",
+            "closed",
+            &[],
+            false,
+            "drift-ack",
+        );
         assert!(body.starts_with(COMMENT_MARKER));
     }
 
     #[test]
     fn empty_changes_produces_success_message() {
-        let body = build_comment_with_suites(&[], "abc", "def", None, "pass", "closed", &[], false, "drift-ack");
+        let body = build_comment_with_suites(
+            &[],
+            "abc",
+            "def",
+            None,
+            "pass",
+            "closed",
+            &[],
+            false,
+            "drift-ack",
+        );
         assert!(body.contains("No API Changes"));
     }
 
@@ -779,7 +798,17 @@ mod tests {
 
     #[test]
     fn empty_changes_comment_starts_with_marker() {
-        let body = build_comment_with_suites(&[], "sha1", "sha2", None, "pass", "closed", &[], false, "drift-ack");
+        let body = build_comment_with_suites(
+            &[],
+            "sha1",
+            "sha2",
+            None,
+            "pass",
+            "closed",
+            &[],
+            false,
+            "drift-ack",
+        );
         assert!(body.starts_with(COMMENT_MARKER));
     }
 
@@ -791,7 +820,17 @@ mod tests {
             severity: Severity::NonBreakingRisky,
             description: None,
         }];
-        let body = build_comment_with_suites(&changes, "abc", "def", None, "warn", "warn", &[], false, "drift-ack");
+        let body = build_comment_with_suites(
+            &changes,
+            "abc",
+            "def",
+            None,
+            "warn",
+            "warn",
+            &[],
+            false,
+            "drift-ack",
+        );
         assert!(body.contains("\u{1f7e1}")); // 🟡
     }
 
