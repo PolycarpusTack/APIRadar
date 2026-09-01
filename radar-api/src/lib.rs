@@ -709,11 +709,13 @@ async fn health(State(pool): State<sqlx::AnyPool>) -> impl IntoResponse {
     match q!("SELECT 1").execute(&pool).await {
         Ok(_) => (
             StatusCode::OK,
-            Json(json!({"status": "ok", "db": "ok", "version": "0.1.0"})),
+            Json(json!({"status": "ok", "db": "ok", "version": env!("CARGO_PKG_VERSION")})),
         ),
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"status": "degraded", "db": "unreachable", "version": "0.1.0"})),
+            Json(
+                json!({"status": "degraded", "db": "unreachable", "version": env!("CARGO_PKG_VERSION")}),
+            ),
         ),
     }
 }

@@ -203,7 +203,8 @@ function Sidebar({ showSignOut }: { showSignOut: boolean }) {
           className="mt-2 text-[10px]"
           style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}
         >
-          v0.2.0
+          {/* Keep in sync with package.json "version" — bump on release. */}
+          v0.3.0
         </p>
       </div>
     </aside>
