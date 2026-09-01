@@ -858,6 +858,31 @@ fn diff_schema_properties(
         _ => {}
     }
 
+    // O-1: the schemas' top-level kinds differ (array → object, object → string,
+    // object → oneOf, oneOf → anyOf, …). Every such pair previously fell through
+    // to the `_ => return` arm below and produced no change at all — the silent
+    // miss on e.g. "bare array response becomes a paginated object". allOf pairs
+    // never reach this point (flattened and returned above); matched oneOf/anyOf
+    // pairs likewise. An untyped side (`SchemaKind::Any`) makes no kind claim, so
+    // nothing is compared.
+    if let (Some(base_label), Some(head_label)) = (
+        schema_kind_label(&base_schema.schema_kind),
+        schema_kind_label(&head_schema.schema_kind),
+    ) {
+        if base_label != head_label {
+            changes.push(DiffChange {
+                path: format!("{op_path} \u{2192} {prefix}"),
+                kind: ChangeKind::TypeChanged,
+                severity: Severity::Breaking,
+                description: Some(format!(
+                    "'{prefix}' type changed from '{base_label}' to '{head_label}'"
+                )),
+            });
+            visited.remove(&self_ptr);
+            return;
+        }
+    }
+
     let (base_obj, head_obj) = match (&base_schema.schema_kind, &head_schema.schema_kind) {
         (SchemaKind::Type(Type::Object(b)), SchemaKind::Type(Type::Object(h))) => (b, h),
         // N-4: array-of-objects (e.g. `GET /users -> [User]`). Recurse into the
@@ -1082,6 +1107,7 @@ fn diff_object_types(
         let prop_label = format!("{}.{}", prefix, prop_name);
 
         // Type changed? → Breaking TypeChanged
+        let mut type_change_reported = false;
         if let (Some(base_type), Some(head_type)) = (
             type_label_from_kind(&base_prop_schema.schema_kind),
             type_label_from_kind(&head_prop_schema.schema_kind),
@@ -1096,6 +1122,7 @@ fn diff_object_types(
                         prop_name, base_type, head_type
                     )),
                 });
+                type_change_reported = true;
             }
         }
 
@@ -1158,7 +1185,12 @@ fn diff_object_types(
             });
         }
 
-        // Recurse into nested objects
+        // Recurse into nested objects — unless this property's kind change was
+        // already reported above: the O-1 root-kind check inside the recursion
+        // would re-report the same change at the same path.
+        if type_change_reported {
+            continue;
+        }
         let nested_prefix = format!("{}.{}", prefix, prop_name);
         diff_schema_properties(
             op_path,
@@ -1230,6 +1262,25 @@ fn extract_enum_values(schema: &Schema) -> Vec<String> {
 /// Return a short string describing the primitive type of a schema kind.
 /// For arrays, includes the item type: "array<string>", "array<integer>", etc.
 /// Returns `None` for complex/compound kinds.
+/// A comparable label for a schema's top-level kind, including composed kinds —
+/// unlike `type_label_from_kind`, which only labels concrete `Type` kinds.
+/// `SchemaKind::Any` (untyped) yields `None`: it makes no kind claim to compare.
+fn schema_kind_label(kind: &SchemaKind) -> Option<String> {
+    match kind {
+        // Arrays are labelled without their item type: a `$ref` item labels as
+        // "any" in `type_label_from_kind`, which would falsely differ from an
+        // inline item. Item-kind changes are caught by the recursion into the
+        // item schemas, where this comparison runs again on the resolved kinds.
+        SchemaKind::Type(Type::Array(_)) => Some("array".to_string()),
+        SchemaKind::Type(_) => type_label_from_kind(kind),
+        SchemaKind::OneOf { .. } => Some("oneOf".to_string()),
+        SchemaKind::AnyOf { .. } => Some("anyOf".to_string()),
+        SchemaKind::AllOf { .. } => Some("allOf".to_string()),
+        SchemaKind::Not { .. } => Some("not".to_string()),
+        SchemaKind::Any(_) => None,
+    }
+}
+
 fn type_label_from_kind(kind: &SchemaKind) -> Option<String> {
     match kind {
         SchemaKind::Type(t) => Some(match t {
@@ -3415,6 +3466,200 @@ paths:
                 .iter()
                 .any(|c| c.kind == ChangeKind::ResponseRemoved),
             "'200' vs '2XX' must not be a ResponseRemoved, got: {:?}",
+            changes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // O-1: a schema whose top-level kind changes must diff as Breaking
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_response_array_to_object_is_breaking() {
+        // The most common breaking list-endpoint change: bare array → paginated object.
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                  total: { type: integer }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.kind == ChangeKind::TypeChanged
+                    && c.severity == Severity::Breaking
+                    && c.path == "GET /users \u{2192} response"),
+            "array → object at the response root must be a Breaking TypeChanged, got: {:?}",
+            changes
+        );
+    }
+
+    #[test]
+    fn test_response_object_to_string_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /status:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { type: string }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /status:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: string
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking),
+            "object → string at the response root must be a Breaking TypeChanged, got: {:?}",
+            changes
+        );
+    }
+
+    #[test]
+    fn test_response_object_to_oneof_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /payment:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  amount: { type: number }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /payment:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      amount: { type: number }
+                  - type: object
+                    properties:
+                      error: { type: string }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking),
+            "object → oneOf wrapper at the response root must be a Breaking TypeChanged, got: {:?}",
+            changes
+        );
+    }
+
+    #[test]
+    fn test_oneof_to_anyof_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /search:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      hit: { type: string }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /search:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - type: object
+                    properties:
+                      hit: { type: string }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking),
+            "oneOf → anyOf at the schema root must be a Breaking TypeChanged, got: {:?}",
             changes
         );
     }
