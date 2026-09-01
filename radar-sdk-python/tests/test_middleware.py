@@ -1,4 +1,6 @@
 """Tests for radar_monitor middleware."""
+from __future__ import annotations
+
 import json
 import threading
 import time
@@ -59,6 +61,7 @@ class TestRadarBatcher(unittest.TestCase):
             b.push("GET /a")
             # First push triggers flush because len(queue) >= max_batch
             b.push("GET /b")
+            b._send_queue.join()  # wait for the send worker to drain
             # urlopen was called at least once for the first flush
             self.assertTrue(mock_open.called)
             b.destroy()
@@ -69,6 +72,7 @@ class TestRadarBatcher(unittest.TestCase):
             b = self._make_batcher()
             b.push("DELETE /resource", "resource.id")
             b.flush()
+            b._send_queue.join()  # wait for the send worker to drain
             # Grab the Request object passed to urlopen
             call_args = mock_open.call_args
             req = call_args[0][0]
@@ -92,6 +96,7 @@ class TestRadarBatcher(unittest.TestCase):
             )
             b.push("GET /secure")
             b.flush()
+            b._send_queue.join()  # wait for the send worker to drain
             req = mock_open.call_args[0][0]
             self.assertEqual(req.get_header("Authorization"), "Bearer secret")
         b.destroy()
@@ -102,6 +107,7 @@ class TestRadarBatcher(unittest.TestCase):
             b = self._make_batcher()
             b.push("GET /open")
             b.flush()
+            b._send_queue.join()  # wait for the send worker to drain
             req = mock_open.call_args[0][0]
             self.assertIsNone(req.get_header("Authorization"))
         b.destroy()
@@ -112,14 +118,47 @@ class TestRadarBatcher(unittest.TestCase):
             b = self._make_batcher()
             b.push("GET /x")
             b.flush()  # must not raise
+            b._send_queue.join()  # the worker must swallow the error too
         b.destroy()
 
     def test_flush_empty_queue_is_noop(self):
         with patch("urllib.request.urlopen") as mock_open:
             b = self._make_batcher()
             b.flush()
+            b._send_queue.join()
             mock_open.assert_not_called()
         b.destroy()
+
+    def test_push_does_not_perform_network_io_inline(self):
+        """Flush network I/O must run on a worker thread, never inline in
+        push(): the middleware calls push() from the async request path, and
+        a synchronous urlopen (timeout=3) there stalls the event loop."""
+        release = threading.Event()
+        call_started = threading.Event()
+        called_from: list = []
+
+        def slow_urlopen(req, timeout=None):
+            called_from.append(threading.current_thread())
+            call_started.set()
+            release.wait(5)  # simulate a slow radar-api
+            return MagicMock()
+
+        with patch("urllib.request.urlopen", side_effect=slow_urlopen):
+            b = self._make_batcher(max_batch=1)
+            try:
+                start = time.monotonic()
+                b.push("GET /a")  # reaches max_batch -> triggers flush
+                elapsed = time.monotonic() - start
+                self.assertLess(
+                    elapsed, 1.0,
+                    "push() blocked on network I/O for %.2fs" % elapsed)
+                self.assertTrue(call_started.wait(2),
+                                "the flushed batch was never sent")
+                self.assertIsNot(called_from[0], threading.current_thread(),
+                                 "urlopen ran on the caller's thread")
+            finally:
+                release.set()
+                b.destroy()
 
     def test_destroy_cancels_timer(self):
         b = self._make_batcher(flush_interval=9999.0)
@@ -170,6 +209,35 @@ class TestRadarMiddleware(unittest.IsolatedAsyncioTestCase):
     async def test_falls_back_to_raw_path_without_route(self):
         calls = await self._call_middleware("/users/123", method="GET")
         self.assertEqual(calls[0][0], "GET /users/123")
+
+    async def test_route_pattern_recorded_when_router_sets_it_during_app_call(self):
+        """Starlette/FastAPI set scope["route"] DURING routing — inside the
+        awaited app call, not before the middleware runs. No hand-injected
+        scope key here: the wrapped app mutates the scope in place, exactly
+        like Starlette's router does, and the middleware must still record
+        the route pattern instead of the raw per-ID path."""
+        calls: list[tuple] = []
+
+        class _Route:
+            path = "/users/{user_id}"
+
+        async def router_like_app(scope, receive, send):
+            # Mimic Starlette's Router.app: resolve the route and mutate the
+            # scope in place before handling the request.
+            scope["route"] = _Route()
+
+        middleware = RadarMiddleware(
+            app=router_like_app,
+            radar_url="http://localhost:8080",
+            consumer_id="c1",
+            service_id="s1",
+            flush_interval=9999.0,
+        )
+        middleware._batcher.push = lambda op, fp="": calls.append((op, fp))
+
+        scope: dict = {"type": "http", "method": "GET", "path": "/users/123"}
+        await middleware(scope, None, None)
+        self.assertEqual(calls, [("GET /users/{user_id}", "")])
 
     async def test_excludes_health_path(self):
         calls = await self._call_middleware("/health", method="GET")
