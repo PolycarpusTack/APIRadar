@@ -6,7 +6,6 @@ import { spawn, spawnSync } from 'child_process'
 import type { ChildProcess } from 'child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, createWriteStream, renameSync, appendFileSync } from 'fs'
 import type { WriteStream } from 'fs'
-import { tmpdir } from 'os'
 import { randomBytes } from 'crypto'
 
 // ── API sidecar ────────────────────────────────────────────────────────────────
@@ -463,8 +462,15 @@ function getSplashHtml(): string {
 }
 
 function createSplashWindow(): BrowserWindow {
-  const tmpFile = join(tmpdir(), 'radar-splash.html')
-  writeFileSync(tmpFile, getSplashHtml(), 'utf8')
+  // O-20: load the splash from an in-memory data: URL. The previous code wrote
+  // the HTML to a FIXED path in the world-writable temp dir and loadFile'd it —
+  // a TOCTOU window where any local process could pre-place or swap the file
+  // and have its content rendered in a trusted app window (spoofing only: the
+  // splash has no preload and no node integration). The data: URL removes the
+  // file entirely; the splash is ~5 KB (far below Chromium's 2 MB URL cap),
+  // carries no CSP meta, and loads no external resources, so it renders
+  // identically. setSplashStatus (executeJavaScript) is unaffected.
+  const splashUrl = `data:text/html;charset=utf-8;base64,${Buffer.from(getSplashHtml(), 'utf8').toString('base64')}`
 
   const splash = new BrowserWindow({
     width: 480,
@@ -484,7 +490,7 @@ function createSplashWindow(): BrowserWindow {
 
   hardenWindow(splash)
 
-  void splash.loadFile(tmpFile)
+  void splash.loadURL(splashUrl)
   splash.once('ready-to-show', () => splash.show())
   return splash
 }

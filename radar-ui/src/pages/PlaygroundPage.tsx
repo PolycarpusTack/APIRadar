@@ -488,7 +488,15 @@ export default function PlaygroundPage() {
             key={iframeKey}
             srcDoc={buildScalarHtml(activeUrl, activeEnv)}
             title="API Playground"
-            sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
+            // O-20: no popup tokens. `allow-popups-to-escape-sandbox` let a
+            // malicious spec loaded by URL window.open arbitrary sites, and in
+            // the desktop shell even plain `allow-popups` keeps that phishing
+            // vector: the main process forwards any https window.open to the OS
+            // browser (hardenWindow's setWindowOpenHandler), regardless of the
+            // popup's own sandbox flags. Scalar's core UI (browse the spec, try
+            // requests via fetch) opens no windows — the only loss is external
+            // target=_blank links inside spec descriptions, now blocked.
+            sandbox="allow-scripts allow-forms"
             style={{ width: '100%', height: '100%', border: 'none' }}
           />
         </div>
