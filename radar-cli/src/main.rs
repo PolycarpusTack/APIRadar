@@ -15,6 +15,7 @@ mod policy;
 mod postman;
 mod register;
 mod render;
+mod scan;
 mod test_gen;
 
 // ---------------------------------------------------------------------------
@@ -1062,126 +1063,16 @@ async fn main() -> Result<()> {
                 eprintln!("      Use --operation-map \"field=METHOD /path\" to tie fields to concrete API operations.");
             }
 
-            println!("Scanning {}…", source_dir.display());
-            let records = radar_scanner::scan_directory(&source_dir);
-            println!("Found {} property accesses.", records.len());
-
-            if records.is_empty() {
-                return Ok(());
-            }
-
-            let sites: Vec<api_client::CallSiteBody> = records
-                .into_iter()
-                .map(|r| {
-                    // S2: use scanner-detected operation; fall back to --operation-map for S1
-                    let operation = r
-                        .operation
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string())
-                        .or_else(|| op_map.get(&r.field_path).cloned())
-                        .unwrap_or_default();
-                    api_client::CallSiteBody {
-                        consumer_id: consumer_id.clone(),
-                        service_id: service_id.clone(),
-                        operation,
-                        file_path: r.file_path,
-                        line_number: r.line_number as i64,
-                        field_path: r.field_path,
-                    }
-                })
-                .collect();
-
-            // Post in chunks of 500 to stay within server limit.
-            let mut total = 0usize;
-            for chunk in sites.chunks(500) {
-                match api_client::post_call_sites(&api_url, chunk, token.as_deref()).await {
-                    Ok(n) => total += n,
-                    Err(e) => eprintln!("Warning: failed to post call sites: {e}"),
-                }
-            }
-            println!("Posted {total} call site record(s) to {api_url}.");
-
-            // E-7: scan collection files and write impact_evidence directly.
-            if !collection.is_empty() {
-                println!("Scanning {} collection file(s)…", collection.len());
-                for col_path in &collection {
-                    match radar_scanner::parse_collection(col_path) {
-                        Err(e) => eprintln!("Warning: skipping {}: {e}", col_path.display()),
-                        Ok((col_name, requests)) => {
-                            // Auto-register consumer by collection name
-                            let resolved_consumer_id = match api_client::upsert_consumer_by_name(
-                                &api_url,
-                                &col_name,
-                                "collection_file",
-                                token.as_deref(),
-                            )
-                            .await
-                            {
-                                Ok((id, created)) => {
-                                    if created {
-                                        println!("  Registered consumer '{col_name}' ({id})");
-                                    }
-                                    id
-                                }
-                                Err(e) => {
-                                    eprintln!("Warning: could not register consumer '{col_name}': {e}; using --consumer-id");
-                                    consumer_id.clone()
-                                }
-                            };
-
-                            // Build evidence items — one per (request × field_path), or one
-                            // with empty field_path when the request has no test assertions.
-                            let mut evidence: Vec<api_client::CollectionEvidenceBody> = Vec::new();
-                            let file_base = col_path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("<collection>");
-                            for req in &requests {
-                                let op = req.operation.as_deref().unwrap_or("").to_string();
-                                if req.field_paths.is_empty() {
-                                    evidence.push(api_client::CollectionEvidenceBody {
-                                        consumer_id: resolved_consumer_id.clone(),
-                                        service_id: service_id.clone(),
-                                        operation: op,
-                                        field_path: String::new(),
-                                        evidence_uri: format!("file://{file_base}#{}", req.name),
-                                    });
-                                } else {
-                                    for fp in &req.field_paths {
-                                        evidence.push(api_client::CollectionEvidenceBody {
-                                            consumer_id: resolved_consumer_id.clone(),
-                                            service_id: service_id.clone(),
-                                            operation: op.clone(),
-                                            field_path: fp.clone(),
-                                            evidence_uri: format!(
-                                                "file://{file_base}#{}",
-                                                req.name
-                                            ),
-                                        });
-                                    }
-                                }
-                            }
-
-                            match api_client::post_collection_evidence(
-                                &api_url,
-                                &evidence,
-                                token.as_deref(),
-                            )
-                            .await
-                            {
-                                Ok((accepted, inserted)) => println!(
-                                    "  {}: {accepted} request(s), {inserted} new evidence row(s)",
-                                    col_path.display()
-                                ),
-                                Err(e) => {
-                                    eprintln!("Warning: failed to post collection evidence: {e}")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            scan::run_scan(
+                &api_url,
+                &consumer_id,
+                &service_id,
+                &source_dir,
+                token.as_deref(),
+                &op_map,
+                &collection,
+            )
+            .await?;
         }
         Commands::Explain {
             diff_id,

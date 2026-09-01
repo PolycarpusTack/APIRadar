@@ -108,7 +108,7 @@ All evidence flows through `impact_evidence` (append-only, migration 011). Three
 `radar-cli/src/policy.rs` — `decide()` takes `(changes, policy, fail_mode, has_active_consumers, has_label_override, api_error)`. Always post the result to `POST /v1/policy-decisions` after `drift check`.
 
 ### Library target
-`radar-cli` exposes `radar_cli_lib` as a `[lib]` target. Integration tests in `radar-cli/tests/` import from `radar_cli_lib`. Keep `lib.rs` to just `pub mod` declarations for: `api_client`, `github`, `policy`, `render`.
+`radar-cli` exposes `radar_cli_lib` as a `[lib]` target. Integration tests in `radar-cli/tests/` import from `radar_cli_lib`. Keep `lib.rs` to just `pub mod` declarations for: `api_client`, `github`, `policy`, `render`, `scan`.
 
 ---
 
