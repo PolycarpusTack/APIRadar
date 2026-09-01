@@ -173,6 +173,58 @@ fn spec_version_id(service_id: &str, git_ref: &str) -> String {
 mod tests {
     use super::spec_version_id;
 
+    async fn test_pool() -> sqlx::AnyPool {
+        sqlx::any::install_default_drivers();
+        let url = crate::test_helpers::test_db_url();
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("failed to create test pool");
+        crate::test_helpers::isolate_postgres_schema(&pool, &url).await;
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("failed to run migrations");
+        pool
+    }
+
+    // O-15: batch compare fails closed through the pinned-client path — a
+    // non-HTTPS or private-address URL yields an item error, never a fetch.
+    #[tokio::test]
+    async fn batch_compare_blocks_ssrf_urls() {
+        let pool = test_pool().await;
+        let app = crate::build_router(pool, None, 4 * 1024 * 1024, false, None);
+
+        let body = serde_json::json!([
+            { "base_url": "http://127.0.0.1/spec.yaml",
+              "head_url": "http://127.0.0.1/spec2.yaml",
+              "format": "openapi", "label": "plain-http" },
+            { "base_url": "https://192.168.1.10/spec.yaml",
+              "head_url": "https://192.168.1.10/spec2.yaml",
+              "format": "openapi", "label": "private-addr" }
+        ]);
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/compare/batch")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        use tower::ServiceExt;
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        use http_body_util::BodyExt;
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let results: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for item in results.as_array().expect("array of results") {
+            assert_eq!(item["status"], "error", "item must fail closed: {item}");
+            assert!(
+                item["error"].as_str().unwrap_or("").contains("SSRF policy"),
+                "error must name the SSRF policy: {item}"
+            );
+        }
+    }
+
     #[test]
     fn spec_version_id_is_deterministic() {
         assert_eq!(
@@ -1291,11 +1343,6 @@ pub(crate) async fn batch_compare(
     }
 
     let org_id = caller.sql_scope().to_string();
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent("radar-api/batch-compare")
-        .build()
-        .unwrap_or_default();
     let mut results: Vec<BatchResultItem> = Vec::new();
 
     for item in &items {
@@ -1304,7 +1351,7 @@ pub(crate) async fn batch_compare(
             .as_deref()
             .unwrap_or(item.base_url.as_str())
             .to_string();
-        match run_batch_item(&pool, &http, item, &org_id, &label).await {
+        match run_batch_item(&pool, item, &org_id, &label).await {
             Ok(r) => results.push(r),
             Err(e) => results.push(BatchResultItem {
                 label,
@@ -1322,20 +1369,28 @@ pub(crate) async fn batch_compare(
 
 async fn run_batch_item(
     pool: &sqlx::AnyPool,
-    http: &reqwest::Client,
     item: &BatchCompareItem,
     org_id: &str,
     label: &str,
 ) -> anyhow::Result<BatchResultItem> {
-    // SSRF guard: block private/loopback addresses and non-HTTPS URLs.
-    if crate::utils::is_ssrf_blocked(&item.base_url) {
-        anyhow::bail!("base_url is blocked by SSRF policy");
-    }
-    if crate::utils::is_ssrf_blocked(&item.head_url) {
-        anyhow::bail!("head_url is blocked by SSRF policy");
-    }
+    // O-15 (F-08 parity): fetch through the SSRF-pinned client — resolve once,
+    // reject private ranges, and pin the connection to the validated
+    // addresses. This was the one outbound path still doing validate-then-
+    // fetch with a plain client, i.e. re-resolving DNS at connect time.
+    let base_client = crate::utils::ssrf_pinned_client(
+        &item.base_url,
+        std::time::Duration::from_secs(30),
+        Some("radar-api/batch-compare"),
+    )
+    .ok_or_else(|| anyhow::anyhow!("base_url is blocked by SSRF policy"))?;
+    let head_client = crate::utils::ssrf_pinned_client(
+        &item.head_url,
+        std::time::Duration::from_secs(30),
+        Some("radar-api/batch-compare"),
+    )
+    .ok_or_else(|| anyhow::anyhow!("head_url is blocked by SSRF policy"))?;
 
-    let base_content = http
+    let base_content = base_client
         .get(&item.base_url)
         .send()
         .await
@@ -1346,7 +1401,7 @@ async fn run_batch_item(
         .await
         .map_err(|e| anyhow::anyhow!("read base_url: {e}"))?;
 
-    let head_content = http
+    let head_content = head_client
         .get(&item.head_url)
         .send()
         .await
