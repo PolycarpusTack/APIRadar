@@ -35,7 +35,7 @@ pub(crate) mod webhooks;
 pub(crate) use ai_tests::templates_from_changes;
 pub(crate) use auth::{
     auth_middleware, oidc_callback, oidc_login, oidc_logout, oidc_me, JwtSecretExt, RequireAuth,
-    SingleTenantMode,
+    ServiceTokenExt, SingleTenantMode,
 };
 #[cfg(test)]
 pub(crate) use auth::{sign_jwt, JwtClaims};
@@ -364,6 +364,30 @@ pub fn build_router(
     require_auth: bool,
     jwt_secret: Option<String>,
 ) -> Router {
+    // O-4: the static service token is read once here (never per request) and
+    // threaded through `build_router_with_auth`, which tests call directly so
+    // service-token mode is exercisable without process-global env vars.
+    let service_token = std::env::var("RADAR_SERVICE_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
+    build_router_with_auth(
+        pool,
+        static_dir,
+        max_body_bytes,
+        require_auth,
+        jwt_secret,
+        service_token,
+    )
+}
+
+pub(crate) fn build_router_with_auth(
+    pool: sqlx::AnyPool,
+    static_dir: Option<&str>,
+    max_body_bytes: usize,
+    require_auth: bool,
+    jwt_secret: Option<String>,
+    service_token: Option<String>,
+) -> Router {
     let v1 = Router::new()
         .route(
             "/services",
@@ -528,21 +552,22 @@ pub fn build_router(
         // Outermost layer: inject RequireAuth + JwtSecretExt before auth_middleware runs.
         .layer(middleware::from_fn({
             let jwt_secret = jwt_secret.clone();
+            let service_token = service_token.clone();
             // F-02: a server has no tenant concept only when nothing enforces
             // identity — no JWT secret, no service token, no require_auth.
             // Decided once here rather than per request, so a stray env var
             // cannot widen a caller's scope at runtime.
             let single_tenant = !require_auth
                 && jwt_secret.as_deref().unwrap_or_default().is_empty()
-                && std::env::var("RADAR_SERVICE_TOKEN")
-                    .unwrap_or_default()
-                    .is_empty();
+                && service_token.is_none();
             move |mut req: Request, next: Next| {
                 let s = jwt_secret.clone();
+                let st = service_token.clone();
                 async move {
                     req.extensions_mut().insert(RequireAuth(require_auth));
                     req.extensions_mut().insert(SingleTenantMode(single_tenant));
                     req.extensions_mut().insert(JwtSecretExt(s));
+                    req.extensions_mut().insert(ServiceTokenExt(st));
                     next.run(req).await
                 }
             }
@@ -818,6 +843,59 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["accepted"], 2);
+    }
+
+    // O-4: RADAR_SERVICE_TOKEN mode is an advertised deployment mode; a correct
+    // bearer token must authorize CallerOrg endpoints (it 401'd them after the
+    // F-02 refactor — the first test for this mode).
+    #[tokio::test]
+    async fn service_token_mode_authorizes_caller_org_endpoints() {
+        let pool = test_pool().await;
+        let app = build_router_with_auth(
+            pool,
+            None,
+            4 * 1024 * 1024,
+            false,
+            None,
+            Some("sekret-token".into()),
+        );
+
+        let with_auth = |auth: Option<&str>| {
+            let mut b = HttpRequest::builder().method("GET").uri("/v1/services");
+            if let Some(a) = auth {
+                b = b.header("authorization", a);
+            }
+            b.body(Body::empty()).unwrap()
+        };
+
+        let resp = app
+            .clone()
+            .oneshot(with_auth(Some("Bearer sekret-token")))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a correct service token must authorize a CallerOrg endpoint"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(with_auth(Some("Bearer wrong-token")))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a wrong service token must be rejected"
+        );
+
+        let resp = app.clone().oneshot(with_auth(None)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a missing token must be rejected in service-token mode"
+        );
     }
 
     #[tokio::test]

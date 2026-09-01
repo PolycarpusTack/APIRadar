@@ -697,6 +697,20 @@ pub(crate) struct RequireAuth(pub(crate) bool);
 #[derive(Clone)]
 pub(crate) struct JwtSecretExt(pub(crate) Option<String>);
 
+/// Static service token captured at router-build time (O-4) — never read from
+/// the environment per request, and injectable by tests without env races.
+#[derive(Clone)]
+pub(crate) struct ServiceTokenExt(pub(crate) Option<String>);
+
+/// Marker inserted after a request authenticated with the static service
+/// token. A static token carries no tenant claim: the operator who configured
+/// it configured a no-tenant deployment, so [`CallerOrg`] resolves it to
+/// `SingleTenant` — explicitly, never via an empty-string wildcard (F-02).
+/// Before this marker existed the token branch inserted nothing, and every
+/// `CallerOrg` handler 401'd a correctly-authenticated service-token caller.
+#[derive(Clone, Copy)]
+pub(crate) struct ServiceTokenAuthed;
+
 pub(crate) async fn auth_middleware(mut req: Request, next: Next) -> Response {
     // This middleware is scoped to the /v1 sub-router; /health and /metrics are
     // on the outer router and never reach here.
@@ -746,7 +760,12 @@ pub(crate) async fn auth_middleware(mut req: Request, next: Next) -> Response {
     }
 
     // Legacy static token auth (backwards-compatible when RADAR_JWT_SECRET is not set).
-    let service_token = std::env::var("RADAR_SERVICE_TOKEN").unwrap_or_default();
+    // O-4: read from the build-time extension, not the environment.
+    let service_token = req
+        .extensions()
+        .get::<ServiceTokenExt>()
+        .and_then(|t| t.0.clone())
+        .unwrap_or_default();
     if service_token.is_empty() {
         // require_auth is set at build time (see build_router) to avoid request-time env reads.
         let require_auth = req
@@ -765,6 +784,9 @@ pub(crate) async fn auth_middleware(mut req: Request, next: Next) -> Response {
         return ApiError::Unauthorized.into_response();
     }
 
+    // O-4: mark the request as service-token-authenticated so CallerOrg
+    // resolves it instead of rejecting the (claimless) request.
+    req.extensions_mut().insert(ServiceTokenAuthed);
     next.run(req).await
 }
 
@@ -853,6 +875,14 @@ where
         _state: &S,
     ) -> Result<Self, Self::Rejection> {
         let claims = parts.extensions.get::<JwtClaims>();
+        // O-4: a request the middleware authenticated with the static service
+        // token has no tenant claim by design — the whole install is its
+        // scope. This is an explicit marker set only after constant-time
+        // validation, not a fallback: an unauthenticated request never
+        // carries it.
+        if claims.is_none() && parts.extensions.get::<ServiceTokenAuthed>().is_some() {
+            return Ok(CallerOrg::SingleTenant);
+        }
         // Absent extension → assume multi-tenant. Failing closed matters more
         // than convenience if the layer is ever mis-ordered.
         let mode = parts

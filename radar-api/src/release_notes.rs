@@ -1,5 +1,5 @@
 use crate::ai_tests::load_diff_evidence;
-use crate::auth::{require_org_owned, JwtClaims, OrgResource};
+use crate::auth::{require_org_owned, CallerOrg, OrgResource};
 use crate::errors::ApiError;
 use crate::PaginationParams;
 use axum::{
@@ -13,11 +13,11 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-type OrgExt = Option<axum::extract::Extension<JwtClaims>>;
-
-fn caller_org(org: &OrgExt) -> String {
-    org.as_ref().map(|e| e.org_id.clone()).unwrap_or_default()
-}
+// O-4/Q-1: this module used its own `Option<Extension<JwtClaims>>` pattern,
+// which silently mapped a missing claim to the "" wildcard — the exact shape
+// the F-02 `CallerOrg` refactor exists to eliminate. It now uses the same
+// extractor as every other handler: an unauthorized request is rejected at
+// extraction, and the wildcard is only reachable in single-tenant mode.
 
 #[derive(serde::Deserialize)]
 pub(crate) struct CreateReleaseNoteBody {
@@ -33,10 +33,10 @@ pub(crate) struct PatchStatusBody {
 pub(crate) async fn create_release_note(
     Path(diff_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: OrgExt,
+    caller: CallerOrg,
     Json(body): Json<CreateReleaseNoteBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_org_owned(&pool, OrgResource::Diff, &diff_id, &caller_org(&org)).await?;
+    require_org_owned(&pool, OrgResource::Diff, &diff_id, caller.sql_scope()).await?;
     if body.content.is_empty() {
         return Err(ApiError::Unprocessable("content is required".into()));
     }
@@ -58,12 +58,12 @@ pub(crate) async fn create_release_note(
 // GET /v1/release-notes
 pub(crate) async fn list_release_notes(
     State(pool): State<sqlx::AnyPool>,
-    org: OrgExt,
+    caller: CallerOrg,
     Query(params): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Clamp: a negative LIMIT dumps the whole table on SQLite and 500s on Postgres.
     let (limit, offset) = crate::utils::clamp_pagination(Some(params.limit), Some(params.offset));
-    let org_id = caller_org(&org);
+    let org_id = caller.sql_scope().to_string();
     // Org isolation: authenticated callers only see release notes for diffs whose
     // producer service belongs to their org. Empty org (desktop/no-auth) sees all.
     let base = r#"SELECT rn.id, rn.diff_id, rn.created_at, rn.status,
@@ -116,9 +116,15 @@ pub(crate) async fn list_release_notes(
 pub(crate) async fn get_release_note(
     Path(note_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: OrgExt,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_org_owned(&pool, OrgResource::ReleaseNote, &note_id, &caller_org(&org)).await?;
+    require_org_owned(
+        &pool,
+        OrgResource::ReleaseNote,
+        &note_id,
+        caller.sql_scope(),
+    )
+    .await?;
     let row = q!(r#"SELECT rn.id, rn.diff_id, rn.content, rn.created_at,
                   sv_from.git_ref AS from_git_ref,
                   sv_to.git_ref   AS to_git_ref
@@ -154,11 +160,17 @@ pub(crate) async fn get_release_note(
 pub(crate) async fn patch_release_note_status(
     Path(note_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: OrgExt,
+    caller: CallerOrg,
     Json(body): Json<PatchStatusBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
-    require_org_owned(&pool, OrgResource::ReleaseNote, &note_id, &caller_org(&org)).await?;
+    require_org_owned(
+        &pool,
+        OrgResource::ReleaseNote,
+        &note_id,
+        caller.sql_scope(),
+    )
+    .await?;
     const VALID_STATUSES: &[&str] = &["draft", "reviewed", "published", "superseded"];
     if !VALID_STATUSES.contains(&body.status.as_str()) {
         return Err(ApiError::Unprocessable(format!(
@@ -208,10 +220,10 @@ pub(crate) async fn get_migration_guide(
     Path(diff_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     State(pool): State<sqlx::AnyPool>,
-    org: OrgExt,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
     use sqlx::Row;
-    require_org_owned(&pool, OrgResource::Diff, &diff_id, &caller_org(&org)).await?;
+    require_org_owned(&pool, OrgResource::Diff, &diff_id, caller.sql_scope()).await?;
     let consumer_id = params.get("consumer_id").map(String::as_str);
 
     let diff_row = q!(
@@ -346,9 +358,9 @@ pub(crate) async fn get_migration_guide(
 pub(crate) async fn generate_release_note(
     Path(diff_id): Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: OrgExt,
+    caller: CallerOrg,
 ) -> Result<impl IntoResponse, ApiError> {
-    let org_id = caller_org(&org);
+    let org_id = caller.sql_scope().to_string();
     require_org_owned(&pool, OrgResource::Diff, &diff_id, &org_id).await?;
     // Verify diff exists before queuing.
     let exists: Option<String> = qs!("SELECT id FROM diff WHERE id = ?")
@@ -461,11 +473,11 @@ pub(crate) async fn generate_release_note(
 pub(crate) async fn get_generate_status(
     axum::extract::Path(id): axum::extract::Path<String>,
     State(pool): State<sqlx::AnyPool>,
-    org: OrgExt,
+    caller: CallerOrg,
 ) -> Result<axum::Json<serde_json::Value>, ApiError> {
     use sqlx::Row;
 
-    require_org_owned(&pool, OrgResource::ReleaseNote, &id, &caller_org(&org)).await?;
+    require_org_owned(&pool, OrgResource::ReleaseNote, &id, caller.sql_scope()).await?;
 
     let row = q!(
         "SELECT id, diff_id, content, generation_status, generation_error, status, created_at \
