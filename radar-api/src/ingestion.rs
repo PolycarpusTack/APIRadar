@@ -260,7 +260,13 @@ pub(crate) async fn ingest_otlp_traces(
                 }
 
                 let id = Uuid::new_v4().to_string();
-                let _ = q!(
+                // N-9: only count a row the database actually stored. This
+                // used to be `let _ =` followed by an unconditional
+                // `accepted += 1`, so an unknown consumer_id (FK violation)
+                // was reported to the caller as ingested and silently lost.
+                // A user-caused constraint violation maps to 4xx, matching
+                // POST /v1/usage/events.
+                q!(
                     "INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at)
                      VALUES (?, ?, ?, ?, ?, ?)",
                 )
@@ -271,7 +277,8 @@ pub(crate) async fn ingest_otlp_traces(
                 .bind("")
                 .bind(&now)
                 .execute(&pool)
-                .await;
+                .await
+                .map_err(crate::errors::map_ingest_db_error)?;
 
                 accepted += 1;
             }
@@ -310,7 +317,9 @@ pub(crate) async fn ingest_gateway_logs(
         }
 
         let id = Uuid::new_v4().to_string();
-        let _ = q!(
+        // N-9: see the OTLP path — a dropped row must not be reported as
+        // accepted, and a constraint violation is the caller's error (4xx).
+        q!(
             "INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at)
              VALUES (?, ?, ?, ?, ?, ?)",
         )
@@ -321,7 +330,8 @@ pub(crate) async fn ingest_gateway_logs(
         .bind("")
         .bind(&now)
         .execute(&pool)
-        .await;
+        .await
+        .map_err(crate::errors::map_ingest_db_error)?;
 
         accepted += 1;
     }

@@ -3711,6 +3711,79 @@ mod tests {
         assert_eq!(json["accepted"], 1);
     }
 
+    // N-9: a row the database rejected must not be reported as accepted.
+    // Both ingest paths used `let _ =` + an unconditional `accepted += 1`,
+    // so an unknown consumer_id was answered "accepted: 1" and dropped.
+    #[tokio::test]
+    async fn otlp_traces_unknown_consumer_is_rejected_not_counted() {
+        let pool = test_pool().await;
+        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None);
+        let body = serde_json::json!({
+            "resourceSpans": [{
+                "resource": { "attributes": [] },
+                "scopeSpans": [{
+                    "spans": [{
+                        "kind": 3,
+                        "attributes": [
+                            { "key": "http.method", "value": { "stringValue": "GET" } },
+                            { "key": "http.route",  "value": { "stringValue": "/users/{id}" } },
+                            { "key": "radar.consumer_id", "value": { "stringValue": "no-such-consumer" } },
+                            { "key": "radar.service_id",  "value": { "stringValue": "no-such-service" } }
+                        ]
+                    }]
+                }]
+            }]
+        });
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/v1/otlp/v1/traces")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_client_error(),
+            "an unknown consumer_id is the caller's error, got {}",
+            resp.status()
+        );
+
+        let stored: i64 = qs!("SELECT COUNT(*) FROM usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "nothing should have been stored");
+    }
+
+    #[tokio::test]
+    async fn gateway_logs_unknown_consumer_is_rejected_not_counted() {
+        let pool = test_pool().await;
+        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None);
+        let body = serde_json::json!([{
+            "consumer_id": "no-such-consumer",
+            "service_id": "no-such-service",
+            "method": "GET",
+            "path": "/users/{id}"
+        }]);
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/v1/gateway/logs")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_client_error(),
+            "an unknown consumer_id is the caller's error, got {}",
+            resp.status()
+        );
+
+        let stored: i64 = qs!("SELECT COUNT(*) FROM usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "nothing should have been stored");
+    }
+
     #[tokio::test]
     async fn otlp_traces_skips_server_spans() {
         let pool = test_pool().await;
