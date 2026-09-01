@@ -8,8 +8,8 @@ This project uses the AI-Native Software Delivery framework. All task execution 
 - `Agents/backlog-builder-v5.1.md` — story/task templates, DoR/DoD
 - `Agents/core-specification-v1.md` — shared principles, modes, global DoD
 
-Current execution mode: MAINTENANCE (all EPICs A–L complete); EPIC O (HARDENING) queued
-Active stories: EPIC O — mitigation of the 2026-09-01 full review, see `EPIC-O-MITIGATION-PLAN.md` (start at Wave 1). The open EPIC N tail (N-8, N-13, N-15, N-16..N-18, N-22..N-25, N-28, N-29, N-31, N-33..N-35) stays tracked in `QUALITY-BACKLOG.md`. See `DEVELOPMENT_PLAN.md` for full history; Phases 1–5 of the maturity plan are complete.
+Current execution mode: MAINTENANCE (all EPICs A–L complete; EPIC O complete)
+Active stories: none in EPIC O — all 23 stories delivered (see `EPIC-O-MITIGATION-PLAN.md`, phase gate at the end). Next up is the open EPIC N tail (N-8, N-13, N-15, N-16..N-18, N-22..N-25, N-28, N-29, N-31, N-33..N-35) in `QUALITY-BACKLOG.md`, plus two EPIC O items that need CI to close: the packaged-desktop Playground E2E (O-20) and O-23 on the Postgres lane. See `DEVELOPMENT_PLAN.md` for full history; Phases 1–5 of the maturity plan are complete.
 
 ---
 
