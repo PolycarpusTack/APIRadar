@@ -26,7 +26,7 @@ jobs:
 
       - name: Check API drift
         id: radar
-        uses: PolycarpusTack/radar-monitor/radar-action@main
+        uses: PolycarpusTack/radar-monitor/radar-action@v0.3.0
         with:
           base-spec: /tmp/base.yaml
           head-spec: api/openapi.yaml
@@ -95,7 +95,7 @@ Add the label `drift-ack` to a PR to override a block verdict (requires `allow_o
 Applies when the repository has no `.radar.yml`; otherwise set `fail_mode: warn` in that file instead.
 
 ```yaml
-- uses: PolycarpusTack/radar-monitor/radar-action@main
+- uses: PolycarpusTack/radar-monitor/radar-action@v0.3.0
   with:
     base-spec: old.yaml
     head-spec: new.yaml
@@ -105,7 +105,7 @@ Applies when the repository has no `.radar.yml`; otherwise set `fail_mode: warn`
 ### With PR comment and full blast radius
 
 ```yaml
-- uses: PolycarpusTack/radar-monitor/radar-action@main
+- uses: PolycarpusTack/radar-monitor/radar-action@v0.3.0
   with:
     base-spec: old.yaml
     head-spec: new.yaml
@@ -122,7 +122,7 @@ Applies when the repository has no `.radar.yml`; otherwise set `fail_mode: warn`
 ```yaml
 - name: Run drift check
   id: radar
-  uses: PolycarpusTack/radar-monitor/radar-action@main
+  uses: PolycarpusTack/radar-monitor/radar-action@v0.3.0
   with:
     base-spec: old.yaml
     head-spec: new.yaml

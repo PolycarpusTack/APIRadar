@@ -93,10 +93,6 @@ pub struct DriftConfig {
     pub service: Option<String>,
     pub policy: Option<PolicyConfig>,
     pub fail_mode: Option<FailMode>,
-    /// Glob patterns for Postman/NativeREST collection files to scan automatically.
-    /// e.g. ["**/*.postman_collection.json", "**/*.nativerest_collection.json"]
-    #[serde(default)]
-    pub collection_paths: Vec<String>,
 }
 
 impl DriftConfig {
@@ -359,7 +355,7 @@ mod tests {
             false,
             false,
         );
-        assert_eq!(batch_exit_code(&[pass.clone()]), 0);
+        assert_eq!(batch_exit_code(std::slice::from_ref(&pass)), 0);
         assert_eq!(batch_exit_code(&[pass, block]), 1);
     }
 

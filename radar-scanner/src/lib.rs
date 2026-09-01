@@ -824,7 +824,7 @@ pub fn scan_s2(content: &[u8], lang: &Lang) -> Vec<CallSiteRecord> {
 
 /// Walk `dir` recursively, skipping common non-source directories, and collect all
 /// property accesses found in TypeScript, Python, and Go source files.
-/// TypeScript files use the S2 operation-aware scanner; Python and Go use S1.
+/// All supported languages use the S2 operation-aware scanner.
 pub fn scan_directory(dir: &Path) -> Vec<CallSiteRecord> {
     let mut records = Vec::new();
     let mut skipped_large = 0usize;
@@ -1230,6 +1230,12 @@ fn extract_variable_field_accesses(line: &str) -> Vec<String> {
     // Look for known response-variable prefixes.
     for prefix in &["json.", "data.", "response.body.", "response."] {
         for (pos, _) in line.match_indices(prefix) {
+            // O-22: skip when the longer known prefix also matches at this
+            // position — `response.` inside `response.body.phone` would
+            // otherwise emit the spurious intermediate field "body".
+            if *prefix == "response." && line[pos..].starts_with("response.body.") {
+                continue;
+            }
             // Word-boundary check: the prefix must begin a standalone variable, not
             // be the tail of a larger identifier or member chain. This rejects
             // `pm.response.json()` (preceded by `.`) and `metadata.total`
@@ -1781,6 +1787,16 @@ func process(svc *Service, id string) string {
                 "'{bad}' must not be a field path; got {fp:?}"
             );
         }
+    }
+
+    #[test]
+    fn response_body_prefix_yields_field_not_body() {
+        let fields = extract_variable_field_accesses("pm.expect(response.body.phone).to.exist;");
+        assert!(fields.iter().any(|f| f == "phone"), "got {fields:?}");
+        assert!(
+            !fields.iter().any(|f| f == "body"),
+            "'body' is a path segment, not a consumed field; got {fields:?}"
+        );
     }
 
     #[test]

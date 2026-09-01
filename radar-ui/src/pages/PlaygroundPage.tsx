@@ -120,18 +120,16 @@ export default function PlaygroundPage() {
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
 
-  const token = localStorage.getItem('radarToken') ?? undefined
-
   // ── Load stored specs ────────────────────────────────────────────────────
   useEffect(() => {
-    api.get<typeof storedSpecs>('/v1/spec-versions', { bearer: token ?? undefined })
+    api.get<typeof storedSpecs>('/v1/spec-versions')
       .then(setStoredSpecs)
       .catch(() => {})
   }, [])
 
   // ── Load sandbox environments ────────────────────────────────────────────
   useEffect(() => {
-    api.get<SandboxEnv[]>('/v1/sandbox-envs', { bearer: token ?? undefined })
+    api.get<SandboxEnv[]>('/v1/sandbox-envs')
       .then((data) => {
         setEnvs(data)
         setServerMode(true)
@@ -177,8 +175,8 @@ export default function PlaygroundPage() {
     if (serverMode) {
       try {
         const saved: SandboxEnv = editing
-          ? await api.put<SandboxEnv>(`/v1/sandbox-envs/${editing.id}`, payload, { bearer: token ?? undefined })
-          : await api.post<SandboxEnv>('/v1/sandbox-envs', payload, { bearer: token ?? undefined })
+          ? await api.put<SandboxEnv>(`/v1/sandbox-envs/${editing.id}`, payload)
+          : await api.post<SandboxEnv>('/v1/sandbox-envs', payload)
         setEnvs((prev) =>
           editing
             ? prev.map((e) => (e.id === editing.id ? saved : e))
@@ -214,7 +212,7 @@ export default function PlaygroundPage() {
   async function handleDelete(id: string) {
     if (serverMode) {
       try {
-        await api.del(`/v1/sandbox-envs/${id}`, { bearer: token ?? undefined })
+        await api.del(`/v1/sandbox-envs/${id}`)
       } catch {}
     }
     const next = envs.filter((e) => e.id !== id)

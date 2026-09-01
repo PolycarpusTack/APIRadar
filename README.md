@@ -175,11 +175,10 @@ policy:
 # warn:            never block the build, always warn
 fail_mode: closed
 
-# Postman / NativeREST collection files to scan automatically (glob patterns)
-collection_paths:
-  - "**/*.postman_collection.json"
-  - "**/*.nativerest_collection.json"
 ```
+
+> Collection files are scanned explicitly with `radar scan --collection <path>`
+> (repeatable); there is no auto-discovery config key.
 
 ## Evidence types
 

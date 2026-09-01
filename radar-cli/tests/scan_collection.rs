@@ -87,6 +87,7 @@ async fn collection_only_scan_posts_evidence() {
         None,
         &HashMap::new(),
         std::slice::from_ref(&collection),
+        false,
     )
     .await
     .expect("run_scan failed");
@@ -115,6 +116,7 @@ async fn scan_with_no_records_and_no_collections_is_ok() {
         None,
         &HashMap::new(),
         &[],
+        false,
     )
     .await
     .expect("run_scan failed");

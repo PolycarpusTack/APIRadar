@@ -42,7 +42,7 @@ export default function GenerateTestsPage() {
   const [result, setResult] = useState<GenerateResult | null>(null)
 
   useEffect(() => {
-    api.get<Suite[]>('/v1/generate-tests', { bearer: localStorage.getItem('radarToken') ?? undefined })
+    api.get<Suite[]>('/v1/generate-tests')
       .then(setSuites)
       .catch(() => {})
       .finally(() => setLoading(false))
@@ -61,11 +61,7 @@ export default function GenerateTestsPage() {
     }
 
     try {
-      const data = await api.post<GenerateResult>(
-        '/v1/generate-tests',
-        body,
-        { bearer: localStorage.getItem('radarToken') ?? undefined },
-      )
+      const data = await api.post<GenerateResult>('/v1/generate-tests', body)
       setResult(data)
       setSuites((prev) => [
         {

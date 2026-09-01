@@ -136,6 +136,7 @@ async fn smoke_collection_only_consumer_produces_matching_evidence() {
         None,
         &HashMap::new(),
         std::slice::from_ref(&collection),
+        false,
     )
     .await
     .expect("run_scan");

@@ -4,19 +4,11 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
-mod ai_provider;
-mod api_client;
-mod apitesting;
-mod claude;
-mod explain;
-mod github;
-mod jira;
-mod policy;
-mod postman;
-mod register;
-mod render;
-mod scan;
-mod test_gen;
+// O-22: consume the library target rather than re-declaring the modules,
+// so the shared code is compiled once and the bin and lib cannot diverge.
+use radar_cli_lib::{
+    api_client, explain, github, jira, policy, postman, register, render, scan, test_gen,
+};
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -53,6 +45,9 @@ enum RuleAction {
         /// Optional bearer token.
         #[arg(long, env = "RADAR_SERVICE_TOKEN")]
         token: Option<String>,
+        /// Emit machine-readable JSON output.
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Delete an evolution rule by ID.
     Delete {
@@ -109,17 +104,13 @@ struct Cli {
 enum Commands {
     /// Compare two spec versions and report breaking changes.
     Check {
-        /// Base git ref (commit / branch / tag) or spec file path.
+        /// Path to the base spec file (OpenAPI / GraphQL SDL / proto).
         #[arg(long)]
         base: String,
 
-        /// Head git ref (commit / branch / tag) or spec file path.
+        /// Path to the head spec file (OpenAPI / GraphQL SDL / proto).
         #[arg(long)]
         head: String,
-
-        /// Path to a spec file (overrides git-based resolution).
-        #[arg(long)]
-        spec: Option<String>,
 
         /// Spec format: openapi | graphql | protobuf.
         #[arg(long)]
@@ -186,7 +177,7 @@ enum Commands {
         contact: String,
 
         /// Optional bearer token for the radar-api server.
-        #[arg(long)]
+        #[arg(long, env = "RADAR_SERVICE_TOKEN")]
         token: Option<String>,
     },
 
@@ -217,6 +208,10 @@ enum Commands {
         /// Example: --operation-map "userId=GET /users" --operation-map "email=GET /users"
         #[arg(long, value_name = "FIELD=OP")]
         operation_map: Vec<String>,
+
+        /// Emit machine-readable JSON output.
+        #[arg(long, default_value_t = false)]
+        json: bool,
 
         /// Postman Collection v2.1 JSON files to scan for Consumer evidence.
         /// Can be repeated. These auto-register the consumer and post evidence to the API.
@@ -339,7 +334,6 @@ async fn main() -> Result<()> {
         Commands::Check {
             base,
             head,
-            spec: _spec,
             format,
             policy,
             post_comment,
@@ -393,9 +387,10 @@ async fn main() -> Result<()> {
 
             let use_color = !no_color && std::env::var("NO_COLOR").is_err();
 
-            if json {
-                render::print_json(&changes);
-            } else {
+            // O-22: in --json mode the single JSON object (changes + verdict +
+            // diff id + blast radius) is emitted at the end of the run, so
+            // stdout stays pure and machine-consumers see the decision.
+            if !json {
                 render::print_table(&changes, use_color);
             }
 
@@ -598,7 +593,9 @@ async fn main() -> Result<()> {
                             pol.allow_override_with.as_deref().unwrap_or("drift-ack"),
                         );
                         match github::post_or_update_comment(&ctx, &comment_body).await {
-                            Ok(url) => println!("PR comment posted: {url}"),
+                            // O-22: stdout must stay pure JSON under --json.
+                            Ok(url) if !json => println!("PR comment posted: {url}"),
+                            Ok(_) => {}
                             Err(e) => eprintln!("Warning: failed to post PR comment: {e}"),
                         }
                     }
@@ -642,6 +639,27 @@ async fn main() -> Result<()> {
                 }
             }
 
+            if json {
+                let fm_str = match &decision.fail_mode {
+                    policy::FailMode::Closed => "closed",
+                    policy::FailMode::Open => "open",
+                    policy::FailMode::Warn => "warn",
+                };
+                let out = serde_json::json!({
+                    "changes": changes,
+                    "breaking_count": changes
+                        .iter()
+                        .filter(|c| c.severity == radar_core::models::Severity::Breaking)
+                        .count(),
+                    "policy_verdict": decision.verdict.wire_str(),
+                    "fail_mode": fm_str,
+                    "exit_code": decision.exit_code,
+                    "diff_id": posted_diff_id,
+                    "blast_radius": blast_radius_data,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
+
             if decision.exit_code != 0 {
                 std::process::exit(decision.exit_code);
             }
@@ -677,10 +695,17 @@ async fn main() -> Result<()> {
                         println!("  pattern:  {p}");
                     }
                 }
-                RuleAction::List { api_url, token } => {
+                RuleAction::List {
+                    api_url,
+                    token,
+                    json,
+                } => {
                     let rules =
                         api_client::list_evolution_rules(&api_url, token.as_deref()).await?;
-                    if rules.is_empty() {
+                    if json {
+                        // O-22: suite convention — every CLI honours --json.
+                        println!("{}", serde_json::to_string_pretty(&rules)?);
+                    } else if rules.is_empty() {
                         println!("No evolution rules configured.");
                     } else {
                         println!(
@@ -1119,6 +1144,7 @@ async fn main() -> Result<()> {
             api_url,
             token,
             operation_map,
+            json,
             collection,
         } => {
             // Parse --operation-map "field=METHOD /path" pairs into a lookup table.
@@ -1143,6 +1169,7 @@ async fn main() -> Result<()> {
                 token.as_deref(),
                 &op_map,
                 &collection,
+                json,
             )
             .await?;
         }

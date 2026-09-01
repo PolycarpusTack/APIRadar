@@ -36,32 +36,17 @@ pub struct GeneratedTestCase {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Generate both a Postman Collection v2.1 and an api-testing YAML suite from a
-/// single Claude call. Returns `(postman_collection, apitesting_yaml)`.
-pub async fn generate_both(
-    jira_summary: &str,
-    jira_description: &str,
-    spec_yaml: &str,
-    base_url: &str,
-) -> anyhow::Result<(Collection, String)> {
-    let suite = call_claude(jira_summary, jira_description, spec_yaml).await?;
-    let yaml =
-        crate::apitesting::assemble_suite(&suite.collection_name, &suite.test_cases, base_url)
-            .unwrap_or_default();
-    let collection = assemble_collection(suite, base_url);
-    Ok((collection, yaml))
-}
-
-/// Convenience wrapper that returns only the Postman Collection (discards YAML).
+/// Generate a Postman Collection v2.1 from a single AI call.
+/// (O-22: the CLI-side api-testing YAML twin was dead — never emitted by any
+/// command — and is deleted; the API's /v1/generate-tests serves that format.)
 pub async fn generate_test_collection(
     jira_summary: &str,
     jira_description: &str,
     spec_yaml: &str,
     base_url: &str,
 ) -> anyhow::Result<Collection> {
-    let (collection, _yaml) =
-        generate_both(jira_summary, jira_description, spec_yaml, base_url).await?;
-    Ok(collection)
+    let suite = call_claude(jira_summary, jira_description, spec_yaml).await?;
+    Ok(assemble_collection(suite, base_url))
 }
 
 /// Call the configured AI provider once and return the parsed intermediate suite.

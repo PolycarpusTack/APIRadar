@@ -189,7 +189,11 @@ fn check_json_output_is_valid() {
     let parsed: serde_json::Value =
         serde_json::from_str(&stdout).expect("stdout is not valid JSON");
 
-    let arr = parsed.as_array().expect("expected a JSON array");
+    // O-22: --json emits ONE object carrying the decision, not a bare array —
+    // a CI consumer reading stdout alone can now see the verdict.
+    let arr = parsed["changes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected a 'changes' array: {stdout}"));
     assert!(
         !arr.is_empty(),
         "expected at least one change in JSON output"
@@ -203,6 +207,18 @@ fn check_json_output_is_valid() {
             .unwrap_or(false)
     });
     assert!(mentions_phone, "no JSON entry mentions 'phone': {stdout}");
+
+    assert_eq!(
+        parsed["breaking_count"].as_u64(),
+        Some(1),
+        "breaking_count must be present: {stdout}"
+    );
+    for key in ["policy_verdict", "fail_mode", "exit_code"] {
+        assert!(
+            !parsed[key].is_null(),
+            "'{key}' must be present in --json output: {stdout}"
+        );
+    }
 }
 
 /// Identical specs produce no changes and exit 0.

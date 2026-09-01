@@ -75,15 +75,10 @@ impl ChangeInsert {
 
     /// Build from a computed `radar_core` DiffChange.
     pub(crate) fn from_diff(c: &radar_core::diff::DiffChange) -> Self {
-        let severity = match c.severity {
-            radar_core::models::Severity::Breaking => "breaking",
-            radar_core::models::Severity::NonBreakingRisky => "non_breaking_risky",
-            radar_core::models::Severity::Safe => "safe",
-        };
         ChangeInsert {
             path: c.path.clone(),
             kind: c.kind.as_str().to_string(),
-            severity: severity.to_string(),
+            severity: c.severity.as_str().to_string(),
             description: c.description.clone(),
         }
     }
