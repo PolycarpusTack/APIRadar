@@ -5,7 +5,8 @@ import PageHeader from '../components/PageHeader'
 import Badge from '../components/Badge'
 import EmptyState from '../components/EmptyState'
 import TermTooltip from '../components/TermTooltip'
-import { api, ApiError } from '../lib/apiClient'
+import { api } from '../lib/apiClient'
+import { errorMessage } from '../lib/useFetch'
 
 const CALLOUT_DISMISSED_KEY = 'radar_evolution_rules_callout_dismissed'
 
@@ -94,12 +95,15 @@ export default function EvolutionRulesPage() {
   const [createError, setCreateError] = useState<string | null>(null)
   const [toggling, setToggling] = useState<Record<string, boolean>>({})
   const [deleting, setDeleting] = useState<Record<string, boolean>>({})
+  // N-25: toggle/delete used to swallow their failures, so the button simply
+  // re-enabled itself and the user believed the change had been applied.
+  const [actionError, setActionError] = useState<string | null>(null)
 
   function loadRules() {
     setLoading(true)
     api.get<{ entries: EvolutionRule[] }>('/v1/evolution-rules')
-      .then((data) => setRules(data.entries ?? []))
-      .catch((e) => setError(e instanceof ApiError ? e.message : String(e)))
+      .then((data) => { setRules(data.entries ?? []); setError(null) })
+      .catch((e: unknown) => setError(errorMessage(e)))
       .finally(() => setLoading(false))
   }
 
@@ -120,24 +124,28 @@ export default function EvolutionRulesPage() {
         setForm(DEFAULT_FORM)
         loadRules()
       })
-      .catch((e) => setCreateError(e instanceof ApiError ? e.message : String(e)))
+      .catch((e: unknown) => setCreateError(errorMessage(e)))
       .finally(() => setCreating(false))
   }
 
   function handleToggle(rule: EvolutionRule) {
+    setActionError(null)
     setToggling((t) => ({ ...t, [rule.id]: true }))
     api.patch(`/v1/evolution-rules/${rule.id}`, { enabled: !rule.enabled })
       .then(() => loadRules())
-      .catch(() => {})
+      .catch((e: unknown) => setActionError(`Failed to update rule: ${errorMessage(e)}`))
       .finally(() => setToggling((t) => ({ ...t, [rule.id]: false })))
   }
 
   function handleDelete(id: string) {
-    if (!confirm('Delete this evolution rule?')) return
+    // Destructive and irreversible — confirm first (the same window.confirm
+    // idiom the Settings page uses for webhook/scan deletion).
+    if (!window.confirm('Delete this evolution rule? This cannot be undone.')) return
+    setActionError(null)
     setDeleting((d) => ({ ...d, [id]: true }))
     api.del(`/v1/evolution-rules/${id}`)
       .then(() => loadRules())
-      .catch(() => {})
+      .catch((e: unknown) => setActionError(`Failed to delete rule: ${errorMessage(e)}`))
       .finally(() => setDeleting((d) => ({ ...d, [id]: false })))
   }
 
@@ -277,6 +285,15 @@ export default function EvolutionRulesPage() {
               {loading ? 'Loading…' : `${rules.length} rule${rules.length !== 1 ? 's' : ''}`}
             </p>
           </div>
+
+          {actionError && (
+            <div
+              className="px-4 py-2.5 text-[12.5px]"
+              style={{ color: 'var(--red)', borderBottom: '1px solid var(--border)' }}
+            >
+              {actionError}
+            </div>
+          )}
 
           {error ? (
             <div className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>

@@ -4,6 +4,7 @@ import { ArrowLeft, ExternalLink, CheckCircle, Plus, X, Sparkles, Loader2 } from
 import Badge from '../components/Badge'
 import TermTooltip from '../components/TermTooltip'
 import { api } from '../lib/apiClient'
+import { useFetch, errorMessage } from '../lib/useFetch'
 
 interface DiffChange {
   path: string
@@ -110,11 +111,34 @@ export default function DiffDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
 
-  const [diff, setDiff] = useState<DiffDetail | null>(null)
-  const [blast, setBlast] = useState<BlastRadius | null>(null)
-  const [acks, setAcks] = useState<Acknowledgement[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  // N-23: the diff + blast-radius pair and the acknowledgements list are both
+  // keyed on `id`. `useFetch` aborts the in-flight requests and discards any
+  // late response when `id` changes (fast A → B navigation) or on unmount, so
+  // diff A's payload can never be painted over diff B's.
+  const detail = useFetch(
+    async (signal) => {
+      if (!id) throw new Error('Diff not found')
+      const [d, b] = await Promise.all([
+        api.get<DiffDetail>(`/v1/diffs/${id}`, { signal }),
+        api.get<BlastRadius>(`/v1/diffs/${id}/blast-radius`, { signal }),
+      ])
+      return { diff: d, blast: b }
+    },
+    [id],
+  )
+  const acksReq = useFetch<{ entries: Acknowledgement[] }>(
+    (signal) => id
+      ? api.get(`/v1/diffs/${id}/acknowledgements`, { signal })
+      : Promise.resolve({ entries: [] }),
+    [id],
+  )
+
+  const diff = detail.data?.diff ?? null
+  const blast = detail.data?.blast ?? null
+  const acks = acksReq.data?.entries ?? []
+  const loading = detail.loading
+  const error = detail.error
+
   const [showAckForm, setShowAckForm] = useState(false)
   const [ackForm, setAckForm] = useState<AckFormState>(DEFAULT_ACK_FORM)
   const [submittingAck, setSubmittingAck] = useState(false)
@@ -145,28 +169,6 @@ export default function DiffDetailPage() {
     }
   }, [id])
 
-  function loadAcks() {
-    if (!id) return
-    api.get<{ entries: Acknowledgement[] }>(`/v1/diffs/${id}/acknowledgements`)
-      .then((data) => setAcks(data.entries ?? []))
-      .catch(() => {})
-  }
-
-  useEffect(() => {
-    if (!id) return
-    setLoading(true)
-
-    Promise.all([
-      api.get<DiffDetail>(`/v1/diffs/${id}`),
-      api.get<BlastRadius>(`/v1/diffs/${id}/blast-radius`),
-    ])
-      .then(([d, b]) => { setDiff(d); setBlast(b) })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false))
-
-    loadAcks()
-  }, [id])
-
   function handleAckSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!id) return
@@ -181,9 +183,9 @@ export default function DiffDetailPage() {
       .then(() => {
         setShowAckForm(false)
         setAckForm(DEFAULT_ACK_FORM)
-        loadAcks()
+        acksReq.reload()
       })
-      .catch((e: Error) => setAckError(e.message))
+      .catch((e: unknown) => setAckError(errorMessage(e)))
       .finally(() => setSubmittingAck(false))
   }
 
@@ -207,9 +209,9 @@ export default function DiffDetailPage() {
           pollRef.current.timer = setTimeout(() => pollGenerateStatus(noteId), POLL_INTERVAL_MS)
         }
       })
-      .catch((e) => {
+      .catch((e: unknown) => {
         if (pollRef.current.cancelled) return
-        setNoteError((e as Error).message)
+        setNoteError(errorMessage(e))
         setGeneratingNote(false)
       })
   }
@@ -236,9 +238,9 @@ export default function DiffDetailPage() {
         return
       }
       pollGenerateStatus(started.id)
-    } catch (e) {
+    } catch (e: unknown) {
       if (pollRef.current.cancelled) return
-      setNoteError((e as Error).message)
+      setNoteError(errorMessage(e))
       setGeneratingNote(false)
     }
   }
@@ -532,7 +534,12 @@ export default function DiffDetailPage() {
           )}
 
           <div className="overflow-hidden rounded-lg" style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
-            {acks.length === 0 ? (
+            {acksReq.error ? (
+              // A failed load must not look like "there are none".
+              <p className="px-4 py-6 text-center text-[12.5px]" style={{ color: 'var(--red)' }}>
+                Failed to load acknowledgements: {acksReq.error}
+              </p>
+            ) : acks.length === 0 ? (
               <p className="px-4 py-6 text-center text-[12.5px]" style={{ color: 'var(--text-3)' }}>
                 No acknowledgements yet. Create one to formally accept this breaking change and allow CI to proceed.
               </p>

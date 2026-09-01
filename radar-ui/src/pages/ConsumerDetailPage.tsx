@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import Badge from '../components/Badge'
-import { api, ApiError } from '../lib/apiClient'
+import { api } from '../lib/apiClient'
+import { useFetch } from '../lib/useFetch'
 
 interface Consumer {
   id: string
@@ -33,41 +33,43 @@ export default function ConsumerDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
 
-  const [consumer, setConsumer] = useState<Consumer | null>(null)
-  const [subs, setSubs] = useState<Subscription[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  // N-23: this whole chain is keyed on `id`. Running it inside `useFetch` means
+  // the requests carry an AbortSignal and any response that arrives after the
+  // route param changed (consumer A → B) or after unmount is discarded, so A's
+  // payload can never be rendered under B's URL.
+  //
+  // The per-service fan-out below is an N+1 (there is no single-consumer GET
+  // yet) — deliberately left as-is; only its cancellation is fixed here.
+  const { data, loading, error } = useFetch(
+    async (signal) => {
+      if (!id) throw new Error('Consumer not found')
 
-  useEffect(() => {
-    if (!id) return
+      // Load the consumer from the list endpoint (no single-consumer GET yet).
+      const all = await api.get<Consumer[]>('/v1/consumers', { signal })
+      const consumer = all.find(c => c.id === id)
+      if (!consumer) throw new Error('Consumer not found')
 
-    // Load the consumer from the list endpoint (no single-consumer GET yet).
-    api.get<Consumer[]>('/v1/consumers')
-      .then(all => {
-        const found = all.find(c => c.id === id) ?? null
-        if (!found) throw new Error('Consumer not found')
-        setConsumer(found)
-        // Load subscriptions from the service-scoped endpoint indirectly
-        // by fetching services and their consumers.
-        return api.get<{ id: string; name: string }[]>('/v1/services')
-      })
-      .then(services =>
-        Promise.all(
-          services.map(svc =>
-            api.get<{ id: string; name: string }[]>(`/v1/services/${svc.id}/consumers`)
-              .catch(() => [] as { id: string; name: string }[])
-              .then((consumers: { id: string; name: string }[]) => {
-                const found = consumers.find(c => c.id === id)
-                if (!found) return null
-                return { id: `${svc.id}:${id}`, service_id: svc.id, service_name: svc.name, opted_in_at: '' } as Subscription
-              })
-          )
+      // Load subscriptions from the service-scoped endpoint indirectly
+      // by fetching services and their consumers.
+      const services = await api.get<{ id: string; name: string }[]>('/v1/services', { signal })
+      const results = await Promise.all(
+        services.map(svc =>
+          api.get<{ id: string; name: string }[]>(`/v1/services/${svc.id}/consumers`, { signal })
+            .catch(() => [] as { id: string; name: string }[])
+            .then((consumers: { id: string; name: string }[]) => {
+              const found = consumers.find(c => c.id === id)
+              if (!found) return null
+              return { id: `${svc.id}:${id}`, service_id: svc.id, service_name: svc.name, opted_in_at: '' } as Subscription
+            })
         )
       )
-      .then(results => setSubs(results.filter(Boolean) as Subscription[]))
-      .catch((e: unknown) => setError(e instanceof ApiError ? e.message : String(e)))
-      .finally(() => setLoading(false))
-  }, [id])
+      return { consumer, subs: results.filter(Boolean) as Subscription[] }
+    },
+    [id],
+  )
+
+  const consumer = data?.consumer ?? null
+  const subs = data?.subs ?? []
 
   if (loading) {
     return (
