@@ -19,7 +19,13 @@ pub async fn fetch_ticket(
         key
     );
 
-    let resp = reqwest::Client::new()
+    // N-15: bound every request so a hung endpoint cannot stall the CLI.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+    let resp = client
         .get(&url)
         .basic_auth(email, Some(token))
         .send()

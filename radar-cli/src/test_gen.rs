@@ -55,11 +55,7 @@ async fn call_claude(
     jira_description: &str,
     spec_yaml: &str,
 ) -> Result<GeneratedSuite> {
-    let spec_excerpt = if spec_yaml.len() > 40_000 {
-        &spec_yaml[..40_000]
-    } else {
-        spec_yaml
-    };
+    let spec_excerpt = spec_excerpt(spec_yaml, 40_000);
     let prompt = build_prompt(jira_summary, jira_description, spec_excerpt);
 
     let raw_text = crate::ai_provider::complete(&prompt, 4096)
@@ -76,6 +72,22 @@ async fn call_claude(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Truncate a spec to at most `max_bytes`, never splitting a character.
+///
+/// N-15: the previous `&spec_yaml[..40_000]` panicked whenever byte 40 000
+/// landed inside a multi-byte character — one em-dash in a description was
+/// enough to kill `generate-tests` on a large spec.
+fn spec_excerpt(spec_yaml: &str, max_bytes: usize) -> &str {
+    if spec_yaml.len() <= max_bytes {
+        return spec_yaml;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !spec_yaml.is_char_boundary(end) {
+        end -= 1;
+    }
+    &spec_yaml[..end]
+}
 
 fn build_prompt(summary: &str, description: &str, spec: &str) -> String {
     format!(
@@ -263,5 +275,28 @@ fn assemble_collection(suite: GeneratedSuite, base_url: &str) -> Collection {
                 var_type: "string".into(),
             },
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spec_excerpt;
+
+    #[test]
+    fn spec_excerpt_never_splits_a_character() {
+        // An em-dash (3 bytes) straddling the cut must not panic.
+        let spec = format!("{}\u{2014}tail", "a".repeat(9));
+        let out = spec_excerpt(&spec, 10);
+        assert_eq!(out, "a".repeat(9), "should stop before the multi-byte char");
+    }
+
+    #[test]
+    fn spec_excerpt_returns_whole_input_when_short() {
+        assert_eq!(spec_excerpt("short", 40_000), "short");
+    }
+
+    #[test]
+    fn spec_excerpt_cuts_on_an_ascii_boundary_exactly() {
+        assert_eq!(spec_excerpt("abcdef", 3), "abc");
     }
 }

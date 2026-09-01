@@ -107,7 +107,13 @@ pub async fn push_collection(
     workspace_id: Option<&str>,
     collection: &Collection,
 ) -> Result<String> {
-    let mut req = reqwest::Client::new()
+    // N-15: bound every request so a hung endpoint cannot stall the CLI.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+    let mut req = client
         .post("https://api.getpostman.com/collections")
         .header("X-Api-Key", api_key)
         .header("Content-Type", "application/json");

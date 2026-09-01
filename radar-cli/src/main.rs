@@ -751,7 +751,12 @@ async fn main() -> Result<()> {
                     token,
                 } => {
                     // Fetch the diff — evolution rules are already applied server-side.
-                    let client = reqwest::Client::new();
+                    // N-15: bound every request (see api_client).
+                    let client = reqwest::Client::builder()
+                        .connect_timeout(std::time::Duration::from_secs(10))
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .unwrap_or_default();
                     let mut req = client.get(format!("{api_url}/v1/diffs/{diff_id}"));
                     if let Some(ref t) = token {
                         req = req.bearer_auth(t);
