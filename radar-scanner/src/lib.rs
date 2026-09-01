@@ -607,10 +607,11 @@ fn first_identifier_text(node: &tree_sitter::Node<'_>, source: &[u8]) -> Option<
     None
 }
 
-/// Walk up from a call node to find the variable its result is assigned to, e.g.
-/// `const response = await api.get(id)` → `Some("response")`. Returns None when
-/// the call result is not bound to a simple variable in the same scope.
-fn assigned_variable(call: &tree_sitter::Node<'_>, lang: &Lang, source: &[u8]) -> Option<String> {
+/// Walk up from a call node to the left-hand side its result is bound to, e.g.
+/// `const response = await api.get(id)` → the `response` node, and
+/// `const { phone } = await api.get(id)` → the object-pattern node. Returns
+/// None when the call result is not bound in the same scope.
+fn binding_target<'a>(call: &tree_sitter::Node<'a>, lang: &Lang) -> Option<tree_sitter::Node<'a>> {
     let mut cur = *call;
     // Bounded walk over the handful of wrapper nodes between a call and its binding
     // (await_expression, expression_list, …).
@@ -621,14 +622,72 @@ fn assigned_variable(call: &tree_sitter::Node<'_>, lang: &Lang, source: &[u8]) -
         }
         for (kind, field) in lang.assignment_kinds() {
             if parent.kind() == *kind {
-                if let Some(lhs) = parent.child_by_field_name(field) {
-                    return first_identifier_text(&lhs, source);
-                }
+                return parent.child_by_field_name(field);
             }
         }
         cur = parent;
     }
     None
+}
+
+/// O-7: a destructured binding (`const { phone, email } = await call`) consumes
+/// the named API fields directly — previously the operation was mapped to the
+/// first destructured identifier (never accessed as a member), so the dominant
+/// modern style produced no field Evidence at all. Emits one record per
+/// pattern key; a renamed entry (`{ phone: p }`) records the API-side key
+/// `phone`. Deeper flows (nested patterns' inner fields, rest elements) are
+/// deliberately out of scope.
+fn emit_destructured_fields(
+    pattern: &tree_sitter::Node<'_>,
+    source: &[u8],
+    op: &str,
+    out: &mut Vec<CallSiteRecord>,
+) {
+    let mut cursor = pattern.walk();
+    for child in pattern.children(&mut cursor) {
+        let name_node = match child.kind() {
+            // `{ phone }`
+            "shorthand_property_identifier_pattern" => Some(child),
+            // `{ phone: p }` — the key is the API field
+            "pair_pattern" => child.child_by_field_name("key"),
+            // `{ phone = "fallback" }`
+            "object_assignment_pattern" => child.child_by_field_name("left"),
+            _ => None,
+        };
+        if let Some(n) = name_node {
+            if let Ok(name) = n.utf8_text(source) {
+                let cleaned = name.trim_matches(|c| c == '"' || c == '\'');
+                if !cleaned.is_empty() {
+                    out.push(CallSiteRecord {
+                        file_path: String::new(),
+                        line_number: n.start_position().row + 1,
+                        field_path: cleaned.to_string(),
+                        operation: Some(op.to_string()),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// O-7: resolve a derived variable through the scope chain, so a field access
+/// inside a nested callback (`orders.forEach(o => use(user.phone))`) still
+/// sees variables bound in an enclosing function. An inner rebinding from a
+/// non-API value is not tracked, so the nearest tracked binding wins.
+fn lookup_derived<'a>(
+    node: tree_sitter::Node<'_>,
+    lang: &Lang,
+    root: &str,
+    derived: &'a std::collections::HashMap<(usize, String), String>,
+) -> Option<&'a String> {
+    let mut scope = enclosing_scope(node, lang);
+    loop {
+        if let Some(op) = derived.get(&(scope.id(), root.to_string())) {
+            return Some(op);
+        }
+        let parent = scope.parent()?;
+        scope = enclosing_scope(parent, lang);
+    }
 }
 
 /// Resolve the leftmost (root) identifier of a member/attribute/selector chain,
@@ -677,11 +736,16 @@ fn collect_ops(
             None
         };
         if let Some(op) = op {
-            if let Some(var) = assigned_variable(node, lang, source) {
-                let scope_id = enclosing_scope(*node, lang).id();
-                // Later assignments to the same variable legitimately override
-                // earlier ones; distinct variables never collide.
-                derived.insert((scope_id, var), op);
+            if let Some(lhs) = binding_target(node, lang) {
+                if lhs.kind() == "object_pattern" {
+                    // O-7: destructured keys are the consumed API fields.
+                    emit_destructured_fields(&lhs, source, &op, http_records);
+                } else if let Some(var) = first_identifier_text(&lhs, source) {
+                    let scope_id = enclosing_scope(*node, lang).id();
+                    // Later assignments to the same variable legitimately
+                    // override earlier ones; distinct variables never collide.
+                    derived.insert((scope_id, var), op);
+                }
             }
         }
     }
@@ -706,8 +770,9 @@ fn collect_derived_fields(
 ) {
     if node.kind() == lang.member_kind() {
         if let Some(root) = member_root_identifier(node, lang, source) {
-            let scope_id = enclosing_scope(*node, lang).id();
-            if let Some(op) = derived.get(&(scope_id, root)) {
+            // O-7: walk the scope chain, not just the innermost scope, so
+            // accesses inside nested callbacks resolve.
+            if let Some(op) = lookup_derived(*node, lang, &root, derived) {
                 if let Some(prop) = node.child_by_field_name(lang.property_field()) {
                     if let Ok(name) = prop.utf8_text(source) {
                         out.push(CallSiteRecord {
@@ -1967,6 +2032,69 @@ async function loadBoth(usersApi, ordersApi, id) {
                 .any(|r| r.operation.as_deref() == Some("GET /users/{id}")),
             "fetch(\"/users/1\") should yield GET /users/{{id}}; got {records:?}"
         );
+    }
+
+    // O-7: destructuring and closures — the dominant modern TS access styles
+    // must produce field Evidence.
+    #[test]
+    fn s2_destructured_fields_emit_evidence() {
+        let src = b"
+async function loadUser(usersApi, id) {
+    const { phone, email } = await usersApi.getUserById(id);
+    return phone + email;
+}
+";
+        let records = scan_typescript_s2(src);
+        for field in ["phone", "email"] {
+            let rec = records
+                .iter()
+                .find(|r| r.field_path == field)
+                .unwrap_or_else(|| panic!("expected {field} evidence; got {records:?}"));
+            assert_eq!(
+                rec.operation.as_deref(),
+                Some("GET /users/{id}"),
+                "{field} must attribute to the destructured call's operation"
+            );
+        }
+    }
+
+    #[test]
+    fn s2_renamed_destructure_uses_api_field_name() {
+        // `{ phone: p }` consumes the API field `phone`, whatever the local name.
+        let src = b"
+async function loadUser(usersApi, id) {
+    const { phone: p } = await usersApi.getUserById(id);
+    return p;
+}
+";
+        let records = scan_typescript_s2(src);
+        let fields: Vec<&str> = records.iter().map(|r| r.field_path.as_str()).collect();
+        assert!(
+            fields.contains(&"phone"),
+            "the API field name must be recorded; got {fields:?}"
+        );
+        assert!(
+            !fields.contains(&"p"),
+            "the local rename is not an API field; got {fields:?}"
+        );
+    }
+
+    #[test]
+    fn s2_closure_access_resolves_outer_scope() {
+        let src = b"
+async function notify(usersApi, orders, id) {
+    const user = await usersApi.getUserById(id);
+    orders.forEach(o => { console.log(user.phone); });
+}
+";
+        let records = scan_typescript_s2(src);
+        let phone = records
+            .iter()
+            .find(|r| r.field_path == "phone")
+            .unwrap_or_else(|| {
+                panic!("expected phone evidence from inside the callback; got {records:?}")
+            });
+        assert_eq!(phone.operation.as_deref(), Some("GET /users/{id}"));
     }
 
     // O-6: bare fetch/axios calls must record the real verb from the options
