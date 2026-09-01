@@ -820,7 +820,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
+        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None);
 
         let body = serde_json::json!([
             {
@@ -848,6 +848,12 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["accepted"], 2);
+
+        let stored: i64 = qs!("SELECT COUNT(*) FROM usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 2, "accepted must mean actually stored");
     }
 
     // N-13: a negative limit reached the database — a full-table dump on
@@ -3836,7 +3842,30 @@ mod tests {
     #[tokio::test]
     async fn gateway_logs_accepted() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
+
+        // N-9: the referenced consumer and service must exist. This test used
+        // to post unknown ids and still assert "accepted: 2" — it was encoding
+        // the very dishonesty N-9 removes (the rows were never stored).
+        q!("INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)")
+            .bind("c1")
+            .bind("gateway-consumer")
+            .bind("")
+            .bind("")
+            .bind("")
+            .execute(&pool)
+            .await
+            .unwrap();
+        q!("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind("s1")
+            .bind("gateway-service")
+            .bind("")
+            .bind("")
+            .bind("openapi")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None);
         let body = serde_json::json!([
             { "method": "POST", "path": "/payments", "consumer_id": "c1", "service_id": "s1", "status_code": 201 },
             { "method": "GET",  "path": "/users/99",  "consumer_id": "c1", "service_id": "s1" }
@@ -3852,6 +3881,12 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["accepted"], 2);
+
+        let stored: i64 = qs!("SELECT COUNT(*) FROM usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 2, "accepted must mean actually stored");
     }
 
     #[tokio::test]
