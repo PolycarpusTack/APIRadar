@@ -25,7 +25,11 @@ inputs:
     required: false
     default: ''
   fail-mode:
-    description: 'closed | open | warn — behavior when Radar API is unreachable'
+    description: >-
+      closed | open | warn — Fail Mode for the check (controls how API errors
+      and Breaking Changes map to the exit code). Applied only when the
+      workspace has no .radar.yml; a workspace .radar.yml always wins and the
+      input is then ignored with a warning.
     required: false
     default: 'closed'
   post-comment:
@@ -88,7 +92,13 @@ runs:
     - name: Build radar-cli
       shell: bash
       run: |
-        if command -v radar &>/dev/null; then
+        # The cache step above may have restored the binary into the action
+        # dir's target — check that path first, or the cache never short-circuits
+        # anything (`command -v radar` is always false on a fresh runner).
+        if [ -x "$GITHUB_ACTION_PATH/target/release/radar" ] || [ -x "$GITHUB_ACTION_PATH/target/release/radar.exe" ]; then
+          echo "radar binary restored from cache — skipping build"
+          echo "$GITHUB_ACTION_PATH/target/release" >> "$GITHUB_PATH"
+        elif command -v radar &>/dev/null; then
           echo "radar already on PATH — skipping build"
         else
           echo "Building radar-cli from source…"
@@ -109,38 +119,62 @@ runs:
     - name: Run radar check
       id: check
       shell: bash
+      # All inputs reach the shell via env: + quoted "$VAR" — never inline
+      # ${{ inputs.* }} interpolation — so fork-controlled values cannot inject
+      # shell syntax, and paths with spaces survive (args is a bash array).
       run: |
         SUMMARY_FILE="${RUNNER_TEMP}/radar-summary-$GITHUB_RUN_ID.json"
 
-        ARGS="--base ${{ inputs.base-spec }} --head ${{ inputs.head-spec }}"
-        ARGS="$ARGS --summary-file $SUMMARY_FILE --no-color"
+        args=(check --base "$BASE_SPEC" --head "$HEAD_SPEC" --summary-file "$SUMMARY_FILE" --no-color)
 
-        if [ -n "${{ inputs.service-id }}" ]; then
-          ARGS="$ARGS --service-id ${{ inputs.service-id }}"
+        if [ -n "$SERVICE_ID" ]; then
+          args+=(--service-id "$SERVICE_ID")
         fi
-        if [ -n "${{ inputs.radar-url }}" ]; then
-          ARGS="$ARGS --api-url ${{ inputs.radar-url }}"
+        if [ -n "$RADAR_URL" ]; then
+          args+=(--api-url "$RADAR_URL")
         fi
-        if [ -n "${{ inputs.spec-format }}" ]; then
-          ARGS="$ARGS --format ${{ inputs.spec-format }}"
+        if [ -n "$SPEC_FORMAT" ]; then
+          args+=(--format "$SPEC_FORMAT")
         fi
-        if [ "${{ inputs.post-comment }}" = "true" ]; then
-          ARGS="$ARGS --post-comment"
+        if [ "$POST_COMMENT" = "true" ]; then
+          args+=(--post-comment)
+        fi
+
+        # fail-mode wiring: radar check has no --fail-mode flag; it reads
+        # fail_mode from a policy file (.radar.yml in cwd, or --policy PATH).
+        # Precedence: a .radar.yml in the workspace always wins — the input is
+        # only applied when the workspace has none, via a generated minimal
+        # policy file in the runner temp dir (the workspace is never modified).
+        # 'closed' is radar check's built-in default, so it needs no file.
+        case "$FAIL_MODE" in
+          closed|open|warn) ;;
+          *)
+            echo "::error::Invalid fail-mode '$FAIL_MODE' — expected closed | open | warn"
+            exit 1
+            ;;
+        esac
+        if [ -f .radar.yml ]; then
+          if [ "$FAIL_MODE" != "closed" ]; then
+            echo "::warning::.radar.yml found in the workspace — its fail_mode setting wins and the fail-mode input ('$FAIL_MODE') is ignored"
+          fi
+        elif [ "$FAIL_MODE" != "closed" ]; then
+          POLICY_FILE="${RUNNER_TEMP}/radar-policy-$GITHUB_RUN_ID.yml"
+          printf 'fail_mode: %s\n' "$FAIL_MODE" > "$POLICY_FILE"
+          args+=(--policy "$POLICY_FILE")
         fi
 
         # Run; capture exit code without triggering set -e
         set +e
-        # shellcheck disable=SC2086
-        radar check $ARGS
+        radar "${args[@]}"
         EXIT_CODE=$?
         set -e
 
         # Parse summary file → GITHUB_OUTPUT
         if [ -f "$SUMMARY_FILE" ]; then
           echo "diff-id=$(jq -r '.diff_id // ""' "$SUMMARY_FILE")"           >> "$GITHUB_OUTPUT"
-          echo "breaking-count=$(jq -r '.breaking_count' "$SUMMARY_FILE")"   >> "$GITHUB_OUTPUT"
-          echo "affected-consumer-count=$(jq -r '.affected_consumer_count' "$SUMMARY_FILE")" >> "$GITHUB_OUTPUT"
-          echo "policy-verdict=$(jq -r '.policy_verdict' "$SUMMARY_FILE")"   >> "$GITHUB_OUTPUT"
+          echo "breaking-count=$(jq -r '.breaking_count // ""' "$SUMMARY_FILE")"   >> "$GITHUB_OUTPUT"
+          echo "affected-consumer-count=$(jq -r '.affected_consumer_count // ""' "$SUMMARY_FILE")" >> "$GITHUB_OUTPUT"
+          echo "policy-verdict=$(jq -r '.policy_verdict // ""' "$SUMMARY_FILE")"   >> "$GITHUB_OUTPUT"
           echo "dashboard-url=$(jq -r '.dashboard_url // ""' "$SUMMARY_FILE")" >> "$GITHUB_OUTPUT"
         else
           echo "diff-id="                  >> "$GITHUB_OUTPUT"
@@ -152,6 +186,13 @@ runs:
 
         exit $EXIT_CODE
       env:
+        BASE_SPEC: ${{ inputs.base-spec }}
+        HEAD_SPEC: ${{ inputs.head-spec }}
+        SERVICE_ID: ${{ inputs.service-id }}
+        RADAR_URL: ${{ inputs.radar-url }}
+        SPEC_FORMAT: ${{ inputs.spec-format }}
+        POST_COMMENT: ${{ inputs.post-comment }}
+        FAIL_MODE: ${{ inputs.fail-mode }}
         RADAR_API_URL: ${{ inputs.radar-url }}
         RADAR_SERVICE_TOKEN: ${{ inputs.radar-token }}
         GITHUB_TOKEN: ${{ github.token }}
