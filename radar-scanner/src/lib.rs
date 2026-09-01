@@ -387,7 +387,14 @@ fn detect_http_op(node: &tree_sitter::Node<'_>, lang: &Lang, source: &[u8]) -> O
     } else if func.kind() == "identifier" {
         let name = func.utf8_text(source).ok()?;
         match name.to_lowercase().as_str() {
-            "fetch" | "axios" => "GET",
+            // O-6: the real verb comes from the options object's `method:`.
+            // Previously this arm hard-coded GET, so `fetch("/orders",
+            // { method: "POST" })` recorded Evidence on a phantom GET /orders.
+            "fetch" | "axios" => match options_object_method(node, source) {
+                OptionsMethod::Absent => "GET", // both clients default to GET
+                OptionsMethod::Literal(m) => m,
+                OptionsMethod::Unresolvable => return None, // don't guess
+            },
             _ => return None,
         }
     } else {
@@ -396,6 +403,55 @@ fn detect_http_op(node: &tree_sitter::Node<'_>, lang: &Lang, source: &[u8]) -> O
     let url = extract_string_literal_arg(node, lang, source)?;
     let path = normalize_http_path(&url)?;
     Some(format!("{method} {path}"))
+}
+
+/// The `method:` option found in a bare `fetch`/`axios` call's options object.
+enum OptionsMethod {
+    /// No options object, or no `method` key — the client defaults to GET.
+    Absent,
+    /// A string-literal method mapping to a known HTTP verb.
+    Literal(&'static str),
+    /// A `method:` is present but is not a resolvable string literal — the
+    /// verb cannot be known statically, so no operation should be recorded.
+    Unresolvable,
+}
+
+/// Find a literal `method:` value in any object-literal argument of a call.
+fn options_object_method(node: &tree_sitter::Node<'_>, source: &[u8]) -> OptionsMethod {
+    let Some(args) = node.child_by_field_name("arguments") else {
+        return OptionsMethod::Absent;
+    };
+    let mut cursor = args.walk();
+    for child in args.children(&mut cursor) {
+        if child.kind() != "object" {
+            continue;
+        }
+        let mut entries = child.walk();
+        for entry in child.children(&mut entries) {
+            if entry.kind() != "pair" {
+                continue;
+            }
+            let Some(key) = entry.child_by_field_name("key") else {
+                continue;
+            };
+            let key_text = key.utf8_text(source).unwrap_or("");
+            if clean_string_literal(key_text) != "method" {
+                continue;
+            }
+            let Some(value) = entry.child_by_field_name("value") else {
+                return OptionsMethod::Unresolvable;
+            };
+            if matches!(value.kind(), "string" | "template_string") {
+                let cleaned = clean_string_literal(value.utf8_text(source).unwrap_or(""));
+                // A template string with substitutions won't map to a verb.
+                if let Some(m) = http_method_from(cleaned.trim()) {
+                    return OptionsMethod::Literal(m);
+                }
+            }
+            return OptionsMethod::Unresolvable;
+        }
+    }
+    OptionsMethod::Absent
 }
 
 /// Known bare-name HTTP client receivers (case-insensitive).
@@ -1863,6 +1919,48 @@ async function loadBoth(usersApi, ordersApi, id) {
                 .iter()
                 .any(|r| r.operation.as_deref() == Some("GET /users/{id}")),
             "fetch(\"/users/1\") should yield GET /users/{{id}}; got {records:?}"
+        );
+    }
+
+    // O-6: bare fetch/axios calls must record the real verb from the options
+    // object, not a hard-coded GET.
+    #[test]
+    fn s2_fetch_with_method_option_records_real_verb() {
+        let src = b"const r = fetch(\"/orders\", { method: \"POST\", body: payload });";
+        let records = scan_s2(src, &Lang::TypeScript);
+        assert!(
+            records
+                .iter()
+                .any(|r| r.operation.as_deref() == Some("POST /orders")),
+            "fetch with method: \"POST\" must record POST, got {records:?}"
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|r| r.operation.as_deref() == Some("GET /orders")),
+            "the phantom GET must not be recorded, got {records:?}"
+        );
+    }
+
+    #[test]
+    fn s2_axios_with_method_option_records_real_verb() {
+        let src = b"const r = axios(\"/orders\", { method: 'delete' });";
+        let records = scan_s2(src, &Lang::TypeScript);
+        assert!(
+            records
+                .iter()
+                .any(|r| r.operation.as_deref() == Some("DELETE /orders")),
+            "axios with method: 'delete' must record DELETE, got {records:?}"
+        );
+    }
+
+    #[test]
+    fn s2_fetch_with_dynamic_method_yields_no_operation() {
+        let src = b"const r = fetch(\"/orders\", { method: verb });";
+        let records = scan_s2(src, &Lang::TypeScript);
+        assert!(
+            !records.iter().any(|r| r.operation.is_some()),
+            "an unresolvable method expression must not be guessed, got {records:?}"
         );
     }
 
