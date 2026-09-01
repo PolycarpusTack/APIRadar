@@ -873,6 +873,18 @@ mod tests {
         assert!(changes.is_empty(), "unexpected changes: {changes:?}");
     }
 
+    // O-3: realistic-spec self-diff corpus — an identical spec yields zero changes.
+    #[test]
+    fn test_realistic_proto_self_diff_zero_changes() {
+        let src = include_str!("../../fixtures/self-diff-corpus/realistic.proto");
+        let schema = parse(src);
+        let changes = diff_proto(&schema, &schema);
+        assert!(
+            changes.is_empty(),
+            "realistic proto self-diff must be empty, got: {changes:?}"
+        );
+    }
+
     #[test]
     fn test_message_removed_is_breaking() {
         let base = parse(r#"syntax="proto3"; message User { string name = 1; }"#);

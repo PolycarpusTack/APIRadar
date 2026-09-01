@@ -314,6 +314,10 @@ fn diff_type(base: &GqlType, head: &GqlType, changes: &mut Vec<DiffChange>) {
         (GqlTypeKind::Union { members: bm }, GqlTypeKind::Union { members: hm }) => {
             diff_union_members(&base.name, bm, hm, changes);
         }
+        // O-3: a custom scalar has no diffable structure — same kind on both
+        // sides is no change. Without this arm every `scalar DateTime` fell
+        // into the catch-all and reported a false Breaking on every diff.
+        (GqlTypeKind::Scalar, GqlTypeKind::Scalar) => {}
         _ => {
             changes.push(DiffChange {
                 path: format!("type {}", base.name),
@@ -528,6 +532,30 @@ mod tests {
         let m = parse(sdl);
         let changes = diff_graphql(&m, &m);
         assert!(changes.is_empty(), "unexpected changes: {changes:?}");
+    }
+
+    // O-3: custom scalars must not read as "kind changed". The minimal schemas
+    // above never contained a scalar, which is how the false Breaking survived.
+    #[test]
+    fn test_scalar_self_diff_no_changes() {
+        let m = parse("scalar DateTime\ntype User { id: ID!, at: DateTime! }");
+        let changes = diff_graphql(&m, &m);
+        assert!(
+            changes.is_empty(),
+            "an unchanged custom scalar must produce no changes, got: {changes:?}"
+        );
+    }
+
+    // O-3: realistic-spec self-diff corpus — an identical spec yields zero changes.
+    #[test]
+    fn test_realistic_sdl_self_diff_zero_changes() {
+        let sdl = include_str!("../../fixtures/self-diff-corpus/realistic.graphql");
+        let m = parse(sdl);
+        let changes = diff_graphql(&m, &m);
+        assert!(
+            changes.is_empty(),
+            "realistic SDL self-diff must be empty, got: {changes:?}"
+        );
     }
 
     #[test]

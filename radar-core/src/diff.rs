@@ -3671,6 +3671,23 @@ paths:
     }
 
     // -----------------------------------------------------------------------
+    // O-3: realistic-spec self-diff corpus — identical specs yield zero changes
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_realistic_openapi_self_diff_zero_changes() {
+        let corpus = include_str!("../../fixtures/self-diff-corpus/realistic.yaml");
+        let demo = include_str!("../../fixtures/demo-payments-api/v1.yaml");
+        for (name, yaml) in [("realistic.yaml", corpus), ("demo v1.yaml", demo)] {
+            let spec = parse(yaml);
+            let changes = diff_openapi(&spec, &spec);
+            assert!(
+                changes.is_empty(),
+                "{name} self-diff must be empty, got: {changes:?}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // O-2: request/response context must survive composed (oneOf/anyOf) variants
     // -----------------------------------------------------------------------
     fn oneof_body_spec(location: &str, required: bool) -> String {
