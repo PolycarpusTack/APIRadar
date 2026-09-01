@@ -410,11 +410,18 @@ fn parse_service(bytes: &[u8], pos: &mut usize, prefix: &str, schema: &mut Proto
 /// (input_type, output_type). Unparsed pieces yield empty strings.
 fn parse_rpc_sig(sig: &str) -> (String, String) {
     fn inner(s: &str) -> String {
-        s.trim()
-            .trim_start_matches("stream")
-            .trim()
-            .trim_start_matches('.')
-            .to_string()
+        let s = s.trim();
+        // O-18: streaming-ness is part of the contract — the old
+        // `trim_start_matches("stream")` erased it (making unary↔streaming
+        // changes invisible) and truncated any type merely *starting* with
+        // "stream" (`streamer` → `er`). Keep a normalized `stream ` prefix;
+        // only a real keyword (followed by whitespace) counts.
+        if let Some(rest) = s.strip_prefix("stream") {
+            if rest.starts_with(char::is_whitespace) {
+                return format!("stream {}", rest.trim().trim_start_matches('.'));
+            }
+        }
+        s.trim_start_matches('.').to_string()
     }
     let mut input = String::new();
     let mut output = String::new();
@@ -818,9 +825,10 @@ fn diff_enum(base: &ProtoEnum, head: &ProtoEnum, changes: &mut Vec<DiffChange>) 
 
     for (name, bnum) in &base_by_name {
         match head_by_name.get(name) {
+            // O-18: enum kinds/severities align with the OpenAPI engine.
             None => changes.push(DiffChange {
                 path: format!("{}.{name}", base.name),
-                kind: ChangeKind::FieldRemoved,
+                kind: ChangeKind::EnumValueRemoved,
                 severity: Severity::Breaking,
                 description: Some(format!("Enum value '{}.{name}' was removed", base.name)),
             }),
@@ -842,8 +850,10 @@ fn diff_enum(base: &ProtoEnum, head: &ProtoEnum, changes: &mut Vec<DiffChange>) 
         if !base_by_name.contains_key(name) {
             changes.push(DiffChange {
                 path: format!("{}.{name}", base.name),
-                kind: ChangeKind::FieldAdded,
-                severity: Severity::Safe,
+                kind: ChangeKind::EnumValueAdded,
+                // Risky, not Safe: an added value breaks peers matching
+                // exhaustively on the enum (same call as the OpenAPI engine).
+                severity: Severity::NonBreakingRisky,
                 description: Some(format!("Enum value '{}.{name}' was added", base.name)),
             });
         }
@@ -936,6 +946,8 @@ mod tests {
         assert_eq!(type_changed.len(), 1, "got: {changes:?}");
     }
 
+    // O-18: enum changes carry the same ChangeKind + severity as the OpenAPI
+    // engine, so downstream filters on enum_value_removed see all formats.
     #[test]
     fn test_enum_value_removed_is_breaking() {
         let base =
@@ -944,10 +956,63 @@ mod tests {
         let changes = diff_proto(&base, &head);
         let removed: Vec<_> = changes
             .iter()
-            .filter(|c| c.kind == ChangeKind::FieldRemoved && c.severity == Severity::Breaking)
+            .filter(|c| c.kind == ChangeKind::EnumValueRemoved && c.severity == Severity::Breaking)
             .collect();
         assert_eq!(removed.len(), 1, "got: {changes:?}");
         assert!(removed[0].path.contains("PENDING"));
+    }
+
+    #[test]
+    fn test_enum_value_added_is_risky() {
+        let base = parse(r#"syntax="proto3"; enum Status { ACTIVE = 0; }"#);
+        let head = parse(r#"syntax="proto3"; enum Status { ACTIVE = 0; PENDING = 1; }"#);
+        let changes = diff_proto(&base, &head);
+        assert!(
+            changes.iter().any(|c| c.kind == ChangeKind::EnumValueAdded
+                && c.severity == Severity::NonBreakingRisky),
+            "an added enum value breaks exhaustive matches — NonBreakingRisky, as in OpenAPI; got {changes:?}"
+        );
+    }
+
+    // O-18: unary <-> streaming is a signature change, not something to erase.
+    #[test]
+    fn test_unary_to_streaming_rpc_is_breaking() {
+        let base = parse(
+            r#"syntax="proto3"; message Req { string q = 1; } message Resp { string r = 1; }
+               service S { rpc Watch(Req) returns (Resp); }"#,
+        );
+        let head = parse(
+            r#"syntax="proto3"; message Req { string q = 1; } message Resp { string r = 1; }
+               service S { rpc Watch(Req) returns (stream Resp); }"#,
+        );
+        let changes = diff_proto(&base, &head);
+        assert!(
+            changes.iter().any(|c| c.severity == Severity::Breaking
+                && c.description.as_deref().unwrap_or("").contains("stream")),
+            "unary -> streaming breaks every generated client; got {changes:?}"
+        );
+    }
+
+    #[test]
+    fn test_type_starting_with_stream_not_corrupted() {
+        let base = parse(
+            r#"syntax="proto3"; message streamer { string q = 1; } message A { string r = 1; }
+               service S { rpc Go(streamer) returns (A); }"#,
+        );
+        let head = parse(
+            r#"syntax="proto3"; message streamer { string q = 1; } message streamer2 { string q = 1; } message A { string r = 1; }
+               service S { rpc Go(streamer2) returns (A); }"#,
+        );
+        let changes = diff_proto(&base, &head);
+        let sig = changes
+            .iter()
+            .find(|c| c.description.as_deref().unwrap_or("").contains("signature"))
+            .unwrap_or_else(|| panic!("expected a signature change, got {changes:?}"));
+        let desc = sig.description.as_deref().unwrap();
+        assert!(
+            desc.contains("(streamer)") && desc.contains("(streamer2)"),
+            "type names starting with 'stream' must not be truncated; got {desc}"
+        );
     }
 
     #[test]
