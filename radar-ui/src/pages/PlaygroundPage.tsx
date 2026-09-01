@@ -7,9 +7,9 @@ import PageHeader from '../components/PageHeader'
 import CsvRunnerPanel from '../components/CsvRunnerPanel'
 import { api, ApiError } from '../lib/apiClient'
 import { escapeHtmlAttr, escapeJsonForHtml } from '../lib/htmlEscape'
+import { loadLocalEnvs, saveLocalEnvs, type SandboxEnv } from '../lib/sandboxEnvStorage'
 
 const DEFAULT_SPEC = 'https://cdn.jsdelivr.net/npm/@scalar/galaxy/dist/latest.yaml'
-const LOCAL_STORAGE_KEY = 'drift-playground-envs-local'
 // Mirrors --bg-base token (#0B0F19). Used inside iframe srcdoc where the parent's
 // CSS variables are inaccessible. Keep in sync with :root { --bg-base } in index.css.
 const BG_BASE_DARK = '#0B0F19'
@@ -36,33 +36,11 @@ const SCALAR_SRC: string = (() => {
 // Types
 // ---------------------------------------------------------------------------
 
-interface SandboxEnv {
-  id: string
-  name: string
-  base_url: string
-  bearer_token: string
-  description: string
-  created_at?: string
-  updated_at?: string
-}
-
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
-// ---------------------------------------------------------------------------
-// Local-storage fallback (offline / no server)
-// ---------------------------------------------------------------------------
-
-function loadLocalEnvs(): SandboxEnv[] {
-  try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_KEY)
-    if (raw) return JSON.parse(raw) as SandboxEnv[]
-  } catch {}
-  return []
-}
-
-function saveLocalEnvs(envs: SandboxEnv[]) {
-  localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(envs))
-}
+// Local-storage fallback (offline / no server) lives in ../lib/sandboxEnvStorage.
+// It never persists bearer_token values: tokens stay in React state only, so an
+// active env keeps working for the current tab but is gone after a reload.
 
 // ---------------------------------------------------------------------------
 // Scalar iframe builder
@@ -468,6 +446,7 @@ export default function PlaygroundPage() {
             {!serverMode && (
               <p className="text-[11px]" style={{ color: 'var(--amber)', fontFamily: 'var(--font-mono)' }}>
                 ⚠ Server unreachable — environments are saved in this browser only and not shared with teammates.
+                Bearer tokens are never saved locally: they stay in memory for this tab and must be re-entered after a reload.
               </p>
             )}
           </div>
