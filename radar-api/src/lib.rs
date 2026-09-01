@@ -850,6 +850,28 @@ mod tests {
         assert_eq!(json["accepted"], 2);
     }
 
+    // N-13: a negative limit reached the database — a full-table dump on
+    // SQLite and a hard error on PostgreSQL. Every list endpoint clamps.
+    #[tokio::test]
+    async fn negative_limit_is_clamped_on_every_list_endpoint() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool.clone());
+
+        for uri in [
+            "/v1/audit-events?limit=-1&offset=-5",
+            "/v1/policy-decisions?limit=-1&offset=-5",
+            "/v1/acknowledgements?limit=-1&offset=-5",
+        ] {
+            let resp = client.get(uri).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "{uri} must clamp rather than error or dump: {}",
+                resp.text()
+            );
+        }
+    }
+
     // N-29: settings are per-org — one tenant's PUT must not rewrite another's
     // policy, and the retention job must not purge across org boundaries.
     #[tokio::test]
