@@ -526,7 +526,7 @@ function hardenWindow(win: BrowserWindow): void {
     const current = win.webContents.getURL()
     try {
       // file:// documents all report origin "null"; comparing origins keeps
-      // in-app navigation (dev http://localhost:5173, packaged file://) allowed
+      // in-app navigation (dev DEV_RENDERER_URL, packaged file://) allowed
       // while denying any cross-origin/remote destination.
       if (new URL(navigationUrl).origin !== new URL(current).origin) {
         event.preventDefault()
@@ -538,6 +538,15 @@ function hardenWindow(win: BrowserWindow): void {
   })
 }
 
+// URL of the renderer dev server. electron-vite's `dev` command starts the
+// Vite dev server first, exports its resolved URL as ELECTRON_RENDERER_URL,
+// and only then spawns Electron — so the main process always inherits it in
+// dev. The fallback (the port configured in electron.vite.config.ts) only
+// matters if the unpackaged main bundle is launched outside `electron-vite dev`.
+// Both the dev loadURL and the IPC sender-trust check derive from this single
+// value so they can never disagree.
+const DEV_RENDERER_URL = process.env.ELECTRON_RENDERER_URL ?? 'http://localhost:5181'
+
 // True when an IPC message originates from one of our own renderer frames
 // (dev Vite server, or the packaged file:// bundle) — not the sandboxed,
 // null-origin Playground iframe or any injected content.
@@ -545,7 +554,7 @@ function isTrustedSenderFrame(frame: WebFrameMain | null): boolean {
   if (!frame) return false
   try {
     const url = new URL(frame.url)
-    if (!app.isPackaged) return url.origin === 'http://localhost:5173'
+    if (!app.isPackaged) return url.origin === new URL(DEV_RENDERER_URL).origin
     return url.protocol === 'file:'
   } catch {
     return false
@@ -581,8 +590,9 @@ function createWindow(): BrowserWindow {
   hardenWindow(win)
 
   if (!app.isPackaged) {
-    // Development: load Vite dev server
-    void win.loadURL('http://localhost:5173')
+    // Development: load the Vite dev server electron-vite started for us
+    // (ELECTRON_RENDERER_URL — see DEV_RENDERER_URL above).
+    void win.loadURL(DEV_RENDERER_URL)
     win.webContents.openDevTools({ mode: 'detach' })
   } else {
     // Production: load built renderer.
