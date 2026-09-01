@@ -220,11 +220,15 @@ export default function CsvRunnerPanel() {
         row_data: string | null
       }>>(`/v1/csv-runs/${id}/results?limit=500`)
       const mapped: RowResult[] = data.map((r, idx) => {
-        // Prefer the in-memory CSV row (current session); fall back to server-persisted
-        // row_data so historical runs and re-opened tabs still have correct originalRow.
-        let originalRow: Record<string, string> = rows[idx] ?? {}
-        if (Object.keys(originalRow).length === 0 && r.row_data) {
-          try { originalRow = JSON.parse(r.row_data) } catch { /* keep empty */ }
+        // Prefer the server-persisted row_data — it belongs to the run being viewed,
+        // whereas the in-memory CSV may be a different file. Fall back to the local
+        // row matched by row_number (1-based); index only when row_number is absent.
+        let originalRow: Record<string, string> = {}
+        if (r.row_data) {
+          try { originalRow = JSON.parse(r.row_data) } catch { /* fall through */ }
+        }
+        if (Object.keys(originalRow).length === 0) {
+          originalRow = rows[r.row_number != null ? r.row_number - 1 : idx] ?? {}
         }
         return { rowNumber: r.row_number, httpStatus: r.http_status, durationMs: r.duration_ms, error: r.error, url: r.url, originalRow }
       })
@@ -307,7 +311,7 @@ export default function CsvRunnerPanel() {
     } finally {
       setIsSubmitting(false)
     }
-  }, [rows, request, pollJob])
+  }, [rows, request, pollJob, captureBody, enableRetry])
 
   async function cancel() {
     if (!jobId) return
