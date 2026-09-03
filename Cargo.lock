@@ -2004,7 +2004,7 @@ dependencies = [
  "serde_yml",
  "sha2 0.11.0",
  "sqlx",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tower",
  "tower-http 0.5.2",
@@ -2047,7 +2047,7 @@ dependencies = [
  "openapiv3",
  "serde",
  "serde_yml",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tracing",
  "uuid",
 ]
