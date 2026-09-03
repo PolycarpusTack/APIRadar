@@ -15,7 +15,7 @@ strip        = "symbols"  # remove debug symbols → ~60% smaller binary on Linu
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.8", features = ["macros"] }
 # TLS: rustls, not native-tls. `tls-rustls-ring-native-roots` (rather than the
 # `runtime-tokio-rustls` shorthand, which selects webpki roots) keeps trust
 # anchored in the OS certificate store — the same behaviour native-tls had, so
