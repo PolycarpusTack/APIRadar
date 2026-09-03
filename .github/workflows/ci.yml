@@ -283,7 +283,7 @@ jobs:
 
       - name: Upload traces on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fullstack-e2e-traces
           path: radar-ui/test-results/
@@ -342,7 +342,7 @@ jobs:
           ls -la radar-desktop/dist/*.AppImage
 
       - name: Upload AppImage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: radar-desktop-appimage
           path: radar-desktop/dist/*.AppImage
