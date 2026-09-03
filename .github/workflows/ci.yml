@@ -262,7 +262,7 @@ jobs:
           curl -sf http://127.0.0.1:17380/health || { echo "radar-api did not start"; exit 1; }
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node
         uses: actions/setup-node@v7
@@ -318,7 +318,7 @@ jobs:
         run: cargo build -p radar-api --release
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node
         uses: actions/setup-node@v7
