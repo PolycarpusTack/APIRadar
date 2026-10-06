@@ -32,6 +32,9 @@ pub(crate) mod utils;
 pub(crate) mod webhooks;
 
 #[cfg(test)]
+mod review_regressions;
+
+#[cfg(test)]
 pub(crate) use ai_tests::templates_from_changes;
 pub(crate) use auth::{
     auth_middleware, oidc_callback, oidc_login, oidc_logout, oidc_me, JwtSecretExt, RequireAuth,

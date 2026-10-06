@@ -97,6 +97,12 @@ Dependencies point inward: cli → api; radar-ui → api (HTTP); radar-desktop �
 | ADR-015 | Backstage integration via polling importer (HTTP client reads Backstage catalog API) | No Backstage plugin required on consumer side; importer runs as a scheduled job in `radar-api`; org can point Radar at any Backstage instance without Backstage changes | Backstage plugin (requires consumer-side Backstage upgrade), webhook push (requires Backstage config changes) |
 | ADR-016 | Encryption at rest deferred to OS/infrastructure layer | SQLite deployments rely on OS filesystem encryption (FileVault/BitLocker); Postgres relies on infrastructure-level storage encryption (e.g., EBS/GCS encryption at rest). No SQLCipher dependency introduced. Column-level encryption deferred until a specific compliance requirement (SOC 2 Type II, HIPAA, etc.) names it — at which point SQLCipher for SQLite and `pgcrypto` column encryption for Postgres are the preferred paths. | SQLCipher (adds a native binary dependency, complicates cross-compilation, requires key management); `pgcrypto` column encryption (premature without a named compliance requirement; adds query complexity) |
 
+#### Maintenance update — 6 October 2026
+
+The [review remediation plan](docs/review-remediation-2026-10-06.md) records eight correctness fixes and their regression coverage. Spec Version identities now include content and format as well as readable refs; stored snapshots are never updated on identity conflicts. Submitted Diffs use a canonical Change-report fingerprint for the metadata-only base because that endpoint does not receive a base spec.
+
+Evidence ingestion validates both Producer and Consumer ownership before batch writes. Blast Radius discovers collection Consumers through `impact_evidence` even without subscriptions, includes matching unexpired collection Evidence at medium confidence, and does not duplicate that already-durable Evidence on reads.
+
 ### Value Hypotheses (Stakeholder)
 
 | # | Hypothesis | Measurable signal | Validated by |

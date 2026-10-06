@@ -1005,6 +1005,18 @@ pub(crate) async fn require_org_owned(
     }
 }
 
+/// Evidence references two independently owned resources. Validate both before
+/// opening a write transaction so a rejected batch cannot partially persist.
+pub(crate) async fn require_evidence_owned(
+    pool: &sqlx::AnyPool,
+    consumer_id: &str,
+    service_id: &str,
+    org_id: &str,
+) -> Result<(), ApiError> {
+    require_org_owned(pool, OrgResource::Consumer, consumer_id, org_id).await?;
+    require_org_owned(pool, OrgResource::Service, service_id, org_id).await
+}
+
 // ---------------------------------------------------------------------------
 // F-01 regression: the OIDC callback must never mint an empty-org session.
 // ---------------------------------------------------------------------------

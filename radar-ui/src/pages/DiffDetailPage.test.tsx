@@ -58,6 +58,29 @@ beforeEach(() => {
 })
 afterEach(() => cleanup())
 
+describe('DiffDetailPage collection Evidence', () => {
+  it('labels collection Evidence returned in Blast Radius', async () => {
+    const blast = {
+      diff_id: 'abc', service_id: 's', lookback_days: 30,
+      entries: [{
+        consumer: { id: 'collection-consumer', name: 'Collection Consumer', repo_url: '', owner_team: '', contact: '' },
+        confidence: 'medium', last_seen: '2026-06-01T00:00:00Z',
+        has_runtime_usage: false, has_call_site: false, has_collection_file: true,
+      }],
+    }
+    mockApi.get.mockImplementation(async (path: string) => {
+      if (path === '/v1/diffs/abc/blast-radius') return blast
+      return baseGet()(path)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Collection Consumer')).toBeInTheDocument()
+    expect(screen.getByText('collection file')).toBeInTheDocument()
+    expect(screen.getByText('medium')).toBeInTheDocument()
+  })
+})
+
 describe('DiffDetailPage release-note generation', () => {
   it('polls generate-status and renders the completed note content', async () => {
     mockApi.get.mockImplementation(

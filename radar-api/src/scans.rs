@@ -402,7 +402,7 @@ async fn execute_scan(
     // stored version (OFFSET 0) IS the previous spec — an earlier `OFFSET 1`
     // skipped it, diffing against an empty or two-generations-old spec.
     let base_spec = if last_spec_hash.is_some() {
-        fetch_previous_spec(&pool, &service_id).await
+        fetch_previous_spec(&pool, &service_id, &spec_url).await
     } else {
         // First run — store the spec, no diff to create yet.
         let _ = q!("UPDATE scheduled_scan SET last_spec_hash = ? WHERE id = ?")
@@ -499,11 +499,17 @@ async fn execute_scan(
 /// since the current scan's spec is stored only after this is called). Ordering
 /// is `captured_at DESC, id DESC` so that identical timestamps break
 /// deterministically instead of relying on physical row order.
-async fn fetch_previous_spec(pool: &sqlx::AnyPool, service_id: &str) -> String {
+/// The previous spec captured by THIS scan.
+///
+/// N-14: scans store `git_ref = spec_url`, so filtering on it keeps a service
+/// with several scheduled scans (different origins) from diffing one origin's
+/// spec against another's — and skips the synthetic 'scan:base' rows.
+async fn fetch_previous_spec(pool: &sqlx::AnyPool, service_id: &str, spec_url: &str) -> String {
     let row = q!(
-        "SELECT spec_yaml FROM spec_version WHERE service_id = ? ORDER BY captured_at DESC, id DESC LIMIT 1",
+        "SELECT spec_yaml FROM spec_version WHERE service_id = ? AND git_ref = ?          ORDER BY captured_at DESC, id DESC LIMIT 1",
     )
     .bind(service_id)
+    .bind(spec_url)
     .fetch_optional(pool)
     .await
     .ok()
@@ -799,7 +805,7 @@ mod tests {
         )
         .await;
 
-        let base = fetch_previous_spec(&pool, svc).await;
+        let base = fetch_previous_spec(&pool, svc, "test").await;
         assert_eq!(
             base, "spec-v2",
             "must diff against the immediately previous spec, not an older one"
@@ -809,6 +815,38 @@ mod tests {
     #[tokio::test]
     async fn fetch_previous_spec_empty_when_none_stored() {
         let pool = test_pool().await;
-        assert_eq!(fetch_previous_spec(&pool, "nobody").await, "");
+        assert_eq!(fetch_previous_spec(&pool, "nobody", "test").await, "");
+    }
+
+    #[tokio::test]
+    async fn fetch_previous_spec_ignores_other_urls() {
+        let pool = test_pool().await;
+        insert_spec(
+            &pool,
+            "target",
+            "svc-url",
+            "2026-07-01T10:00:00+00:00",
+            "target-spec",
+        )
+        .await;
+        insert_spec(
+            &pool,
+            "other",
+            "svc-url",
+            "2026-07-02T10:00:00+00:00",
+            "other-spec",
+        )
+        .await;
+        q!("UPDATE spec_version SET git_ref = ? WHERE id = ?")
+            .bind("https://example.com/other.yaml")
+            .bind("other")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fetch_previous_spec(&pool, "svc-url", "test").await,
+            "target-spec"
+        );
     }
 }

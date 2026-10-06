@@ -35,7 +35,7 @@ pub(crate) struct CreateDiffBody {
     pub(crate) changes: Vec<ChangeInput>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 pub(crate) struct ChangeInput {
     pub(crate) path: String,
     pub(crate) kind: String,
@@ -164,6 +164,15 @@ fn spec_version_id(service_id: &str, git_ref: &str) -> String {
     .to_string()
 }
 
+/// Refs and URLs are labels, not immutable snapshots. Include format and content
+/// in the identity; length-delimited JSON prevents ambiguous label boundaries.
+fn snapshot_version_id(service_id: &str, git_ref: &str, format: &str, content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = hex::encode(Sha256::digest(content.as_bytes()));
+    let identity = json!([git_ref, format.to_lowercase(), digest]).to_string();
+    spec_version_id(service_id, &identity)
+}
+
 #[cfg(test)]
 mod tests {
     use super::spec_version_id;
@@ -250,6 +259,43 @@ mod tests {
         // UUID v5 is 36 chars: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
         assert_eq!(id.len(), 36);
         assert_eq!(id.chars().filter(|&c| c == '-').count(), 4);
+    }
+
+    #[tokio::test]
+    async fn batch_same_urls_with_changed_content_preserve_history() {
+        let pool = test_pool().await;
+        let item = super::BatchCompareItem {
+            label: Some("Producer".into()),
+            service_id: Some("batch-snapshot".into()),
+            format: "graphql".into(),
+            base_url: "https://example.com/base.graphql".into(),
+            head_url: "https://example.com/head.graphql".into(),
+        };
+        let base = "type Query { item: String other: String }";
+        let head = "type Query { other: String }";
+        let first = super::persist_batch_comparison(&pool, &item, "", "Producer", base, base)
+            .await
+            .unwrap();
+
+        let second = super::persist_batch_comparison(&pool, &item, "", "Producer", base, head)
+            .await
+            .unwrap();
+
+        assert_ne!(second.diff_id, first.diff_id);
+        assert_eq!(second.breaking_count, 1);
+        let original: String = qs!("SELECT sv.spec_yaml FROM spec_version sv JOIN diff d ON d.to_version = sv.id WHERE d.id = ?")
+            .bind(first.diff_id.unwrap()).fetch_one(&pool).await.unwrap();
+        assert_eq!(original, base);
+        let repeated = super::persist_batch_comparison(&pool, &item, "", "Producer", base, head)
+            .await
+            .unwrap();
+        assert_eq!(repeated.diff_id, second.diff_id);
+        let changed_base =
+            super::persist_batch_comparison(&pool, &item, "", "Producer", head, head)
+                .await
+                .unwrap();
+        assert_ne!(changed_base.diff_id, second.diff_id);
+        assert_eq!(changed_base.changes_count, 0);
     }
 }
 
@@ -365,7 +411,23 @@ pub(crate) async fn create_diff(
     .execute(&pool)
     .await?;
 
-    let from_version_id = spec_version_id(&service_id, &body.from_git_ref);
+    // This endpoint submits Change records rather than a base spec. Fingerprint
+    // the report for the metadata-only base: a changed report must not reuse a
+    // stale Diff even when the head content and readable refs are unchanged.
+    let mut report_rows = body
+        .changes
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| ApiError::Unprocessable(e.to_string()))?;
+    report_rows.sort_unstable(); // Change order is not part of a Diff's identity.
+    let report_identity = json!(report_rows).to_string();
+    let from_version_id = snapshot_version_id(
+        &service_id,
+        &body.from_git_ref,
+        &body.spec_format,
+        &report_identity,
+    );
     q!(r#"
         INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format)
         VALUES (?, ?, ?, ?, ?)
@@ -379,12 +441,16 @@ pub(crate) async fn create_diff(
     .execute(&pool)
     .await?;
 
-    let to_version_id = spec_version_id(&service_id, &body.to_git_ref);
+    let to_version_id = snapshot_version_id(
+        &service_id,
+        &body.to_git_ref,
+        &body.spec_format,
+        body.spec_yaml.as_deref().unwrap_or(&report_identity),
+    );
     q!(r#"
         INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml)
         VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            spec_yaml = COALESCE(excluded.spec_yaml, spec_version.spec_yaml)
+        ON CONFLICT(id) DO NOTHING
         "#,)
     .bind(&to_version_id)
     .bind(&service_id)
@@ -729,13 +795,27 @@ pub(crate) async fn blast_radius(
             .collect()
     };
 
+    let evidence_org_id = if svc_org_id.is_empty() {
+        &caller_org_id
+    } else {
+        &svc_org_id
+    };
+    // Collection scanning auto-registers Consumers without creating a
+    // subscription. Discover them from durable Evidence as well, while keeping
+    // both sources inside the Producer's organisation boundary.
     let consumer_rows = q!(r#"
         SELECT c.id, c.name, c.repo_url, c.owner_team, c.contact
         FROM consumer c
-        JOIN subscription s ON s.consumer_id = c.id
-        WHERE s.service_id = ?
+        WHERE (? = '' OR c.org_id = '' OR c.org_id = ?)
+          AND (EXISTS (SELECT 1 FROM subscription s WHERE s.consumer_id = c.id AND s.service_id = ?)
+            OR EXISTS (SELECT 1 FROM impact_evidence ie WHERE ie.consumer_id = c.id
+              AND ie.producer_service_id = ? AND ie.org_id = ? AND ie.source_type = 'collection_file'))
         "#,)
+    .bind(evidence_org_id)
+    .bind(evidence_org_id)
     .bind(&service_id)
+    .bind(&service_id)
+    .bind(evidence_org_id)
     .fetch_all(&pool)
     .await?;
 
@@ -864,6 +944,45 @@ pub(crate) async fn blast_radius(
             }
         }
 
+        if !op_level_ops.is_empty() || !field_level_only.is_empty() {
+            let mut sql = String::from(
+                "SELECT operation, field_path, evidence_uri, observed_at FROM impact_evidence \
+                 WHERE consumer_id = ? AND producer_service_id = ? AND org_id = ? \
+                   AND source_type = 'collection_file' AND (expires_at IS NULL OR expires_at > ?) AND (",
+            );
+            let mut predicates = vec!["operation = ?"; op_level_ops.len()];
+            // A collection may identify only an operation. Missing field
+            // Evidence cannot establish that a Consumer is unaffected by
+            // a property change within that operation.
+            predicates.extend(vec![
+                "(operation = ? AND (field_path = ? OR field_path IS NULL OR field_path = ''))";
+                field_level_only.len()
+            ]);
+            sql.push_str(&predicates.join(" OR "));
+            sql.push_str(") ORDER BY observed_at DESC LIMIT 5");
+            let sql = crate::db::pg(&sql);
+            let mut query = sqlx::query(&sql)
+                .bind(&consumer_id)
+                .bind(&service_id)
+                .bind(evidence_org_id)
+                .bind(Utc::now().to_rfc3339());
+            for op in &op_level_ops {
+                query = query.bind(op);
+            }
+            for (op, field) in &field_level_only {
+                query = query.bind(op).bind(field);
+            }
+            for row in query.fetch_all(&pool).await? {
+                evidence_items.push(json!({
+                    "kind": "collection_file",
+                    "operation": row.try_get::<Option<String>, _>("operation").ok().flatten(),
+                    "field_path": row.try_get::<Option<String>, _>("field_path").ok().flatten(),
+                    "evidence_uri": row.try_get::<Option<String>, _>("evidence_uri").ok().flatten(),
+                    "last_seen_at": row.try_get::<String, _>("observed_at").unwrap_or_default(),
+                }));
+            }
+        }
+
         if let Some(days) = params.max_age_days {
             let cutoff_age = (Utc::now() - Duration::days(i64::from(days))).to_rfc3339();
             evidence_items.retain(|e| {
@@ -882,6 +1001,9 @@ pub(crate) async fn blast_radius(
         {
             let now_str = Utc::now().to_rfc3339();
             for item in &evidence_items {
+                if item["kind"] == "collection_file" {
+                    continue; // already durable; do not duplicate or extend expiry
+                }
                 let source_type = if item["kind"] == "runtime_usage" {
                     "runtime_usage"
                 } else {
@@ -951,6 +1073,9 @@ pub(crate) async fn blast_radius(
 
         let has_runtime_usage = evidence_items.iter().any(|e| e["kind"] == "runtime_usage");
         let has_call_site = evidence_items.iter().any(|e| e["kind"] == "call_site");
+        let has_collection_file = evidence_items
+            .iter()
+            .any(|e| e["kind"] == "collection_file");
 
         let usage_last_seen: Option<String> = evidence_items
             .iter()
@@ -962,6 +1087,11 @@ pub(crate) async fn blast_radius(
             .filter(|e| e["kind"] == "call_site")
             .filter_map(|e| e["last_seen_at"].as_str().map(|s| s.to_string()))
             .max();
+        let collection_last_seen: Option<String> = evidence_items
+            .iter()
+            .filter(|e| e["kind"] == "collection_file")
+            .filter_map(|e| e["last_seen_at"].as_str().map(str::to_string))
+            .max();
 
         let confidence = if let Some(ref ts) = usage_last_seen {
             if ts.as_str() >= cutoff_7.as_str() {
@@ -969,11 +1099,18 @@ pub(crate) async fn blast_radius(
             } else {
                 "medium"
             }
+        } else if has_collection_file {
+            "medium"
         } else {
             "low"
         };
 
-        let last_seen = usage_last_seen.or(call_site_last_seen).unwrap_or_default();
+        let last_seen = usage_last_seen
+            .into_iter()
+            .chain(call_site_last_seen)
+            .chain(collection_last_seen)
+            .max()
+            .unwrap_or_default();
 
         entries.push(json!({
             "consumer": {
@@ -987,6 +1124,7 @@ pub(crate) async fn blast_radius(
             "last_seen":         last_seen,
             "has_runtime_usage": has_runtime_usage,
             "has_call_site":     has_call_site,
+            "has_collection_file": has_collection_file,
             "evidence":          evidence_items,
         }));
     }
@@ -1177,7 +1315,8 @@ pub(crate) async fn compare_specs(
     .execute(&pool)
     .await?;
 
-    let from_version_id = spec_version_id(&service_id, &body.base_ref);
+    let from_version_id =
+        snapshot_version_id(&service_id, &body.base_ref, &format, &body.base_spec);
     q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
          VALUES (?, ?, ?, ?, ?, ?) \
@@ -1192,11 +1331,11 @@ pub(crate) async fn compare_specs(
     .execute(&pool)
     .await?;
 
-    let to_version_id = spec_version_id(&service_id, &body.head_ref);
+    let to_version_id = snapshot_version_id(&service_id, &body.head_ref, &format, &body.head_spec);
     q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
          VALUES (?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(id) DO UPDATE SET spec_yaml = COALESCE(excluded.spec_yaml, spec_version.spec_yaml)",
+         ON CONFLICT(id) DO NOTHING",
     )
     .bind(&to_version_id)
     .bind(&service_id)
@@ -1407,27 +1546,41 @@ async fn run_batch_item(
         .await
         .map_err(|e| anyhow::anyhow!("read head_url: {e}"))?;
 
+    persist_batch_comparison(pool, item, org_id, label, &base_content, &head_content).await
+}
+
+// The fetching boundary stays SSRF-pinned. Persistence accepts the fetched
+// content explicitly, allowing real database regression tests without bypassing
+// the URL policy or depending on third-party network services.
+async fn persist_batch_comparison(
+    pool: &sqlx::AnyPool,
+    item: &BatchCompareItem,
+    org_id: &str,
+    label: &str,
+    base_content: &str,
+    head_content: &str,
+) -> anyhow::Result<BatchResultItem> {
     let format = item.format.to_lowercase();
 
     let changes: Vec<radar_core::diff::DiffChange> = match format.as_str() {
         "graphql" | "gql" => {
-            let bm = radar_core::graphql::parse_graphql(&base_content)
+            let bm = radar_core::graphql::parse_graphql(base_content)
                 .map_err(|e| anyhow::anyhow!("parse base graphql: {e}"))?;
-            let hm = radar_core::graphql::parse_graphql(&head_content)
+            let hm = radar_core::graphql::parse_graphql(head_content)
                 .map_err(|e| anyhow::anyhow!("parse head graphql: {e}"))?;
             radar_core::graphql::diff_graphql(&bm, &hm)
         }
         "protobuf" | "proto" => {
-            let bs = radar_core::proto::parse_proto(&base_content)
+            let bs = radar_core::proto::parse_proto(base_content)
                 .map_err(|e| anyhow::anyhow!("parse base proto: {e}"))?;
-            let hs = radar_core::proto::parse_proto(&head_content)
+            let hs = radar_core::proto::parse_proto(head_content)
                 .map_err(|e| anyhow::anyhow!("parse head proto: {e}"))?;
             radar_core::proto::diff_proto(&bs, &hs)
         }
         _ => {
-            let bp = radar_core::diff::parse_openapi(&base_content)
+            let bp = radar_core::diff::parse_openapi(base_content)
                 .map_err(|e| anyhow::anyhow!("parse base openapi: {e}"))?;
-            let hp = radar_core::diff::parse_openapi(&head_content)
+            let hp = radar_core::diff::parse_openapi(head_content)
                 .map_err(|e| anyhow::anyhow!("parse head openapi: {e}"))?;
             radar_core::diff::diff_openapi(&bp, &hp)
         }
@@ -1472,8 +1625,8 @@ async fn run_batch_item(
     .await
     .map_err(|e| anyhow::anyhow!("upsert service: {e}"))?;
 
-    // Use URL strings as git refs — keeps spec_version IDs stable across reruns.
-    let from_ver = spec_version_id(&service_id, &item.base_url);
+    // Keep URLs as readable refs, but identify the actual fetched snapshots.
+    let from_ver = snapshot_version_id(&service_id, &item.base_url, &format, base_content);
     q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
          VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
@@ -1483,20 +1636,26 @@ async fn run_batch_item(
     .bind(&item.base_url)
     .bind(&now)
     .bind(&format)
-    .bind(&base_content)
+    .bind(base_content)
     .execute(pool)
     .await
     .map_err(|e| anyhow::anyhow!("insert base spec_version: {e}"))?;
 
-    let to_ver = spec_version_id(&service_id, &item.head_url);
+    let to_ver = snapshot_version_id(&service_id, &item.head_url, &format, head_content);
     q!(
         "INSERT INTO spec_version (id, service_id, git_ref, captured_at, spec_format, spec_yaml) \
          VALUES (?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(id) DO UPDATE SET spec_yaml = COALESCE(excluded.spec_yaml, spec_version.spec_yaml)",
+         ON CONFLICT(id) DO NOTHING",
     )
-    .bind(&to_ver).bind(&service_id).bind(&item.head_url)
-    .bind(&now).bind(&format).bind(&head_content)
-    .execute(pool).await.map_err(|e| anyhow::anyhow!("insert head spec_version: {e}"))?;
+    .bind(&to_ver)
+    .bind(&service_id)
+    .bind(&item.head_url)
+    .bind(&now)
+    .bind(&format)
+    .bind(head_content)
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("insert head spec_version: {e}"))?;
 
     // Re-use an existing diff for the same (from, to) pair.
     if let Some(row) = q!("SELECT id FROM diff WHERE from_version = ? AND to_version = ?")

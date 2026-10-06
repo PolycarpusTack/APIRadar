@@ -360,6 +360,17 @@ fn diff_fields(
                             base_f.type_str, head_f.type_str
                         )),
                     });
+                } else if is_input
+                    && base_f.has_default
+                    && !head_f.has_default
+                    && head_f.type_str.ends_with('!')
+                {
+                    changes.push(DiffChange {
+                        path: format!("{type_name}.{name}"),
+                        kind: ChangeKind::RequiredChanged,
+                        severity: Severity::Breaking,
+                        description: Some(format!("Input field '{type_name}.{name}' became required after its default was removed")),
+                    });
                 }
                 diff_args(
                     type_name,
@@ -430,6 +441,16 @@ fn diff_args(
                             "Argument '{type_name}.{field_name}({name})' type changed from '{}' to '{}'",
                             base_arg.type_str, head_arg.type_str
                         )),
+                    });
+                } else if base_arg.has_default
+                    && !head_arg.has_default
+                    && head_arg.type_str.ends_with('!')
+                {
+                    changes.push(DiffChange {
+                        path: format!("{type_name}.{field_name}({name}:)"),
+                        kind: ChangeKind::RequiredChanged,
+                        severity: Severity::Breaking,
+                        description: Some(format!("Argument '{type_name}.{field_name}({name})' became required after its default was removed")),
                     });
                 }
             }

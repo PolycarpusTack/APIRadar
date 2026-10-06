@@ -34,6 +34,7 @@ interface BlastEntry {
   last_seen: string
   has_runtime_usage: boolean
   has_call_site: boolean
+  has_collection_file?: boolean
 }
 
 interface BlastRadius {
@@ -433,6 +434,7 @@ export default function DiffDetailPage() {
                         <div className="flex gap-1.5">
                           {e.has_runtime_usage && <Badge variant="cobalt">usage</Badge>}
                           {e.has_call_site && <Badge variant="neon">call site</Badge>}
+                          {e.has_collection_file && <Badge variant="neutral">collection file</Badge>}
                         </div>
                       </td>
                     </tr>

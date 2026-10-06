@@ -1,4 +1,6 @@
-use crate::auth::{assert_org_access, require_org_owned, CallerOrg, OrgResource};
+use crate::auth::{
+    assert_org_access, require_evidence_owned, require_org_owned, CallerOrg, OrgResource,
+};
 use crate::errors::ApiError;
 use crate::utils::collection_evidence_id;
 use axum::{
@@ -217,6 +219,9 @@ pub(crate) async fn ingest_collection_evidence(
     let org_id = caller.sql_scope().to_string();
     let now = Utc::now().to_rfc3339();
     let mut inserted = 0usize;
+    for item in &items {
+        require_evidence_owned(&pool, &item.consumer_id, &item.service_id, &org_id).await?;
+    }
 
     // Wrap the batch in a single transaction so a mid-batch failure rolls back
     // rather than leaving a partial commit. The deterministic UUID v5 id plus

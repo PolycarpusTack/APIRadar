@@ -788,10 +788,12 @@ fn diff_schema_properties(
         changes.push(DiffChange {
             path: format!("{} \u{2192} {}", op_path, prefix),
             kind: ChangeKind::NullabilityChanged,
-            severity: if base_nullable && !head_nullable {
-                Severity::Breaking // nullable → non-nullable breaks consumers that send null
+            severity: if (is_request && base_nullable) || (!is_request && head_nullable) {
+                // Requests must still accept old values; responses must not
+                // introduce null where Consumers previously relied on a value.
+                Severity::Breaking
             } else {
-                Severity::Safe // non-nullable → nullable is more permissive
+                Severity::Safe
             },
             description: Some(format!(
                 "'{}' changed from {} to {}",
@@ -812,6 +814,11 @@ fn diff_schema_properties(
 
     // Enum value changes — applies to string/integer schemas
     diff_enum_values(op_path, prefix, base_schema, head_schema, changes);
+
+    // Constraints belong to the schema itself, not only named properties.
+    // Running this at each recursive node also covers root scalars and array
+    // items. The property walker must not compare these a second time.
+    diff_scalar_constraints(op_path, prefix, base_schema, head_schema, changes);
 
     // N-5: composed schemas (allOf / oneOf / anyOf). These previously fell through
     // to the `_ => return` arm below and were entirely undiffed.
@@ -1040,13 +1047,18 @@ fn diff_object_types(
         }
     }
 
-    // Properties added → FieldAdded (Safe)
+    // A new required request property rejects requests that previously omitted
+    // it. Optional request additions and response additions remain safe.
     for (prop_name, _) in &head_obj.properties {
         if !base_obj.properties.contains_key(prop_name) {
             changes.push(DiffChange {
                 path: format!("{} \u{2192} {}.{}", op_path, prefix, prop_name),
                 kind: ChangeKind::FieldAdded,
-                severity: Severity::Safe,
+                severity: if is_request && head_obj.required.contains(prop_name) {
+                    Severity::Breaking
+                } else {
+                    Severity::Safe
+                },
                 description: Some(format!("{} '{}' was added", field_noun, prop_name)),
             });
         }
@@ -1108,8 +1120,6 @@ fn diff_object_types(
             },
         };
 
-        let prop_label = format!("{}.{}", prefix, prop_name);
-
         // Type changed? → Breaking TypeChanged
         let mut type_change_reported = false;
         if let (Some(base_type), Some(head_type)) = (
@@ -1129,15 +1139,6 @@ fn diff_object_types(
                 type_change_reported = true;
             }
         }
-
-        // N-8: format / numeric / string constraint drift.
-        diff_scalar_constraints(
-            op_path,
-            &prop_label,
-            base_prop_schema,
-            head_prop_schema,
-            changes,
-        );
 
         // Required status changed? Severity is direction-aware: in a REQUEST body,
         // making a field required breaks clients that omit it (Breaking) and
@@ -2348,10 +2349,10 @@ paths:
     }
 
     // -----------------------------------------------------------------------
-    // 17. Nullable true→false → Breaking NullabilityChanged
+    // 17. Response nullable true→false → Safe NullabilityChanged
     // -----------------------------------------------------------------------
     #[test]
-    fn test_nullable_removed_is_breaking() {
+    fn test_response_nullable_removed_is_safe() {
         let base_yaml = r#"
 openapi: "3.0.0"
 info:
@@ -2390,6 +2391,66 @@ paths:
                 properties:
                   nickname:
                     type: string
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let changed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::NullabilityChanged && c.severity == Severity::Safe)
+            .collect();
+        assert_eq!(
+            changed.len(),
+            1,
+            "Expected 1 NullabilityChanged/Safe, got: {:?}",
+            changes
+        );
+        assert!(changed[0].path.contains("nickname"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 18. Response nullable false→true → Breaking NullabilityChanged
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_response_nullable_added_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nickname:
+                    type: string
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nickname:
+                    type: string
+                    nullable: true
 "#;
         let base = parse(base_yaml);
         let head = parse(head_yaml);
@@ -2404,66 +2465,6 @@ paths:
             changed.len(),
             1,
             "Expected 1 NullabilityChanged/Breaking, got: {:?}",
-            changes
-        );
-        assert!(changed[0].path.contains("nickname"));
-    }
-
-    // -----------------------------------------------------------------------
-    // 18. Nullable false→true → Safe NullabilityChanged
-    // -----------------------------------------------------------------------
-    #[test]
-    fn test_nullable_added_is_safe() {
-        let base_yaml = r#"
-openapi: "3.0.0"
-info:
-  title: Test
-  version: "1"
-paths:
-  /users:
-    get:
-      responses:
-        '200':
-          description: ok
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  nickname:
-                    type: string
-"#;
-        let head_yaml = r#"
-openapi: "3.0.0"
-info:
-  title: Test
-  version: "1"
-paths:
-  /users:
-    get:
-      responses:
-        '200':
-          description: ok
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  nickname:
-                    type: string
-                    nullable: true
-"#;
-        let base = parse(base_yaml);
-        let head = parse(head_yaml);
-        let changes = diff_openapi(&base, &head);
-        let changed: Vec<_> = changes
-            .iter()
-            .filter(|c| c.kind == ChangeKind::NullabilityChanged && c.severity == Severity::Safe)
-            .collect();
-        assert_eq!(
-            changed.len(),
-            1,
-            "Expected 1 NullabilityChanged/Safe, got: {:?}",
             changes
         );
         assert!(changed[0].path.contains("nickname"));
