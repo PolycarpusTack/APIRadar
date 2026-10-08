@@ -5,7 +5,6 @@ use reqwest::Client;
 use serde::Serialize;
 
 use radar_core::diff::DiffChange;
-use radar_core::models::Severity;
 
 use crate::render::BlastRadiusResponse;
 
@@ -65,14 +64,6 @@ pub struct PostDiffParams<'a> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn severity_str(sev: &Severity) -> &'static str {
-    match sev {
-        Severity::Breaking => "breaking",
-        Severity::NonBreakingRisky => "non_breaking_risky",
-        Severity::Safe => "safe",
-    }
-}
-
 fn build_client(token: Option<&str>) -> Result<(Client, reqwest::header::HeaderMap)> {
     use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 
@@ -110,7 +101,7 @@ pub async fn post_diff(api_url: &str, p: PostDiffParams<'_>) -> Result<String> {
         .map(|c| ChangeBody {
             path: &c.path,
             kind: c.kind.as_str(),
-            severity: severity_str(&c.severity),
+            severity: c.severity.as_str(),
             description: c.description.as_deref(),
         })
         .collect();

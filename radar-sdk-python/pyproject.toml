@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=70"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "radar-monitor-sdk"
@@ -12,4 +12,3 @@ dependencies = []
 
 [project.optional-dependencies]
 fastapi = ["starlette>=0.27"]
-django = ["django>=4.0"]

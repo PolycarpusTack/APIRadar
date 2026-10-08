@@ -51,8 +51,11 @@ docker compose up
 **Prerequisites:** Rust 1.80+, Node 20+, pnpm
 
 ```sh
-# Start the API (SQLite, binds to 0.0.0.0:8080 by default)
-cargo run -p radar-api -- --db sqlite:drift.db
+# Start the API (SQLite). Bind to loopback: with no auth configured the server
+# refuses to start on a publicly reachable address (set RADAR_SERVICE_TOKEN,
+# RADAR_JWT_SECRET, or RADAR_ALLOW_UNAUTHENTICATED=true to serve 0.0.0.0:8080).
+# Port 17380 is where the UI dev server proxies /v1.
+cargo run -p radar-api -- --db sqlite:drift.db --bind 127.0.0.1:17380
 
 # In another terminal — start the UI dev server on :6173 (proxies /v1 to :17380)
 pnpm dev:ui
@@ -172,11 +175,10 @@ policy:
 # warn:            never block the build, always warn
 fail_mode: closed
 
-# Postman / NativeREST collection files to scan automatically (glob patterns)
-collection_paths:
-  - "**/*.postman_collection.json"
-  - "**/*.nativerest_collection.json"
 ```
+
+> Collection files are scanned explicitly with `radar scan --collection <path>`
+> (repeatable); there is no auto-discovery config key.
 
 ## Evidence types
 
@@ -223,22 +225,28 @@ Confidence affects the policy engine: `closed` mode blocks when at least one **h
 > `RADAR_CATALOG_TOKEN_ACME`). Names outside this allowlist are rejected, so the
 > service can never be tricked into reading an arbitrary process environment variable.
 
-> **Database support status.** SQLite (the default, used by the desktop app and CI)
-> is fully supported. PostgreSQL migrations apply cleanly, but the runtime query
-> layer currently has an unresolved `sqlx` `Any`→PostgreSQL placeholder issue — see
-> `REMEDIATION-PLAN.md` (M-20). Use SQLite for production until this is resolved.
+> **Database support status.** Both backends are fully supported. **PostgreSQL is
+> the recommended production backend** for web deployments (`--db postgres://user:pass@host/drift`);
+> the `rust-postgres` CI job runs the full test suite against PostgreSQL 16 on every
+> push, and `rust-postgres-tls` additionally exercises TLS connections. **SQLite** is
+> the default and is used by the desktop app, local development, and the primary CI
+> lane (`--db sqlite:drift.db`). All migrations (001–034, each with a down-migration)
+> run on both backends.
 
 ## Workspace layout
 
 ```
-radar-core/       Shared Rust types (ChangeKind, Severity, Consumer, Diff, …)
-radar-cli/        CLI binary  (cargo run -p radar-cli)
-radar-api/        Axum HTTP service (cargo run -p radar-api)
-radar-scanner/    tree-sitter code scanner + Postman collection parser
-radar-ui/         Vite 6 + React 19 web dashboard
-radar-desktop/    Electron 33 shell (wraps radar-ui)
-fixtures/         Demo scenario fixtures (payments-api v1/v2, billing-svc, mobile-gateway)
-docs/             OpenAPI spec + runbook
+radar-core/        Shared Rust types (ChangeKind, Severity, Consumer, Diff, …)
+radar-cli/         CLI binary  (cargo run -p radar-cli)
+radar-api/         Axum HTTP service (cargo run -p radar-api)
+radar-scanner/     tree-sitter code scanner + Postman collection parser
+radar-ui/          Vite 6 + React 19 web dashboard
+radar-desktop/     Electron 33 shell (wraps radar-ui)
+radar-action/      GitHub Action wrapping `radar check` (composite action, PR gate)
+radar-sdk-node/    Node.js middleware SDK (@radar-monitor/sdk) — collects API usage Evidence from Express/HTTP servers
+radar-sdk-python/  Python middleware SDK (radar-monitor-sdk) — ASGI/Starlette/FastAPI usage Evidence
+fixtures/          Demo scenario fixtures (payments-api v1/v2, billing-svc, mobile-gateway)
+docs/              OpenAPI spec + runbook
 ```
 
 ## API reference

@@ -473,6 +473,121 @@ struct DeliveryTask {
     payload: serde_json::Value,
 }
 
+/// Outcome of the shared send-with-retry loop.
+struct DeliveryOutcome {
+    delivered: bool,
+    last_error: Option<String>,
+}
+
+/// Send one webhook body with exponential backoff, updating the
+/// `webhook_delivery` row after every attempt.
+///
+/// N-28: this loop used to exist twice — once for a fresh delivery and once
+/// for the outbox retry — with the delay table, signing, and status updates
+/// copy-pasted between them, so a fix to one silently missed the other.
+/// Returns `None` when the URL no longer passes the SSRF guard.
+#[allow(clippy::too_many_arguments)] // one call shape, two callers
+async fn run_delivery_attempts(
+    pool: &sqlx::AnyPool,
+    delivery_id: &str,
+    url: &str,
+    secret: &str,
+    webhook_type: &str,
+    event: &str,
+    body: &str,
+    user_agent: &str,
+) -> Option<DeliveryOutcome> {
+    // F-08: pin to the addresses the SSRF guard approved for this webhook's
+    // URL. Webhook targets are user-supplied and delivery is retried, so
+    // re-resolving the hostname on each attempt would give a rebinding
+    // attacker several chances to be handed a private address after passing
+    // validation at registration time.
+    let Some(http) = delivery_client(url, user_agent) else {
+        tracing::warn!(
+            webhook_url = %url,
+            "refusing webhook delivery: URL no longer resolves to a public address"
+        );
+        return None;
+    };
+
+    // Retry with exponential backoff: 1s, 4s, 16s
+    let delays = [0u64, 1, 4, 16];
+    let mut last_error: Option<String> = None;
+
+    for (attempt, delay) in delays.iter().enumerate() {
+        if *delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
+        }
+
+        let mut req_builder = http
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("X-Radar-Event", event)
+            .body(body.to_string());
+
+        if webhook_type != "slack" {
+            let signature = sign_payload(secret, body.as_bytes());
+            req_builder = req_builder.header("X-Radar-Signature-256", signature);
+        }
+
+        match req_builder.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let delivered_at = Utc::now().to_rfc3339();
+                if let Err(e) = q!(
+                    "UPDATE webhook_delivery SET status = 'delivered', attempt = ?, delivered_at = ? WHERE id = ?",
+                )
+                .bind(attempt as i32 + 1)
+                .bind(&delivered_at)
+                .bind(delivery_id)
+                .execute(pool)
+                .await
+                {
+                    // The send succeeded; only the bookkeeping failed. Say so
+                    // rather than leaving the row 'pending' with no trace.
+                    tracing::warn!(
+                        delivery_id,
+                        "webhook delivered but marking it delivered failed: {e}"
+                    );
+                }
+                return Some(DeliveryOutcome {
+                    delivered: true,
+                    last_error: None,
+                });
+            }
+            Ok(resp) => {
+                last_error = Some(format!("HTTP {}", resp.status()));
+            }
+            Err(e) => {
+                last_error = Some(e.to_string());
+            }
+        }
+
+        if let Err(e) = q!("UPDATE webhook_delivery SET attempt = ?, error = ? WHERE id = ?")
+            .bind(attempt as i32 + 1)
+            .bind(last_error.as_deref())
+            .bind(delivery_id)
+            .execute(pool)
+            .await
+        {
+            tracing::warn!(delivery_id, "recording webhook attempt failed: {e}");
+        }
+    }
+
+    if let Err(e) = q!("UPDATE webhook_delivery SET status = 'failed', error = ? WHERE id = ?")
+        .bind(last_error.as_deref())
+        .bind(delivery_id)
+        .execute(pool)
+        .await
+    {
+        tracing::warn!(delivery_id, "marking webhook delivery failed failed: {e}");
+    }
+
+    Some(DeliveryOutcome {
+        delivered: false,
+        last_error,
+    })
+}
+
 async fn deliver_webhook_event(t: DeliveryTask) {
     let DeliveryTask {
         pool,
@@ -488,8 +603,10 @@ async fn deliver_webhook_event(t: DeliveryTask) {
     let body = serde_json::to_string(&payload).unwrap_or_default();
     let now = Utc::now().to_rfc3339();
 
-    // Insert pending delivery record
-    let _ = q!(
+    // The outbox recovers stuck deliveries by reading this row, so if the
+    // insert fails there is nothing to recover and sending anyway would be an
+    // untracked delivery. Abort instead of swallowing the error.
+    if let Err(e) = q!(
         "INSERT INTO webhook_delivery (id, webhook_id, event, payload, status, attempt, error, delivered_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, NULL, NULL, ?)",
     )
     .bind(&delivery_id)
@@ -498,95 +615,53 @@ async fn deliver_webhook_event(t: DeliveryTask) {
     .bind(&body)
     .bind(&now)
     .execute(&pool)
-    .await;
-
-    // F-08: pin to the addresses the SSRF guard approved for this webhook's URL.
-    // Webhook targets are user-supplied and delivery is retried, so re-resolving
-    // the hostname on each attempt would give a rebinding attacker several
-    // chances to be handed a private address after passing validation at
-    // registration time.
-    let Some(http) = delivery_client(&url, "radar-api/webhook") else {
-        tracing::warn!(
-            webhook_url = %url,
-            "refusing webhook delivery: URL no longer resolves to a public address"
+    .await
+    {
+        tracing::error!(
+            webhook_id,
+            "not delivering webhook: recording the pending delivery failed: {e}"
         );
+        return;
+    }
+
+    let Some(outcome) = run_delivery_attempts(
+        &pool,
+        &delivery_id,
+        &url,
+        &secret,
+        &webhook_type,
+        &event,
+        &body,
+        "radar-api/webhook",
+    )
+    .await
+    else {
         return;
     };
 
-    // Retry with exponential backoff: 1s, 4s, 16s
-    let delays = [0u64, 1, 4, 16];
-    let mut last_error: Option<String> = None;
-
-    for (attempt, delay) in delays.iter().enumerate() {
-        if *delay > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
-        }
-
-        let mut req_builder = http
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("X-Radar-Event", &event)
-            .body(body.clone());
-
-        if webhook_type != "slack" {
-            let signature = sign_payload(&secret, body.as_bytes());
-            req_builder = req_builder.header("X-Radar-Signature-256", signature);
-        }
-
-        match req_builder.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let _ = q!(
-                    "UPDATE webhook_delivery SET status = 'delivered', attempt = ?, delivered_at = ? WHERE id = ?",
-                )
-                .bind(attempt as i32 + 1)
-                .bind(&now)
-                .bind(&delivery_id)
-                .execute(&pool)
-                .await;
-                crate::audit::record_event(
-                    &pool,
-                    &org_id,
-                    "system",
-                    "webhook.delivered",
-                    Some("webhook"),
-                    Some(&webhook_id),
-                    Some(&serde_json::json!({ "event": event, "delivery_id": delivery_id })),
-                )
-                .await;
-                return;
-            }
-            Ok(resp) => {
-                last_error = Some(format!("HTTP {}", resp.status()));
-            }
-            Err(e) => {
-                last_error = Some(e.to_string());
-            }
-        }
-
-        let _ = q!("UPDATE webhook_delivery SET attempt = ?, error = ? WHERE id = ?")
-            .bind(attempt as i32 + 1)
-            .bind(last_error.as_deref())
-            .bind(&delivery_id)
-            .execute(&pool)
-            .await;
-    }
-
-    // All attempts exhausted
-    let _ = q!("UPDATE webhook_delivery SET status = 'failed', error = ? WHERE id = ?")
-        .bind(last_error.as_deref())
-        .bind(&delivery_id)
-        .execute(&pool)
+    if outcome.delivered {
+        crate::audit::record_event(
+            &pool,
+            &org_id,
+            "system",
+            "webhook.delivered",
+            Some("webhook"),
+            Some(&webhook_id),
+            Some(&serde_json::json!({ "event": event, "delivery_id": delivery_id })),
+        )
         .await;
-    crate::audit::record_event(
-        &pool,
-        &org_id,
-        "system",
-        "webhook.failed",
-        Some("webhook"),
-        Some(&webhook_id),
-        Some(&serde_json::json!({ "event": event, "error": last_error })),
-    )
-    .await;
+    } else {
+        crate::audit::record_event(
+            &pool,
+            &org_id,
+            "system",
+            "webhook.failed",
+            Some("webhook"),
+            Some(&webhook_id),
+            Some(&serde_json::json!({ "event": event, "error": outcome.last_error })),
+        )
+        .await;
+    }
 }
 
 pub(crate) async fn list_deliveries(
@@ -703,81 +778,30 @@ async fn retry_pending_delivery(
     payload: serde_json::Value,
 ) {
     let body = serde_json::to_string(&payload).unwrap_or_default();
-    let now = Utc::now().to_rfc3339();
 
-    // F-08: pin to the addresses the SSRF guard approved for this webhook's URL.
-    // Webhook targets are user-supplied and delivery is retried, so re-resolving
-    // the hostname on each attempt would give a rebinding attacker several
-    // chances to be handed a private address after passing validation at
-    // registration time.
-    let Some(http) = delivery_client(&url, "radar-api/webhook-outbox") else {
-        tracing::warn!(
-            webhook_url = %url,
-            "refusing webhook delivery: URL no longer resolves to a public address"
-        );
+    let Some(outcome) = run_delivery_attempts(
+        &pool,
+        &delivery_id,
+        &url,
+        &secret,
+        &webhook_type,
+        &event,
+        &body,
+        "radar-api/webhook-outbox",
+    )
+    .await
+    else {
         return;
     };
 
-    let delays = [0u64, 1, 4, 16];
-    let mut last_error: Option<String> = None;
-
-    for (attempt, delay) in delays.iter().enumerate() {
-        if *delay > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
-        }
-
-        let mut req_builder = http
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("X-Radar-Event", &event)
-            .body(body.clone());
-
-        if webhook_type != "slack" {
-            let signature = sign_payload(&secret, body.as_bytes());
-            req_builder = req_builder.header("X-Radar-Signature-256", signature);
-        }
-
-        match req_builder.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let _ = q!(
-                    "UPDATE webhook_delivery SET status = 'delivered', attempt = ?, delivered_at = ? WHERE id = ?",
-                )
-                .bind(attempt as i32 + 1)
-                .bind(&now)
-                .bind(&delivery_id)
-                .execute(&pool)
-                .await;
-                tracing::info!(
-                    "outbox: delivery {delivery_id} succeeded on attempt {}",
-                    attempt + 1
-                );
-                return;
-            }
-            Ok(resp) => {
-                last_error = Some(format!("HTTP {}", resp.status()));
-            }
-            Err(e) => {
-                last_error = Some(e.to_string());
-            }
-        }
-
-        let _ = q!("UPDATE webhook_delivery SET attempt = ?, error = ? WHERE id = ?")
-            .bind(attempt as i32 + 1)
-            .bind(last_error.as_deref())
-            .bind(&delivery_id)
-            .execute(&pool)
-            .await;
+    if outcome.delivered {
+        tracing::info!("outbox: delivery {delivery_id} succeeded");
+    } else {
+        tracing::warn!(
+            "outbox: delivery {delivery_id} permanently failed: {:?}",
+            outcome.last_error
+        );
     }
-
-    let _ = q!("UPDATE webhook_delivery SET status = 'failed', error = ? WHERE id = ?")
-        .bind(last_error.as_deref())
-        .bind(&delivery_id)
-        .execute(&pool)
-        .await;
-    tracing::warn!(
-        "outbox: delivery {delivery_id} permanently failed: {:?}",
-        last_error
-    );
 }
 
 // ---------------------------------------------------------------------------

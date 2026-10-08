@@ -35,6 +35,13 @@ The scanner runs as `radar scan --source-dir ./src` in CI and posts results to `
 
 Confidence is always **medium**. Radar parses test scripts for `pm.response.json().<field>` patterns and links them to the request's operation. Ingest: `radar scan --collection ./tests.postman_collection.json`.
 
+Blast Radius includes matching collection Evidence even when the auto-registered
+Consumer has no subscription. Known field paths must match the changed field and
+operation. If field paths are unknown, the Evidence conservatively matches
+Changes within the same operation. Expired or foreign Evidence is excluded;
+`max_age_days` can restrict its age further. Reading collection Evidence does not
+duplicate its stored records.
+
 ## How confidence affects the policy engine
 
 ```

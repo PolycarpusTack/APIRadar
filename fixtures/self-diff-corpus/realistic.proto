@@ -1,0 +1,52 @@
+// Self-diff corpus: realistic proto3 — nested messages, maps, oneof,
+// enums, and streaming rpcs.
+syntax = "proto3";
+
+package orders.v2;
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_PENDING = 1;
+  ORDER_STATUS_PAID = 2;
+  ORDER_STATUS_SHIPPED = 3;
+}
+
+message Order {
+  string id = 1;
+  double amount = 2;
+  string currency = 3;
+  OrderStatus status = 4;
+  repeated Line lines = 5;
+  map<string, string> metadata = 6;
+
+  message Line {
+    string sku = 1;
+    int32 quantity = 2;
+  }
+
+  oneof payment {
+    CardPayment card = 7;
+    BankTransfer bank = 8;
+  }
+}
+
+message CardPayment {
+  string card_number = 1;
+}
+
+message BankTransfer {
+  string iban = 1;
+}
+
+message GetOrderRequest {
+  string id = 1;
+}
+
+message WatchOrdersRequest {
+  OrderStatus status_filter = 1;
+}
+
+service OrderService {
+  rpc GetOrder(GetOrderRequest) returns (Order);
+  rpc WatchOrders(WatchOrdersRequest) returns (stream Order);
+}

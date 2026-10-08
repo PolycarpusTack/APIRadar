@@ -2,9 +2,24 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      Desktop CSP — keep in sync with the web build's buildCsp() in
+      radar-ui/vite.config.ts (base-uri/object-src/frame-src/form-action were
+      added for parity in O-20). The Playground's srcdoc iframe INHERITS this
+      policy (N-20 — srcdoc documents inherit the parent CSP even when
+      sandboxed), so:
+        · script-src  http://127.0.0.1:17380 — the sidecar-served scalar.js
+        · connect-src http://127.0.0.1:17380 — API calls + stored-spec fetches
+        · connect-src https://cdn.jsdelivr.net — the default demo spec URL
+          (DEFAULT_SPEC in PlaygroundPage.tsx); dropping it breaks the
+          Playground demo in the packaged app
+      Google Fonts (style-src fonts.googleapis.com / font-src fonts.gstatic.com)
+      stay because this file links those stylesheets below; offline the links
+      fail closed and the system font stack takes over.
+    -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' http://127.0.0.1:17380; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src http://127.0.0.1:17380 https://cdn.jsdelivr.net; img-src 'self' data:"
+      content="default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self' http://127.0.0.1:17380; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src http://127.0.0.1:17380 https://cdn.jsdelivr.net; img-src 'self' data:; frame-src 'self'; form-action 'self'"
     />
     <link rel="icon" type="image/svg+xml" href="./icon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />

@@ -34,6 +34,7 @@ function SpecTextarea({
   onChange,
   hasError,
   fileInputId,
+  textareaId,
 }: {
   label: string
   hint: string
@@ -41,6 +42,7 @@ function SpecTextarea({
   onChange: (v: string) => void
   hasError: boolean
   fileInputId: string
+  textareaId: string
 }) {
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -57,6 +59,7 @@ function SpecTextarea({
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center justify-between">
         <label
+          htmlFor={textareaId}
           className="text-[10.5px] font-semibold uppercase tracking-[0.8px]"
           style={{ color: hasError ? 'var(--red)' : 'var(--text-3)' }}
         >
@@ -70,6 +73,7 @@ function SpecTextarea({
         <button
           type="button"
           onClick={() => fileRef.current?.click()}
+          aria-label={`Load file into ${label}`}
           className="flex items-center gap-1 text-[11px] rounded px-2 py-0.5 transition-colors hover:bg-[var(--bg-hover)]"
           style={{ color: 'var(--text-3)', border: '1px solid var(--border)' }}
         >
@@ -86,6 +90,7 @@ function SpecTextarea({
         onChange={handleFile}
       />
       <textarea
+        id={textareaId}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         rows={14}
@@ -188,7 +193,7 @@ export default function CompareSpecsPanel({ onClose }: { onClose?: () => void })
           </p>
         </div>
         {onClose && (
-          <button onClick={onClose} style={{ color: 'var(--text-3)' }}>
+          <button type="button" onClick={onClose} aria-label="Close compare specs" style={{ color: 'var(--text-3)' }}>
             <X className="h-4 w-4" />
           </button>
         )}
@@ -199,6 +204,7 @@ export default function CompareSpecsPanel({ onClose }: { onClose?: () => void })
         <div className="grid grid-cols-2 gap-4">
           <div className="flex flex-col gap-1.5">
             <label
+              htmlFor="compare-service-id"
               className="text-[10.5px] font-semibold uppercase tracking-[0.8px]"
               style={{ color: 'var(--text-3)' }}
             >
@@ -210,6 +216,7 @@ export default function CompareSpecsPanel({ onClose }: { onClose?: () => void })
               </p>
             ) : (
               <select
+                id="compare-service-id"
                 value={serviceId}
                 onChange={(e) => setServiceId(e.target.value)}
                 className="rounded-md px-3 py-2 text-[12.5px] transition-colors"
@@ -230,12 +237,14 @@ export default function CompareSpecsPanel({ onClose }: { onClose?: () => void })
 
           <div className="flex flex-col gap-1.5">
             <label
+              htmlFor="compare-spec-format"
               className="text-[10.5px] font-semibold uppercase tracking-[0.8px]"
               style={{ color: 'var(--text-3)' }}
             >
               Spec Format *
             </label>
             <select
+              id="compare-spec-format"
               value={format}
               onChange={(e) => setFormat(e.target.value)}
               className="rounded-md px-3 py-2 text-[12.5px] transition-colors"
@@ -263,6 +272,7 @@ export default function CompareSpecsPanel({ onClose }: { onClose?: () => void })
             onChange={setBaseSpec}
             hasError={parseError?.spec === 'base'}
             fileInputId="base-spec-file"
+            textareaId="base-spec-text"
           />
           <SpecTextarea
             label="After (new version)"
@@ -271,12 +281,14 @@ export default function CompareSpecsPanel({ onClose }: { onClose?: () => void })
             onChange={setHeadSpec}
             hasError={parseError?.spec === 'head'}
             fileInputId="head-spec-file"
+            textareaId="head-spec-text"
           />
         </div>
 
         {/* Parse error detail */}
         {parseError && (
           <div
+            role="alert"
             className="flex items-start gap-2 rounded-md px-3 py-2.5 text-[12px]"
             style={{ background: 'var(--red-bg)', border: '1px solid var(--red-dim)', color: 'var(--red)' }}
           >
@@ -291,6 +303,7 @@ export default function CompareSpecsPanel({ onClose }: { onClose?: () => void })
         {/* General error */}
         {generalError && (
           <div
+            role="alert"
             className="rounded-md px-3 py-2.5 text-[12px]"
             style={{ background: 'var(--red-bg)', border: '1px solid var(--red-dim)', color: 'var(--red)' }}
           >

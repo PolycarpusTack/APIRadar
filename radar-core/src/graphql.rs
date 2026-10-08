@@ -314,6 +314,10 @@ fn diff_type(base: &GqlType, head: &GqlType, changes: &mut Vec<DiffChange>) {
         (GqlTypeKind::Union { members: bm }, GqlTypeKind::Union { members: hm }) => {
             diff_union_members(&base.name, bm, hm, changes);
         }
+        // O-3: a custom scalar has no diffable structure — same kind on both
+        // sides is no change. Without this arm every `scalar DateTime` fell
+        // into the catch-all and reported a false Breaking on every diff.
+        (GqlTypeKind::Scalar, GqlTypeKind::Scalar) => {}
         _ => {
             changes.push(DiffChange {
                 path: format!("type {}", base.name),
@@ -355,6 +359,17 @@ fn diff_fields(
                             "Field '{type_name}.{name}' type changed from '{}' to '{}'",
                             base_f.type_str, head_f.type_str
                         )),
+                    });
+                } else if is_input
+                    && base_f.has_default
+                    && !head_f.has_default
+                    && head_f.type_str.ends_with('!')
+                {
+                    changes.push(DiffChange {
+                        path: format!("{type_name}.{name}"),
+                        kind: ChangeKind::RequiredChanged,
+                        severity: Severity::Breaking,
+                        description: Some(format!("Input field '{type_name}.{name}' became required after its default was removed")),
                     });
                 }
                 diff_args(
@@ -427,6 +442,16 @@ fn diff_args(
                             base_arg.type_str, head_arg.type_str
                         )),
                     });
+                } else if base_arg.has_default
+                    && !head_arg.has_default
+                    && head_arg.type_str.ends_with('!')
+                {
+                    changes.push(DiffChange {
+                        path: format!("{type_name}.{field_name}({name}:)"),
+                        kind: ChangeKind::RequiredChanged,
+                        severity: Severity::Breaking,
+                        description: Some(format!("Argument '{type_name}.{field_name}({name})' became required after its default was removed")),
+                    });
                 }
             }
         }
@@ -437,7 +462,13 @@ fn diff_args(
             let required = head_arg.type_str.ends_with('!') && !head_arg.has_default;
             changes.push(DiffChange {
                 path: format!("{type_name}.{field_name}({name}:)"),
-                kind: ChangeKind::RequiredChanged,
+                // O-18: only a *required* addition changes what callers must
+                // send; an optional argument is a plain addition.
+                kind: if required {
+                    ChangeKind::RequiredChanged
+                } else {
+                    ChangeKind::FieldAdded
+                },
                 severity: if required {
                     Severity::Breaking
                 } else {
@@ -461,10 +492,12 @@ fn diff_enum_values(
     let base_set: std::collections::HashSet<&str> = base_vals.iter().map(|v| v.as_str()).collect();
     let head_set: std::collections::HashSet<&str> = head_vals.iter().map(|v| v.as_str()).collect();
 
+    // O-18: enum kinds/severities align with the OpenAPI engine, so a filter
+    // on enum_value_removed sees every format.
     for val in base_set.difference(&head_set) {
         changes.push(DiffChange {
             path: format!("{type_name}.{val}"),
-            kind: ChangeKind::FieldRemoved,
+            kind: ChangeKind::EnumValueRemoved,
             severity: Severity::Breaking,
             description: Some(format!("Enum value '{type_name}.{val}' was removed")),
         });
@@ -472,8 +505,9 @@ fn diff_enum_values(
     for val in head_set.difference(&base_set) {
         changes.push(DiffChange {
             path: format!("{type_name}.{val}"),
-            kind: ChangeKind::FieldAdded,
-            severity: Severity::Safe,
+            kind: ChangeKind::EnumValueAdded,
+            // Risky: an added value breaks clients matching exhaustively.
+            severity: Severity::NonBreakingRisky,
             description: Some(format!("Enum value '{type_name}.{val}' was added")),
         });
     }
@@ -502,7 +536,9 @@ fn diff_union_members(
         changes.push(DiffChange {
             path: format!("{type_name} | {m}"),
             kind: ChangeKind::FieldAdded,
-            severity: Severity::Safe,
+            // O-18: risky, not Safe — an added member breaks consumers
+            // matching exhaustively on the union (mirrors enum-value-added).
+            severity: Severity::NonBreakingRisky,
             description: Some(format!("Union member '{m}' added to '{type_name}'")),
         });
     }
@@ -528,6 +564,30 @@ mod tests {
         let m = parse(sdl);
         let changes = diff_graphql(&m, &m);
         assert!(changes.is_empty(), "unexpected changes: {changes:?}");
+    }
+
+    // O-3: custom scalars must not read as "kind changed". The minimal schemas
+    // above never contained a scalar, which is how the false Breaking survived.
+    #[test]
+    fn test_scalar_self_diff_no_changes() {
+        let m = parse("scalar DateTime\ntype User { id: ID!, at: DateTime! }");
+        let changes = diff_graphql(&m, &m);
+        assert!(
+            changes.is_empty(),
+            "an unchanged custom scalar must produce no changes, got: {changes:?}"
+        );
+    }
+
+    // O-3: realistic-spec self-diff corpus — an identical spec yields zero changes.
+    #[test]
+    fn test_realistic_sdl_self_diff_zero_changes() {
+        let sdl = include_str!("../../fixtures/self-diff-corpus/realistic.graphql");
+        let m = parse(sdl);
+        let changes = diff_graphql(&m, &m);
+        assert!(
+            changes.is_empty(),
+            "realistic SDL self-diff must be empty, got: {changes:?}"
+        );
     }
 
     #[test]
@@ -581,6 +641,8 @@ mod tests {
         assert_eq!(type_changed.len(), 1, "got {changes:?}");
     }
 
+    // O-18: enum changes carry the same ChangeKind + severity as the OpenAPI
+    // engine, so downstream filters on enum_value_removed see all formats.
     #[test]
     fn test_enum_value_removed_is_breaking() {
         let base = parse("enum Status { ACTIVE INACTIVE PENDING }");
@@ -588,10 +650,52 @@ mod tests {
         let changes = diff_graphql(&base, &head);
         let removed: Vec<_> = changes
             .iter()
-            .filter(|c| c.kind == ChangeKind::FieldRemoved && c.severity == Severity::Breaking)
+            .filter(|c| c.kind == ChangeKind::EnumValueRemoved && c.severity == Severity::Breaking)
             .collect();
-        assert_eq!(removed.len(), 1);
+        assert_eq!(removed.len(), 1, "got {changes:?}");
         assert!(removed[0].path.contains("PENDING"));
+    }
+
+    #[test]
+    fn test_enum_value_added_is_risky() {
+        let base = parse("enum Status { ACTIVE }");
+        let head = parse("enum Status { ACTIVE PENDING }");
+        let changes = diff_graphql(&base, &head);
+        assert!(
+            changes.iter().any(|c| c.kind == ChangeKind::EnumValueAdded
+                && c.severity == Severity::NonBreakingRisky),
+            "an added enum value breaks exhaustive matches — NonBreakingRisky, as in OpenAPI; got {changes:?}"
+        );
+    }
+
+    #[test]
+    fn test_union_member_added_is_risky() {
+        let base = parse("type A { x: ID }\ntype B { y: ID }\nunion U = A");
+        let head = parse("type A { x: ID }\ntype B { y: ID }\nunion U = A | B");
+        let changes = diff_graphql(&base, &head);
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.severity == Severity::NonBreakingRisky && c.path.contains('B')),
+            "an added union member breaks exhaustive matches; got {changes:?}"
+        );
+    }
+
+    #[test]
+    fn test_optional_argument_added_is_safe_field_added() {
+        let base = parse("type Query { user(id: ID!): String }");
+        let head = parse("type Query { user(id: ID!, filter: String): String }");
+        let changes = diff_graphql(&base, &head);
+        let c = changes
+            .iter()
+            .find(|c| c.path.contains("filter"))
+            .unwrap_or_else(|| panic!("expected a change for filter, got {changes:?}"));
+        assert_eq!(
+            c.kind,
+            ChangeKind::FieldAdded,
+            "an added optional argument changed nothing required — RequiredChanged was a misnomer; got {c:?}"
+        );
+        assert_eq!(c.severity, Severity::Safe);
     }
 
     #[test]

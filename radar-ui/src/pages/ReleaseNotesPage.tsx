@@ -126,7 +126,7 @@ function NoteCard({ row, onStatusChange }: { row: NoteRow; onStatusChange: (id: 
             </div>
           )}
 
-          {error && <p className="mb-2 text-[12px]" style={{ color: 'var(--red)' }}>{error}</p>}
+          {error && <p role="alert" className="mb-2 text-[12px]" style={{ color: 'var(--red)' }}>{error}</p>}
           {loading && <p className="text-[12px]" style={{ color: 'var(--text-3)' }}>Loading…</p>}
           {detail && (
             <pre
@@ -186,7 +186,7 @@ export default function ReleaseNotesPage() {
           </div>
 
           {error ? (
-            <div className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>
+            <div role="alert" className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>
               Failed to load: {error}
             </div>
           ) : !loading && rows.length === 0 ? (

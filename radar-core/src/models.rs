@@ -60,6 +60,19 @@ pub enum Severity {
     Breaking,
 }
 
+impl Severity {
+    /// Canonical wire string — matches the serde snake_case serialization.
+    /// Use this in every crate; do not re-match the arms locally (same rule
+    /// as `ChangeKind::as_str`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Severity::Safe => "safe",
+            Severity::NonBreakingRisky => "non_breaking_risky",
+            Severity::Breaking => "breaking",
+        }
+    }
+}
+
 /// How confident the scanner is about a blast-radius entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

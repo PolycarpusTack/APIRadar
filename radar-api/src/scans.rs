@@ -266,9 +266,64 @@ async fn run_due_scans(pool: sqlx::AnyPool) {
         let spec_url: String = row.get("spec_url");
         let format: String = row.get("format");
         let last_hash: Option<String> = row.try_get("last_spec_hash").ok().flatten();
+
+        // N-14: claim the scan before doing any work. execute_scan used to set
+        // last_run_at itself, after an SSRF check and inside a spawned task, so
+        // the next 60s tick (or a second replica) could see the same row still
+        // "due" and run it again. The claim is a compare-and-swap on the
+        // last_run_at we just read: a single UPDATE, atomic on both SQLite and
+        // PostgreSQL, and exactly one racer can win it.
+        if !claim_scan(&pool, &id, last_run_at.as_deref(), &now.to_rfc3339()).await {
+            tracing::debug!("scan {id}: already claimed by another run — skipping");
+            continue;
+        }
+
         tokio::spawn(async move {
             execute_scan(pool2, id, org_id, service_id, spec_url, format, last_hash).await;
         });
+    }
+}
+
+/// Atomically claim a due scan by advancing `last_run_at` only if it still
+/// holds the value we read. Returns true when this caller won the claim.
+///
+/// N-14: this is the lease that stops a scan running twice — whether from two
+/// ticks overlapping in one instance or from two replicas polling together.
+async fn claim_scan(
+    pool: &sqlx::AnyPool,
+    scan_id: &str,
+    observed_last_run_at: Option<&str>,
+    now: &str,
+) -> bool {
+    // `last_run_at = ?` never matches NULL, so the never-run case needs its own
+    // predicate rather than a bound parameter.
+    let result = match observed_last_run_at {
+        Some(prev) => {
+            q!(
+                "UPDATE scheduled_scan SET last_run_at = ?, last_run_status = 'running',                  last_run_error = NULL WHERE id = ? AND last_run_at = ?",
+            )
+            .bind(now)
+            .bind(scan_id)
+            .bind(prev)
+            .execute(pool)
+            .await
+        }
+        None => {
+            q!(
+                "UPDATE scheduled_scan SET last_run_at = ?, last_run_status = 'running',                  last_run_error = NULL WHERE id = ? AND last_run_at IS NULL",
+            )
+            .bind(now)
+            .bind(scan_id)
+            .execute(pool)
+            .await
+        }
+    };
+    match result {
+        Ok(r) => r.rows_affected() == 1,
+        Err(e) => {
+            tracing::warn!("scan {scan_id}: claim failed: {e}");
+            false
+        }
     }
 }
 
@@ -297,14 +352,7 @@ async fn execute_scan(
         return;
     }
 
-    // Mark run started (status clears previous error to 'running').
-    let _ = q!(
-        "UPDATE scheduled_scan SET last_run_at = ?, last_run_status = 'running', last_run_error = NULL WHERE id = ?",
-    )
-    .bind(&now)
-    .bind(&scan_id)
-    .execute(&pool)
-    .await;
+    // N-14: the run is already marked 'running' by claim_scan.
 
     // F-08: pin to the addresses the SSRF guard approved for this exact URL, so
     // the connection cannot be re-resolved to a private address after the check.
@@ -402,7 +450,7 @@ async fn execute_scan(
     // stored version (OFFSET 0) IS the previous spec — an earlier `OFFSET 1`
     // skipped it, diffing against an empty or two-generations-old spec.
     let base_spec = if last_spec_hash.is_some() {
-        fetch_previous_spec(&pool, &service_id).await
+        fetch_previous_spec(&pool, &service_id, &spec_url).await
     } else {
         // First run — store the spec, no diff to create yet.
         let _ = q!("UPDATE scheduled_scan SET last_spec_hash = ? WHERE id = ?")
@@ -499,11 +547,17 @@ async fn execute_scan(
 /// since the current scan's spec is stored only after this is called). Ordering
 /// is `captured_at DESC, id DESC` so that identical timestamps break
 /// deterministically instead of relying on physical row order.
-async fn fetch_previous_spec(pool: &sqlx::AnyPool, service_id: &str) -> String {
+/// The previous spec captured by THIS scan.
+///
+/// N-14: scans store `git_ref = spec_url`, so filtering on it keeps a service
+/// with several scheduled scans (different origins) from diffing one origin's
+/// spec against another's — and skips the synthetic 'scan:base' rows.
+async fn fetch_previous_spec(pool: &sqlx::AnyPool, service_id: &str, spec_url: &str) -> String {
     let row = q!(
-        "SELECT spec_yaml FROM spec_version WHERE service_id = ? ORDER BY captured_at DESC, id DESC LIMIT 1",
+        "SELECT spec_yaml FROM spec_version WHERE service_id = ? AND git_ref = ?          ORDER BY captured_at DESC, id DESC LIMIT 1",
     )
     .bind(service_id)
+    .bind(spec_url)
     .fetch_optional(pool)
     .await
     .ok()
@@ -717,7 +771,7 @@ mod tests {
         );
     }
 
-    use super::fetch_previous_spec;
+    use super::{claim_scan, fetch_previous_spec};
 
     async fn test_pool() -> sqlx::AnyPool {
         sqlx::any::install_default_drivers();
@@ -799,7 +853,7 @@ mod tests {
         )
         .await;
 
-        let base = fetch_previous_spec(&pool, svc).await;
+        let base = fetch_previous_spec(&pool, svc, "test").await;
         assert_eq!(
             base, "spec-v2",
             "must diff against the immediately previous spec, not an older one"
@@ -809,6 +863,97 @@ mod tests {
     #[tokio::test]
     async fn fetch_previous_spec_empty_when_none_stored() {
         let pool = test_pool().await;
-        assert_eq!(fetch_previous_spec(&pool, "nobody").await, "");
+        assert_eq!(fetch_previous_spec(&pool, "nobody", "test").await, "");
+    }
+
+    #[tokio::test]
+    async fn fetch_previous_spec_ignores_other_urls() {
+        let pool = test_pool().await;
+        insert_spec(
+            &pool,
+            "target",
+            "svc-url",
+            "2026-07-01T10:00:00+00:00",
+            "target-spec",
+        )
+        .await;
+        insert_spec(
+            &pool,
+            "other",
+            "svc-url",
+            "2026-07-02T10:00:00+00:00",
+            "other-spec",
+        )
+        .await;
+        q!("UPDATE spec_version SET git_ref = ? WHERE id = ?")
+            .bind("https://example.com/other.yaml")
+            .bind("other")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fetch_previous_spec(&pool, "svc-url", "test").await,
+            "target-spec"
+        );
+    }
+
+    async fn insert_scan(pool: &sqlx::AnyPool, id: &str, last_run_at: Option<&str>) {
+        q!(
+            "INSERT INTO scheduled_scan (id, service_id, spec_url, last_run_at, created_at)              VALUES (?, 'svc-n14', 'https://example.com/spec.yaml', ?, '2026-10-01T00:00:00+00:00')",
+        )
+        .bind(id)
+        .bind(last_run_at)
+        .execute(pool)
+        .await
+        .expect("insert scheduled_scan");
+    }
+
+    // N-14: two runners (overlapping ticks, or two replicas) both read the same
+    // due row. Exactly one may claim it; the other must skip the scan.
+    #[tokio::test]
+    async fn claim_scan_lets_exactly_one_racer_win() {
+        let pool = test_pool().await;
+        let prev = "2026-10-01T00:00:00+00:00";
+        insert_scan(&pool, "scan-race", Some(prev)).await;
+
+        let first = claim_scan(&pool, "scan-race", Some(prev), "2026-10-01T01:00:00+00:00").await;
+        let second = claim_scan(&pool, "scan-race", Some(prev), "2026-10-01T01:00:01+00:00").await;
+
+        assert!(first, "the first runner must win the claim");
+        assert!(
+            !second,
+            "a runner holding a stale last_run_at must lose the claim"
+        );
+
+        let row = q!("SELECT last_run_at, last_run_status FROM scheduled_scan WHERE id = ?")
+            .bind("scan-race")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let last_run_at: String = sqlx::Row::get(&row, "last_run_at");
+        let status: String = sqlx::Row::get(&row, "last_run_status");
+        assert_eq!(
+            last_run_at, "2026-10-01T01:00:00+00:00",
+            "the winner's timestamp stands"
+        );
+        assert_eq!(status, "running");
+    }
+
+    // N-14: a never-run scan has last_run_at NULL, which `= ?` cannot match —
+    // the first claim must still succeed and the second must still lose.
+    #[tokio::test]
+    async fn claim_scan_handles_never_run_scans() {
+        let pool = test_pool().await;
+        insert_scan(&pool, "scan-new", None).await;
+
+        let first = claim_scan(&pool, "scan-new", None, "2026-10-01T01:00:00+00:00").await;
+        let second = claim_scan(&pool, "scan-new", None, "2026-10-01T01:00:01+00:00").await;
+
+        assert!(first, "a never-run scan must be claimable");
+        assert!(
+            !second,
+            "once claimed, a never-run scan must not be claimed again"
+        );
     }
 }

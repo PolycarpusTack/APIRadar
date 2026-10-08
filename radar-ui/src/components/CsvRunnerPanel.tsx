@@ -63,6 +63,7 @@ function RequestBuilder({ request, onChange }: {
     <div className="space-y-3">
       <div className="flex gap-2">
         <select
+          aria-label="HTTP method"
           value={request.method}
           onChange={e => { onChange({ ...request, method: e.target.value }) }}
           className="rounded border px-2 py-1.5 text-[12px] font-semibold outline-none"
@@ -72,6 +73,7 @@ function RequestBuilder({ request, onChange }: {
         </select>
         <input
           type="text"
+          aria-label="Request URL"
           value={request.url}
           onChange={e => onChange({ ...request, url: e.target.value })}
           placeholder="https://api.example.com/users/{{user_id}}"
@@ -83,13 +85,16 @@ function RequestBuilder({ request, onChange }: {
       <div>
         <div className="flex items-center justify-between mb-1.5">
           <p className="text-[11px] font-semibold uppercase tracking-[0.6px]" style={{ color: 'var(--text-dim)' }}>Headers</p>
-          <button onClick={addHeader} className="text-[11px]" style={{ color: 'var(--cobalt-mid)' }}>+ Add</button>
+          <button type="button" onClick={addHeader} aria-label="Add header" className="text-[11px]" style={{ color: 'var(--cobalt-mid)' }}>+ Add</button>
         </div>
         {request.headers.map((h, i) => (
           <div key={i} className="flex gap-2 mb-1">
-            <input value={h.key} onChange={e => setHeader(i, 'key', e.target.value)} placeholder="Header-Name" className={`${inputCls} flex-1`} style={style} />
-            <input value={h.value} onChange={e => setHeader(i, 'value', e.target.value)} placeholder="value or {{var}}" className={`${inputCls} flex-1`} style={style} />
-            <button onClick={() => removeHeader(i)} style={{ color: 'var(--text-dim)' }}>
+            {/* Every row repeats the same two fields, so the name has to carry
+                the row number — otherwise a screen reader announces a dozen
+                identical "Header-Name" boxes. */}
+            <input value={h.key} onChange={e => setHeader(i, 'key', e.target.value)} aria-label={`Header ${i + 1} name`} placeholder="Header-Name" className={`${inputCls} flex-1`} style={style} />
+            <input value={h.value} onChange={e => setHeader(i, 'value', e.target.value)} aria-label={`Header ${i + 1} value`} placeholder="value or {{var}}" className={`${inputCls} flex-1`} style={style} />
+            <button type="button" onClick={() => removeHeader(i)} aria-label={`Remove header ${i + 1}`} style={{ color: 'var(--text-dim)' }}>
               <XCircle className="h-3.5 w-3.5" />
             </button>
           </div>
@@ -102,6 +107,7 @@ function RequestBuilder({ request, onChange }: {
           <textarea
             value={request.body}
             onChange={e => onChange({ ...request, body: e.target.value })}
+            aria-label="Request body"
             placeholder={'{"id": "{{user_id}}"}'}
             rows={4}
             className={inputCls}
@@ -220,11 +226,15 @@ export default function CsvRunnerPanel() {
         row_data: string | null
       }>>(`/v1/csv-runs/${id}/results?limit=500`)
       const mapped: RowResult[] = data.map((r, idx) => {
-        // Prefer the in-memory CSV row (current session); fall back to server-persisted
-        // row_data so historical runs and re-opened tabs still have correct originalRow.
-        let originalRow: Record<string, string> = rows[idx] ?? {}
-        if (Object.keys(originalRow).length === 0 && r.row_data) {
-          try { originalRow = JSON.parse(r.row_data) } catch { /* keep empty */ }
+        // Prefer the server-persisted row_data — it belongs to the run being viewed,
+        // whereas the in-memory CSV may be a different file. Fall back to the local
+        // row matched by row_number (1-based); index only when row_number is absent.
+        let originalRow: Record<string, string> = {}
+        if (r.row_data) {
+          try { originalRow = JSON.parse(r.row_data) } catch { /* fall through */ }
+        }
+        if (Object.keys(originalRow).length === 0) {
+          originalRow = rows[r.row_number != null ? r.row_number - 1 : idx] ?? {}
         }
         return { rowNumber: r.row_number, httpStatus: r.http_status, durationMs: r.duration_ms, error: r.error, url: r.url, originalRow }
       })
@@ -307,7 +317,7 @@ export default function CsvRunnerPanel() {
     } finally {
       setIsSubmitting(false)
     }
-  }, [rows, request, pollJob])
+  }, [rows, request, pollJob, captureBody, enableRetry])
 
   async function cancel() {
     if (!jobId) return
@@ -362,7 +372,7 @@ export default function CsvRunnerPanel() {
             <Upload className="h-3.5 w-3.5" />
             Upload CSV
           </button>
-          <input ref={fileRef} type="file" accept=".csv,text/csv" onChange={onFileChange} className="hidden" />
+          <input ref={fileRef} type="file" aria-label="Upload CSV file" accept=".csv,text/csv" onChange={onFileChange} className="hidden" />
         </div>
 
         {parseError && (
@@ -521,6 +531,7 @@ export default function CsvRunnerPanel() {
       {/* Run-level error */}
       {runError && (
         <div
+          role="alert"
           className="flex items-start gap-2 rounded-md px-3 py-2.5 text-[12px]"
           style={{ background: 'var(--red-bg)', border: '1px solid var(--red-dim)', color: 'var(--red)' }}
         >

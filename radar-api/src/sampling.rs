@@ -156,6 +156,8 @@ pub(crate) async fn evidence_coverage(
                LEFT JOIN consumer c ON c.id = ie.consumer_id
                LEFT JOIN service  s ON s.id = ie.producer_service_id
                WHERE ie.org_id = ? AND (ie.expires_at IS NULL OR ie.expires_at > ?)
+                 AND (ie.org_id = '' OR c.org_id IS NULL OR c.org_id = '' OR c.org_id = ie.org_id)
+                 AND (ie.org_id = '' OR s.org_id IS NULL OR s.org_id = '' OR s.org_id = ie.org_id)
                GROUP BY ie.consumer_id, c.name, ie.producer_service_id, s.name, ie.source_type
                ORDER BY MAX(ie.observed_at) DESC"#,)
         .bind(&stale_cutoff)
@@ -177,6 +179,8 @@ pub(crate) async fn evidence_coverage(
                LEFT JOIN service  s ON s.id = ie.producer_service_id
                WHERE ie.org_id = ? AND ie.producer_service_id = ?
                  AND (ie.expires_at IS NULL OR ie.expires_at > ?)
+                 AND (ie.org_id = '' OR c.org_id IS NULL OR c.org_id = '' OR c.org_id = ie.org_id)
+                 AND (ie.org_id = '' OR s.org_id IS NULL OR s.org_id = '' OR s.org_id = ie.org_id)
                GROUP BY ie.consumer_id, c.name, ie.producer_service_id, s.name, ie.source_type
                ORDER BY MAX(ie.observed_at) DESC"#,)
         .bind(&stale_cutoff)

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { HelpCircle } from 'lucide-react'
 
 // ---------------------------------------------------------------------------
@@ -55,6 +55,9 @@ interface TermTooltipProps {
 
 export default function TermTooltip({ term, placement = 'top' }: TermTooltipProps) {
   const [visible, setVisible] = useState(false)
+  // The popover is the trigger's description; without the id link a screen
+  // reader announces the button but never reads the definition.
+  const popoverId = useId()
   const definition = TERM_DEFINITIONS[term]
   if (!definition) return null
 
@@ -89,6 +92,7 @@ export default function TermTooltip({ term, placement = 'top' }: TermTooltipProp
         type="button"
         tabIndex={0}
         aria-label={`Definition: ${term.replace(/_/g, ' ')}`}
+        aria-describedby={visible ? popoverId : undefined}
         className="flex items-center justify-center rounded-full transition-opacity hover:opacity-80 focus:outline-none focus-visible:ring-1"
         style={{ color: 'var(--text-dim)', width: 14, height: 14 }}
       >
@@ -96,7 +100,7 @@ export default function TermTooltip({ term, placement = 'top' }: TermTooltipProp
       </button>
 
       {visible && (
-        <span role="tooltip" style={popoverStyle}>
+        <span id={popoverId} role="tooltip" style={popoverStyle}>
           {definition}
         </span>
       )}

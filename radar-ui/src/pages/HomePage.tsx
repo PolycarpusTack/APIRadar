@@ -363,6 +363,7 @@ export default function HomePage() {
         {/* Honest load-failure state — distinct from an empty dashboard. */}
         {loadError && (
           <div
+            role="alert"
             className="rounded-lg px-4 py-3 text-[12.5px]"
             style={{ background: 'var(--red-bg)', border: '1px solid var(--red-dim)', color: 'var(--red)' }}
           >

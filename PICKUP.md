@@ -1,54 +1,47 @@
-# Pickup Prompt — API Contract Radar Monitor (continue EPIC N)
+# Pickup Prompt — API Contract Radar Monitor (continue EPIC N tail)
 
-> Paste the block below as your first message to a fresh Opus 4.8 session in this repo.
-> Snapshot taken 2026-07-02, end of the Postgres/N-26 session.
+> Paste the block below as your first message to a fresh session in this repo.
+> Snapshot taken 2026-10-08.
 
 ---
 
 ## Where we are
 
-- **Branch:** `main`. Last session merged **PR #1 (EPIC N Postgres + quality wave)** — merge commit `54ea20f`. The `quality/epic-n` branch is deleted; local `main` is synced with `origin/main`.
-- **Headline result:** PostgreSQL now actually works. sqlx `Any` doesn't translate `?`→`$N` for Postgres (was 42601 errors); fixed at the query layer in `radar-api/src/db.rs` (`pg()` + `q!`/`qs!`/`qa!` macros). The `rust-postgres` CI job runs the full `cargo test --all` against Postgres 16 as a **gating** check and is green. Do not regress this — keep it gating.
-- **Backlog of record:** `QUALITY-BACKLOG.md` (EPIC N, stories N-1..N-37). Done stories are marked; the open set is below.
-- **App status:** working application. Rust workspace + pnpm workspace both build/test/lint clean; CI fully green on the last push.
+- **EPIC O is complete** (23 stories, `EPIC-O-MITIGATION-PLAN.md`). EPICs A–L and M are done as well.
+- **PR #77** (`quality/epic-o-and-n-tail` → `main`) holds 37 commits: all of EPIC O plus the EPIC N tail below. They had never been pushed, so this PR is their first CI run, including the required Postgres 16 lane. **Check its CI first.** Merge it when green; if Postgres fails, fix it on the branch.
+- **Local verification at PR time:** clippy clean; `cargo test --workspace` green on SQLite (radar-api 284); radar-ui 152/152 with lint + typecheck clean.
+- **Backlog of record:** `QUALITY-BACKLOG.md` (EPIC N). Done stories carry a ✅ note with a date.
 
-## What's merged (don't redo)
+## Done in EPIC N (don't redo)
 
-N-1..N-8 (diff-engine correctness), N-16/17/18 (scanner), N-19..N-25 (desktop + UI), **N-26** (Postgres query layer), N-30/31/32/36-partial/37-partial (CI + hygiene). Details in `QUALITY-BACKLOG.md` and memory `project-epic-n-status`.
+N-1..N-9, N-13, N-14, N-15, N-16..N-20, N-22, N-23, N-25, N-26, N-28, N-29, N-30, N-31, N-32, N-36.
 
 ## Open work (priority order)
 
-**P1 — API robustness (recommended next wave):**
-- **N-9** Ingestion honesty — FK failures must return 4xx, not be silently counted as "accepted".
-- **N-10** SSRF DNS-rebinding + non-blocking DNS resolution.
-- **N-11** Per-org weekly digest.
-- **N-12** Share-token intent + shared-view severity parity.
-- **N-13** Uniform pagination clamping — `clamp_pagination` helper exists (utils.rs); apply it across *all* list handlers.
-- **N-14** Scheduled-scan serialization.
-- **N-15** CLI remaining timeouts + panic guard.
+**P1 — data exposure first:**
+- **N-11** Per-org weekly digest. It currently aggregates all orgs into one email, which leaks data across orgs.
+- **N-12** Share tokens are minted as a side effect of `GET /v1/diffs/:id`; the shared view also skips evolution-rule severities.
+- **N-10** SSRF DNS rebinding + DNS resolution blocking the async runtime.
+- **N-21** Desktop auto-update (wire it or drop `electron-updater`) + crash/process-gone logging.
+- **N-17** Scanner reach (direct HTTP clients, Java/C#/Ruby).
+- **N-24** Remaining UI page tests + web CSP.
 
-**P2 — structural / correctness tail:**
-- **N-27** Decompose `radar-api/src/lib.rs` (~5.4k lines) toward the SOLUTION_DESIGN §4.5 module map; move the test module to `tests/`. Pure REFACTORING.
-- **N-28** Dedupe webhook retry loop; fix `delivered_at` recorded before the retry loop.
-- **N-29** Per-org `settings` (add `org_id`, scope handlers, cross-org isolation test).
-- **N-37 tail:** deterministic proto/graphql ordering, batch policy parity, dead api-testing output, csv zombie jobs, scanner path fabrication, splash TOCTOU, proto rename kind, audit StatusCode bypass.
-- **N-33** Assertive compose-backed E2E · **N-34** Branch protection (recommendation) · **N-35** Release signing.
+**P2:** N-27 (split `radar-api/src/lib.rs`, ~5.8k lines; pure REFACTORING), N-33 (assertive compose-backed E2E), N-34 (branch protection), N-35 (release signing), N-37 tail items.
 
-**Needs a decision from Yannick (ask before acting):**
-- **N-36** Orphaned `radar-sdk-node` / `radar-sdk-python` — in no workspace, Node SDK untested. Adopt into a workspace with CI, or delete?
+**Carried from EPIC O:** packaged-desktop Playground E2E (O-20); O-23 smoke on the Postgres lane (PR #77 covers it).
 
 **Housekeeping:**
-- 8 Dependabot GitHub-Actions bump PRs open (**#2–#9**) from the N-32 config. Review/merge as a batch (they're low-risk action version bumps; confirm CI green on each).
+- About 20 Dependabot PRs are open (#54–#76). Several are **major** bumps: axum 0.8, sqlx 0.9, jsonwebtoken 11, thiserror 2, tower-http 0.6, React Router 7, Vite 8, Tailwind 4, TypeScript 7, ESLint 10, Electron 44. Don't batch-merge them; handle each major bump as its own upgrade story. Minor/patch groups (#74, #75) and action bumps (#76) are low-risk.
+- `docs/cliff-notes.md` and `docs/APIRadar_Icon.png` are still untracked. Yannick decides: commit or drop.
 
 ## How to work here (guardrails)
 
-- **Framework is mandatory:** `Agents/gpm-v2.1.md`, `backlog-builder-v5.1.md`, `core-specification-v1.md`. One **Hat** per task (FEATURE / REFACTORING / PREPARATORY). **TDD**: failing test first, always.
-- **Domain glossary is strict** (see `CLAUDE.md`): Producer, Consumer, Blast Radius, Breaking Change, Evidence, Fail Mode — never synonyms.
-- **Cargo is serialized** — never run `cargo build`/`test`/`clippy` in parallel; C: fills up. `cargo clean` if disk gets tight.
-- **Cross-backend rules** (learned the hard way this session — every one is a real bug class): queries use `?` and go through `q!`/`qs!`/`qa!`; `REAL` is f64 on SQLite but f32 on Postgres (read tolerant); Postgres enforces FKs (fixtures must insert parents); tests must never mutate process-global env vars (extract pure fns). Migrations must work on both backends (TEXT ids/timestamps).
-- **CI gates:** clippy `-D warnings`, fmt, SQLite tests, Postgres tests, coverage ≥65%. Run `cargo fmt --all` + `cargo clippy --all-targets -- -D warnings` before pushing. Docker/desktop jobs skip off `main` — that's expected, not a failure.
-- **Git:** work on a branch, open a PR to `main`, get CI green, then merge. Commit trailer: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
+- **Framework:** `Agents/gpm-v2.1.md`, `backlog-builder-v5.1.md`, `core-specification-v1.md`. One **Hat** per task. **TDD:** failing test first. If the code already exists, prove the test red against a stub before keeping the real code.
+- **Domain glossary is strict** (`CLAUDE.md`): Producer, Consumer, Blast Radius, Breaking Change, Evidence, Fail Mode.
+- **Cargo is serialized and the disk is tight.** C: runs at ~97–100%; a full build + test takes ~18 GB in `target/`. Use `-j 2` and run `cargo clean` when finished.
+- **Cross-backend rules:** queries use `?` through `q!`/`qs!`/`qa!`; REAL is f64 on SQLite but f32 on PG; PG enforces FKs (fixtures insert parents); `= ?` never matches NULL; tests never mutate process env; migrations use TEXT ids/timestamps and run on both backends.
+- **Git:** never push straight to `main`. Branch → PR → green CI → merge.
 
-## Suggested first action tomorrow
+## Suggested first action
 
-Start the **P1 API-robustness wave**: pick up **N-9** (ingestion honesty) with a failing test that posts an event referencing a non-existent FK and asserts a 4xx + that it is *not* counted as accepted. N-9/N-10/N-13/N-15 are largely independent and can go in parallel on one branch. Batch-merge the Dependabot PRs (#2–#9) first if you want a clean CI baseline.
+Check CI on PR #77 and merge it when green. Then start **N-11**: write a failing test that seeds two orgs and asserts org A's digest contains none of org B's rows.

@@ -54,7 +54,13 @@ pub async fn run(
     out: Option<&Path>,
     token: Option<&str>,
 ) -> Result<()> {
-    let client = Client::new();
+    // N-15: bound every request so a hung endpoint cannot stall the CLI
+    // (or a CI job) indefinitely — matches api_client's client.
+    let client = Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
 
     let diff_url = format!("{api_url}/v1/diffs/{diff_id}");
     let mut req = client.get(&diff_url);
@@ -131,7 +137,7 @@ pub async fn run(
         if post_github_release {
             match crate::github::GithubContext::from_env() {
                 Some(ctx) => {
-                    let tag = format!("drift-{}", &diff.id[..8]);
+                    let tag = format!("drift-{}", short_diff_id(&diff.id));
                     let title = format!(
                         "API diff {to} — {n} breaking change(s)",
                         to = diff.to_git_ref,
@@ -421,8 +427,28 @@ fn breaking_changes_summary(changes: &[ChangeRow]) -> String {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
+/// First 8 characters of a diff id, for a release tag.
+///
+/// N-15: `&diff.id[..8]` panicked on an id shorter than 8 bytes or whose
+/// 8th byte fell inside a multi-byte character.
+fn short_diff_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn short_diff_id_handles_short_and_multibyte_ids() {
+        use super::short_diff_id;
+        assert_eq!(short_diff_id("abc"), "abc", "must not panic on a short id");
+        assert_eq!(short_diff_id("0123456789"), "01234567");
+        // Multi-byte characters: byte slicing would have panicked here.
+        assert_eq!(
+            short_diff_id("\u{2014}\u{2014}\u{2014}"),
+            "\u{2014}\u{2014}\u{2014}"
+        );
+    }
+
     use super::*;
 
     fn make_diff(changes: Vec<ChangeRow>) -> DiffDetail {

@@ -666,6 +666,7 @@ paths:
       tags: [usage]
       summary: Ingest runtime usage events from consumers
       operationId: ingestUsageEvents
+      description: Organisation-scoped requests validate both Producer and Consumer ownership before any batch write.
       requestBody:
         required: true
         content:
@@ -686,11 +687,15 @@ paths:
                   accepted:
                     type: integer
 
+        "403":
+          $ref: "#/components/responses/ForbiddenEvidence"
+
   /v1/call-sites:
     post:
       tags: [scan]
       summary: Upsert static call-site records from the radar-scanner
       operationId: upsertCallSites
+      description: Organisation-scoped requests validate both Producer and Consumer ownership before any batch write.
       requestBody:
         required: true
         content:
@@ -710,6 +715,9 @@ paths:
                 properties:
                   accepted:
                     type: integer
+
+        "403":
+          $ref: "#/components/responses/ForbiddenEvidence"
 
   /v1/summary:
     get:
@@ -987,6 +995,8 @@ paths:
         Accepts an array of evidence items. Each item records a (consumer, service, operation,
         field_path) tuple. Idempotent — re-posting the same items produces the same rows
         (deterministic IDs based on the tuple).
+        Organisation-scoped requests validate both Producer and Consumer ownership
+        before any batch write.
       requestBody:
         required: true
         content:
@@ -996,15 +1006,19 @@ paths:
               items:
                 $ref: "#/components/schemas/CollectionEvidenceItem"
       responses:
-        "200":
+        "202":
           description: Number of evidence entries written
           content:
             application/json:
               schema:
                 type: object
                 properties:
+                  accepted:
+                    type: integer
                   inserted:
                     type: integer
+        "403":
+          $ref: "#/components/responses/ForbiddenEvidence"
 
   /v1/evidence/coverage:
     get:
@@ -1067,6 +1081,8 @@ paths:
         Accepts an OTLP JSON trace payload. Radar extracts HTTP span attributes
         (`http.method`, `http.route`, `http.target`) and maps them to usage events.
         Compatible with OpenTelemetry Collector HTTP exporter.
+        Organisation-scoped requests validate both Producer and Consumer ownership
+        before any batch write.
       requestBody:
         required: true
         content:
@@ -1075,8 +1091,17 @@ paths:
               type: object
               description: OTLP ExportTraceServiceRequest JSON
       responses:
-        "200":
+        "202":
           description: Ingested
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: integer
+        "403":
+          $ref: "#/components/responses/ForbiddenEvidence"
 
   /v1/gateway/logs:
     post:
@@ -1086,6 +1111,8 @@ paths:
       description: |
         Accepts an array of structured gateway log entries. Radar maps each entry to a
         usage event. Compatible with Kong, AWS API Gateway, and Nginx access log formats.
+        Organisation-scoped requests validate both Producer and Consumer ownership
+        before any batch write.
       requestBody:
         required: true
         content:
@@ -1096,15 +1123,17 @@ paths:
                 type: object
                 description: Gateway log entry (format auto-detected)
       responses:
-        "200":
+        "202":
           description: Ingested
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  ingested:
+                  accepted:
                     type: integer
+        "403":
+          $ref: "#/components/responses/ForbiddenEvidence"
 
   /v1/policy-decisions:
     get:
@@ -1805,6 +1834,13 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
 
+    ForbiddenEvidence:
+      description: A Producer or Consumer belongs to another organisation; no batch items were written.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
   schemas:
     ErrorResponse:
       type: object
@@ -2053,9 +2089,11 @@ components:
           type: boolean
         has_call_site:
           type: boolean
+        has_collection_file:
+          type: boolean
         evidence:
           type: array
-          description: Up to 5 evidence items explaining why this consumer is affected.
+          description: Up to 5 Evidence items per source explaining the Consumer's Blast Radius.
           items:
             $ref: "#/components/schemas/EvidenceItem"
 
@@ -2064,7 +2102,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [runtime_usage, call_site]
+          enum: [runtime_usage, call_site, collection_file]
         operation:
           type: string
         field_path:
@@ -2080,7 +2118,11 @@ components:
           description: Present for kind=call_site
         last_seen_at:
           type: string
-          description: Present for kind=call_site
+          description: Present for kind=call_site or collection_file
+        evidence_uri:
+          type: string
+          nullable: true
+          description: Source collection URI for kind=collection_file
 
     ReleaseNoteRow:
       type: object

@@ -78,7 +78,7 @@ export default function ShareDiffPage() {
         )}
 
         {error && (
-          <div className="flex items-center gap-3 rounded-lg border px-5 py-4" style={{ border: '1px solid var(--red)', background: 'var(--bg-surface)' }}>
+          <div role="alert" className="flex items-center gap-3 rounded-lg border px-5 py-4" style={{ border: '1px solid var(--red)', background: 'var(--bg-surface)' }}>
             <AlertCircle className="h-5 w-5 flex-shrink-0" style={{ color: 'var(--red)' }} />
             <p className="text-[13.5px]" style={{ color: 'var(--red)' }}>{error}</p>
           </div>

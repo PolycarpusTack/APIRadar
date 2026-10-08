@@ -104,7 +104,7 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
             Register a Consumer
           </p>
         </div>
-        <button onClick={onClose} style={{ color: 'var(--text-3)' }}>
+        <button type="button" onClick={onClose} aria-label="Close consumer registration" style={{ color: 'var(--text-3)' }}>
           <X className="h-4 w-4" />
         </button>
       </div>
@@ -114,12 +114,14 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
           {/* Consumer name */}
           <div>
             <label
+              htmlFor="consumer-name"
               className="block text-[10.5px] font-semibold uppercase tracking-[0.8px] mb-1"
               style={{ color: fieldErrors.name ? 'var(--red)' : 'var(--text-3)' }}
             >
               Consumer Name *
             </label>
             <input
+              id="consumer-name"
               value={name}
               onChange={(e) => { setName(e.target.value); setFieldErrors((p) => ({ ...p, name: undefined })) }}
               placeholder="e.g. billing-service"
@@ -140,12 +142,14 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
           {/* Owner team */}
           <div>
             <label
+              htmlFor="consumer-owner-team"
               className="block text-[10.5px] font-semibold uppercase tracking-[0.8px] mb-1"
               style={{ color: fieldErrors.owner_team ? 'var(--red)' : 'var(--text-3)' }}
             >
               Owner Team *
             </label>
             <input
+              id="consumer-owner-team"
               value={ownerTeam}
               onChange={(e) => { setOwnerTeam(e.target.value); setFieldErrors((p) => ({ ...p, owner_team: undefined })) }}
               placeholder="e.g. Platform Team"
@@ -166,12 +170,14 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
           {/* Contact email */}
           <div>
             <label
+              htmlFor="consumer-contact"
               className="block text-[10.5px] font-semibold uppercase tracking-[0.8px] mb-1"
               style={{ color: fieldErrors.contact ? 'var(--red)' : 'var(--text-3)' }}
             >
               Contact Email *
             </label>
             <input
+              id="consumer-contact"
               type="email"
               value={contact}
               onChange={(e) => { setContact(e.target.value); setFieldErrors((p) => ({ ...p, contact: undefined })) }}
@@ -193,6 +199,7 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
           {/* Repo URL — optional */}
           <div>
             <label
+              htmlFor="consumer-repo-url"
               className="block text-[10.5px] font-semibold uppercase tracking-[0.8px] mb-1"
               style={{ color: 'var(--text-3)' }}
             >
@@ -202,6 +209,7 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
               </span>
             </label>
             <input
+              id="consumer-repo-url"
               value={repoUrl}
               onChange={(e) => setRepoUrl(e.target.value)}
               placeholder="https://github.com/org/repo"
@@ -219,7 +227,10 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
         {/* Service subscriptions */}
         {services.length > 0 && (
           <div>
-            <label
+            {/* Labels a group of toggles rather than one control, so it is a
+                heading linked with aria-labelledby, not a <label htmlFor>. */}
+            <p
+              id="consumer-subscriptions-label"
               className="block text-[10.5px] font-semibold uppercase tracking-[0.8px] mb-2"
               style={{ color: 'var(--text-3)' }}
             >
@@ -227,8 +238,8 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
               <span className="ml-1 font-normal normal-case" style={{ color: 'var(--text-dim)' }}>
                 (optional — you can add subscriptions later)
               </span>
-            </label>
-            <div className="flex flex-wrap gap-2">
+            </p>
+            <div className="flex flex-wrap gap-2" role="group" aria-labelledby="consumer-subscriptions-label">
               {services.map((svc) => {
                 const selected = selectedServiceIds.includes(svc.id)
                 return (
@@ -236,6 +247,7 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
                     key={svc.id}
                     type="button"
                     onClick={() => toggleService(svc.id)}
+                    aria-pressed={selected}
                     className="rounded-full px-3 py-1 text-[11.5px] font-medium transition-colors"
                     style={{
                       background: selected ? 'var(--cobalt-mid)' : 'var(--bg-raised)',
@@ -254,6 +266,7 @@ export default function RegisterConsumerForm({ onCreated, onClose }: Props) {
         {/* API error */}
         {apiError && (
           <p
+            role="alert"
             className="rounded-md px-3 py-2 text-[12px]"
             style={{ background: 'var(--red-bg)', border: '1px solid var(--red-dim)', color: 'var(--red)' }}
           >
