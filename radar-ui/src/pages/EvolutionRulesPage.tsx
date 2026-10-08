@@ -41,7 +41,13 @@ function PlatformEngineerCallout() {
           Learn more
         </button>
       </p>
-      <button onClick={dismiss} className="flex-shrink-0" style={{ color: 'var(--text-3)' }}>
+      <button
+        type="button"
+        onClick={dismiss}
+        aria-label="Dismiss platform engineer note"
+        className="flex-shrink-0"
+        style={{ color: 'var(--text-3)' }}
+      >
         <X className="h-4 w-4" />
       </button>
     </div>
@@ -193,16 +199,21 @@ export default function EvolutionRulesPage() {
           <div className="rounded-lg p-5" style={{ border: '1px solid var(--border-mid)', background: 'var(--bg-surface)' }}>
             <div className="flex items-center justify-between mb-4">
               <p className="text-[13px] font-semibold" style={{ color: 'var(--text-1)' }}>New Evolution Rule</p>
-              <button onClick={() => { setShowCreate(false); setCreateError(null) }}>
+              <button
+                type="button"
+                onClick={() => { setShowCreate(false); setCreateError(null) }}
+                aria-label="Close new evolution rule form"
+              >
                 <X className="h-4 w-4" style={{ color: 'var(--text-3)' }} />
               </button>
             </div>
             <form onSubmit={handleCreate} className="grid grid-cols-2 gap-3">
               <div className="col-span-2">
-                <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                <label htmlFor="rule-name" className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
                   Name
                 </label>
                 <input
+                  id="rule-name"
                   required
                   value={form.name}
                   onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
@@ -212,11 +223,16 @@ export default function EvolutionRulesPage() {
                 />
               </div>
               <div>
-                <label className="flex items-center gap-1 mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
-                  Change kind
+                {/* The tooltip trigger is a button — keeping it outside the
+                    <label> stops the label from naming two controls at once. */}
+                <div className="flex items-center gap-1 mb-1">
+                  <label htmlFor="rule-change-kind" className="text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                    Change kind
+                  </label>
                   <TermTooltip term={`change_kind_${form.change_kind}` as `change_kind_${string}`} placement="bottom" />
-                </label>
+                </div>
                 <select
+                  id="rule-change-kind"
                   value={form.change_kind}
                   onChange={(e) => setForm((f) => ({ ...f, change_kind: e.target.value }))}
                   className="w-full rounded-md border px-2.5 py-1.5 text-[12.5px]"
@@ -228,10 +244,11 @@ export default function EvolutionRulesPage() {
                 </select>
               </div>
               <div>
-                <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                <label htmlFor="rule-severity-override" className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
                   Severity override
                 </label>
                 <select
+                  id="rule-severity-override"
                   value={form.severity_override}
                   onChange={(e) => setForm((f) => ({ ...f, severity_override: e.target.value }))}
                   className="w-full rounded-md border px-2.5 py-1.5 text-[12.5px]"
@@ -242,10 +259,11 @@ export default function EvolutionRulesPage() {
                 </select>
               </div>
               <div className="col-span-2">
-                <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                <label htmlFor="rule-path-pattern" className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
                   Path pattern (optional — glob, e.g. <code style={{ fontFamily: 'var(--font-mono)' }}>users.*</code> or <code style={{ fontFamily: 'var(--font-mono)' }}>**.legacy_id</code>)
                 </label>
                 <input
+                  id="rule-path-pattern"
                   value={form.path_pattern}
                   onChange={(e) => setForm((f) => ({ ...f, path_pattern: e.target.value }))}
                   placeholder="Leave blank to match any field path"
@@ -254,7 +272,7 @@ export default function EvolutionRulesPage() {
                 />
               </div>
               {createError && (
-                <p className="col-span-2 text-[12px]" style={{ color: 'var(--red)' }}>{createError}</p>
+                <p role="alert" className="col-span-2 text-[12px]" style={{ color: 'var(--red)' }}>{createError}</p>
               )}
               <div className="col-span-2 flex justify-end gap-2 mt-1">
                 <button
@@ -288,6 +306,7 @@ export default function EvolutionRulesPage() {
 
           {actionError && (
             <div
+              role="alert"
               className="px-4 py-2.5 text-[12.5px]"
               style={{ color: 'var(--red)', borderBottom: '1px solid var(--border)' }}
             >
@@ -296,7 +315,7 @@ export default function EvolutionRulesPage() {
           )}
 
           {error ? (
-            <div className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>
+            <div role="alert" className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>
               Failed to load evolution rules: {error}
             </div>
           ) : rules.length === 0 && !loading ? (
@@ -352,8 +371,10 @@ export default function EvolutionRulesPage() {
                     </td>
                     <td className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]">
                       <button
+                        type="button"
                         onClick={() => handleToggle(rule)}
                         disabled={toggling[rule.id]}
+                        aria-pressed={rule.enabled}
                         className="rounded-md border px-2.5 py-0.5 text-[11px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
                         style={{
                           borderColor: 'var(--border-mid)',
@@ -366,9 +387,11 @@ export default function EvolutionRulesPage() {
                     </td>
                     <td className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]">
                       <button
+                        type="button"
                         onClick={() => handleDelete(rule.id)}
                         disabled={deleting[rule.id]}
                         className="rounded p-1 transition-colors hover:bg-[var(--bg-hover)]"
+                        aria-label={`Delete rule ${rule.name}`}
                         title="Delete rule"
                         style={{ opacity: deleting[rule.id] ? 0.4 : 1 }}
                       >

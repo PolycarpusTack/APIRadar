@@ -231,6 +231,7 @@ Given a field is defined via `extend type` then it is not reported as removed
 > **Priority:** P1 · **Size:** M · **Hat:** FEATURE
 > **Finding:** `scans.rs` scheduler has no cross-instance lock and can double-fire within one instance if `execute_scan` stalls >60s before its first UPDATE; two replicas double-run every scan.
 **AC:** a scan claims a lease (set `last_run_at`/status before work, `FOR UPDATE SKIP LOCKED` or advisory lock on the multi-instance path) so it runs at most once per interval; also fixes `fetch_previous_spec` to use the scan's own prior spec, not any origin's newest.
+**✅ DONE (2026-10-08):** `run_due_scans` now claims each due scan with a compare-and-swap UPDATE on the `last_run_at` it just read (`claim_scan`, with an `IS NULL` branch for never-run scans) before spawning `execute_scan` — one atomic statement on both SQLite and Postgres, so overlapping ticks or two replicas cannot both win. Two tests (racer loses on a stale `last_run_at`; never-run scan claimed once) were shown red against a no-claim stub first. The `fetch_previous_spec` half landed in `2390db7`.
 
 ### Story N-15 · CLI remaining timeouts + panic guard
 > **Priority:** P1 · **Size:** S · **Hat:** FEATURE
@@ -289,6 +290,7 @@ Given a field is defined via `extend type` then it is not reported as removed
 > **Finding:** Across ~9,600 LOC there is one each of `aria-label`/`role`/`tabIndex`/`onKeyDown`; clickable `<tr onClick>` rows are keyboard-unreachable; icon-only buttons rely on `title`.
 **AC:** interactive rows are buttons/links or have `role`+`tabIndex`+key handlers; icon-only controls have `aria-label`; forms associate `label`/`id`; passes an axe smoke check on the main pages.
 **Tasks:** T1 add an axe/RTL a11y test harness; T2 remediate rows, buttons, forms across pages.
+**✅ DONE (2026-10-08):** T1 — `radar-ui/src/lib/axe.ts` runs axe-core over rendered trees (`color-contrast`/`region` disabled as jsdom-unrunnable, said why); `a11y.smoke.test.tsx` scans the 12 main pages, `accessibility.test.tsx` holds 14 targeted guards. T2 — clickable rows carry `role="button"`+`tabIndex`+Enter/Space, icon-only controls have `aria-label`, labels are bound to inputs, error banners are `role="alert"`, TermTooltip links its popover via `aria-describedby`. UI suite 152/152, lint + typecheck clean.
 
 ### Story N-23 · Shared abortable fetch + honest error states
 > **Priority:** P1 · **Size:** M · **Hat:** REFACTORING

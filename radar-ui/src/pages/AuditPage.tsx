@@ -69,6 +69,7 @@ function Pagination({
   loading,
   onPrev,
   onNext,
+  label,
 }: {
   offset: number
   limit: number
@@ -76,6 +77,9 @@ function Pagination({
   loading: boolean
   onPrev: () => void
   onNext: () => void
+  /** What is being paged, e.g. "policy decisions" — both pagers are on the
+      same page, so the chevrons need distinct accessible names. */
+  label: string
 }) {
   const from = offset + 1
   const to = offset + count
@@ -86,16 +90,20 @@ function Pagination({
       </p>
       <div className="flex gap-1">
         <button
+          type="button"
           onClick={onPrev}
           disabled={offset === 0}
+          aria-label={`Previous page of ${label}`}
           className="rounded p-1 transition-colors hover:bg-[var(--bg-hover)]"
           style={{ color: offset === 0 ? 'var(--text-dim)' : 'var(--text-2)' }}
         >
           <ChevronLeft className="h-4 w-4" />
         </button>
         <button
+          type="button"
           onClick={onNext}
           disabled={count < limit}
+          aria-label={`Next page of ${label}`}
           className="rounded p-1 transition-colors hover:bg-[var(--bg-hover)]"
           style={{ color: count < limit ? 'var(--text-dim)' : 'var(--text-2)' }}
         >
@@ -152,7 +160,7 @@ export default function AuditPage() {
             {loadingDecisions ? (
               <p className="px-4 py-6 text-center text-[12.5px]" style={{ color: 'var(--text-3)' }}>Loading…</p>
             ) : errorDecisions ? (
-              <p className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>
+              <p role="alert" className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>
                 Failed to load policy decisions: {errorDecisions}
               </p>
             ) : decisions.length === 0 ? (
@@ -216,6 +224,7 @@ export default function AuditPage() {
                   loading={decisionsReq.loading}
                   onPrev={() => setDecisionOffset((o) => Math.max(0, o - LIMIT))}
                   onNext={() => setDecisionOffset((o) => o + LIMIT)}
+                  label="policy decisions"
                 />
               </>
             )}
@@ -231,7 +240,7 @@ export default function AuditPage() {
             {loadingAcks ? (
               <p className="px-4 py-6 text-center text-[12.5px]" style={{ color: 'var(--text-3)' }}>Loading…</p>
             ) : errorAcks ? (
-              <p className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>
+              <p role="alert" className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>
                 Failed to load acknowledgements: {errorAcks}
               </p>
             ) : acks.length === 0 ? (
@@ -306,6 +315,7 @@ export default function AuditPage() {
                   loading={acksReq.loading}
                   onPrev={() => setAckOffset((o) => Math.max(0, o - LIMIT))}
                   onNext={() => setAckOffset((o) => o + LIMIT)}
+                  label="acknowledgements"
                 />
               </>
             )}

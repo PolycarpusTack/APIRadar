@@ -4,6 +4,7 @@ import { Rows, Upload, X, CheckCircle, XCircle, Loader, Play, AlertCircle } from
 import Badge from './Badge'
 import { parseCsv } from '../lib/csvParser'
 import { api } from '../lib/apiClient'
+import { activateOnKey } from '../lib/a11y'
 
 interface BatchItem {
   label: string
@@ -111,7 +112,7 @@ export default function BatchComparePanel({ onClose }: { onClose?: () => void })
           </span>
         </div>
         {onClose && (
-          <button onClick={onClose} style={{ color: 'var(--text-3)' }}>
+          <button type="button" onClick={onClose} aria-label="Close batch compare" style={{ color: 'var(--text-3)' }}>
             <X className="h-4 w-4" />
           </button>
         )}
@@ -154,6 +155,7 @@ export default function BatchComparePanel({ onClose }: { onClose?: () => void })
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center justify-between">
             <label
+              htmlFor="batch-compare-csv"
               className="text-[10.5px] font-semibold uppercase tracking-[0.8px]"
               style={{ color: 'var(--text-3)' }}
             >
@@ -172,11 +174,13 @@ export default function BatchComparePanel({ onClose }: { onClose?: () => void })
           <input
             ref={fileRef}
             type="file"
+            aria-label="Upload comparison CSV file"
             accept=".csv,.txt"
             className="hidden"
             onChange={handleFile}
           />
           <textarea
+            id="batch-compare-csv"
             value={csvText}
             onChange={e => setCsvText(e.target.value)}
             rows={7}
@@ -203,6 +207,7 @@ export default function BatchComparePanel({ onClose }: { onClose?: () => void })
         {/* General error */}
         {error && (
           <div
+            role="alert"
             className="flex items-start gap-2 rounded-md px-3 py-2.5 text-[12px]"
             style={{ background: 'var(--red-bg)', border: '1px solid var(--red-dim)', color: 'var(--red)' }}
           >
@@ -258,12 +263,22 @@ export default function BatchComparePanel({ onClose }: { onClose?: () => void })
                   </tr>
                 </thead>
                 <tbody>
-                  {results.map((r, i) => (
+                  {results.map((r, i) => {
+                    // Only rows that produced a diff are navigable — those get the
+                    // button affordances (role/tabIndex/Enter+Space); the rest stay
+                    // inert so keyboard users don't tab through dead stops.
+                    const diffId = r.diff_id
+                    const openDiff = diffId ? () => navigate(`/diffs/${diffId}`) : undefined
+                    return (
                     <tr
                       key={i}
-                      className={r.diff_id ? 'cursor-pointer transition-colors hover:bg-[var(--bg-hover)]' : ''}
+                      className={diffId ? 'cursor-pointer transition-colors hover:bg-[var(--bg-hover)]' : ''}
                       style={{ borderBottom: '1px solid var(--border)' }}
-                      onClick={() => r.diff_id && navigate(`/diffs/${r.diff_id}`)}
+                      onClick={openDiff}
+                      role={openDiff ? 'button' : undefined}
+                      tabIndex={openDiff ? 0 : undefined}
+                      aria-label={openDiff ? `View diff for ${r.label || `row ${i + 1}`}` : undefined}
+                      onKeyDown={openDiff ? activateOnKey(openDiff) : undefined}
                     >
                       <td
                         className="px-3 py-2.5 font-medium"
@@ -311,7 +326,8 @@ export default function BatchComparePanel({ onClose }: { onClose?: () => void })
                         )}
                       </td>
                     </tr>
-                  ))}
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

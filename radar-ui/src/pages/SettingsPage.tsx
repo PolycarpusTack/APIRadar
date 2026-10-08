@@ -48,10 +48,14 @@ function FieldRow({ label, hint, tooltip, htmlFor, children }: { label: string; 
   return (
     <div className="grid grid-cols-[200px_1fr] items-start gap-6">
       <div>
-        <label htmlFor={htmlFor} className="flex items-center gap-1 text-[11.5px] font-medium" style={{ color: 'var(--text-2)' }}>
-          {label}
+        {/* The tooltip trigger is a button — keeping it outside the <label>
+            stops the label from naming two controls at once. */}
+        <div className="flex items-center gap-1">
+          <label htmlFor={htmlFor} className="text-[11.5px] font-medium" style={{ color: 'var(--text-2)' }}>
+            {label}
+          </label>
           {tooltip && <TermTooltip term={tooltip} placement="bottom" />}
-        </label>
+        </div>
         {hint && <p className="text-[11px] mt-0.5 leading-snug" style={{ color: 'var(--text-dim)' }}>{hint}</p>}
       </div>
       <div>{children}</div>
@@ -177,11 +181,11 @@ function WebhooksSection() {
       {loading ? (
         <p className="text-[12px]" style={{ color: 'var(--text-dim)' }}>Loading…</p>
       ) : loadError ? (
-        <p className="text-[12px]" style={{ color: 'var(--red)' }}>Failed to load webhooks: {loadError}</p>
+        <p role="alert" className="text-[12px]" style={{ color: 'var(--red)' }}>Failed to load webhooks: {loadError}</p>
       ) : (
         <div className="space-y-3">
           {actionError && (
-            <p className="text-[12px]" style={{ color: 'var(--red)' }}>{actionError}</p>
+            <p role="alert" className="text-[12px]" style={{ color: 'var(--red)' }}>{actionError}</p>
           )}
           {webhooks.length === 0 && (
             <p className="text-[12px]" style={{ color: 'var(--text-dim)' }}>No webhooks registered yet.</p>
@@ -286,7 +290,7 @@ function WebhooksSection() {
               {creating ? 'Registering…' : 'Register'}
             </button>
           </form>
-          {createError && <p className="text-[12px]" style={{ color: 'var(--red)' }}>{createError}</p>}
+          {createError && <p role="alert" className="text-[12px]" style={{ color: 'var(--red)' }}>{createError}</p>}
         </div>
       )}
     </SectionCard>
@@ -407,7 +411,7 @@ function ScalarUpdateSection() {
       )}
 
       {error && (
-        <p className="text-[12px]" style={{ color: 'var(--red)' }}>{error}</p>
+        <p role="alert" className="text-[12px]" style={{ color: 'var(--red)' }}>{error}</p>
       )}
     </SectionCard>
   )
@@ -503,11 +507,11 @@ function ScheduledScansSection() {
       {loading ? (
         <p className="text-[12px]" style={{ color: 'var(--text-dim)' }}>Loading…</p>
       ) : loadError ? (
-        <p className="text-[12px]" style={{ color: 'var(--red)' }}>Failed to load scheduled scans: {loadError}</p>
+        <p role="alert" className="text-[12px]" style={{ color: 'var(--red)' }}>Failed to load scheduled scans: {loadError}</p>
       ) : (
         <div className="space-y-3">
           {actionError && (
-            <p className="text-[12px]" style={{ color: 'var(--red)' }}>{actionError}</p>
+            <p role="alert" className="text-[12px]" style={{ color: 'var(--red)' }}>{actionError}</p>
           )}
           {scans.length === 0 && !showForm && (
             <p className="text-[12px]" style={{ color: 'var(--text-dim)' }}>No scheduled scans configured.</p>
@@ -559,7 +563,7 @@ function ScheduledScansSection() {
                   <input id="scan-interval" type="number" min={15} value={intervalMinutes} onChange={e => setIntervalMinutes(Number(e.target.value))} className={inputCls} style={inputStyle} />
                 </div>
               </div>
-              {createError && <p className="text-[11.5px]" style={{ color: 'var(--red)' }}>{createError}</p>}
+              {createError && <p role="alert" className="text-[11.5px]" style={{ color: 'var(--red)' }}>{createError}</p>}
               <div className="flex items-center gap-2">
                 <button type="submit" disabled={creating} className="rounded-md px-3 py-1.5 text-[12px] font-semibold" style={{ background: 'var(--cobalt)', color: 'var(--text-inverse)', opacity: creating ? 0.7 : 1 }}>
                   {creating ? 'Saving…' : 'Create'}
@@ -651,6 +655,7 @@ export default function SettingsPage() {
           <div>
             {loadError && (
               <div
+                role="alert"
                 className="mb-6 rounded-lg px-4 py-3 text-[12.5px]"
                 style={{ background: 'var(--red-bg)', border: '1px solid var(--red-dim)', color: 'var(--red)' }}
               >
@@ -772,7 +777,7 @@ export default function SettingsPage() {
             <WebhooksSection />
 
             {saveError && (
-              <p className="mb-4 text-[12.5px]" style={{ color: 'var(--red)' }}>{saveError}</p>
+              <p role="alert" className="mb-4 text-[12.5px]" style={{ color: 'var(--red)' }}>{saveError}</p>
             )}
 
             <div className="flex items-center gap-3">

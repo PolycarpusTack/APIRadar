@@ -257,7 +257,7 @@ export default function DiffDetailPage() {
   if (error || !diff) {
     return (
       <div className="px-14 py-10">
-        <p className="text-[12.5px]" style={{ color: 'var(--red)' }}>
+        <p role="alert" className="text-[12.5px]" style={{ color: 'var(--red)' }}>
           {error ?? 'Diff not found'}
         </p>
       </div>
@@ -511,7 +511,7 @@ export default function DiffDetailPage() {
                   />
                 </div>
                 {ackError && (
-                  <p className="text-[12px]" style={{ color: 'var(--red)' }}>{ackError}</p>
+                  <p role="alert" className="text-[12px]" style={{ color: 'var(--red)' }}>{ackError}</p>
                 )}
                 <div className="flex justify-end gap-2">
                   <button
@@ -538,7 +538,7 @@ export default function DiffDetailPage() {
           <div className="overflow-hidden rounded-lg" style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
             {acksReq.error ? (
               // A failed load must not look like "there are none".
-              <p className="px-4 py-6 text-center text-[12.5px]" style={{ color: 'var(--red)' }}>
+              <p role="alert" className="px-4 py-6 text-center text-[12.5px]" style={{ color: 'var(--red)' }}>
                 Failed to load acknowledgements: {acksReq.error}
               </p>
             ) : acks.length === 0 ? (
@@ -606,7 +606,7 @@ export default function DiffDetailPage() {
               </div>
             )}
             {noteError && (
-              <p className="text-[12.5px]" style={{ color: 'var(--red)' }}>{noteError}</p>
+              <p role="alert" className="text-[12.5px]" style={{ color: 'var(--red)' }}>{noteError}</p>
             )}
             {generatedNote && (
               <div className="overflow-hidden rounded-lg" style={{ border: '1px solid var(--border)', background: 'var(--bg-surface)' }}>

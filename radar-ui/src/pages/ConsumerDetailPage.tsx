@@ -82,7 +82,7 @@ export default function ConsumerDetailPage() {
   if (error || !consumer) {
     return (
       <div className="px-14 py-10">
-        <p className="text-[12.5px]" style={{ color: 'var(--red)' }}>{error ?? 'Consumer not found'}</p>
+        <p role="alert" className="text-[12.5px]" style={{ color: 'var(--red)' }}>{error ?? 'Consumer not found'}</p>
       </div>
     )
   }

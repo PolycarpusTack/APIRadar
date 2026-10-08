@@ -266,6 +266,7 @@ export default function PlaygroundPage() {
         <Telescope className="h-4 w-4 flex-shrink-0" style={{ color: 'var(--text-3)' }} />
         <input
           type="url"
+          aria-label="OpenAPI spec URL"
           value={inputUrl}
           onChange={(e) => setInputUrl(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -543,15 +544,16 @@ function EnvForm({ form, setForm, editing, saveState, deleteConfirm, setDeleteCo
         <p className="text-[11px] font-bold uppercase tracking-widest" style={{ color: 'var(--text-dim)' }}>
           {editing ? 'Edit environment' : 'New environment'}
         </p>
-        <button onClick={onClose} style={{ color: 'var(--text-3)' }}>
+        <button type="button" onClick={onClose} aria-label="Close environment form" style={{ color: 'var(--text-3)' }}>
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
 
       <div className="grid gap-2" style={{ gridTemplateColumns: '1fr 1fr' }}>
         <div className="space-y-1">
-          <label className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Name *</label>
+          <label htmlFor="env-name" className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Name *</label>
           <input
+            id="env-name"
             ref={nameRef}
             type="text"
             placeholder="Production sandbox"
@@ -564,8 +566,9 @@ function EnvForm({ form, setForm, editing, saveState, deleteConfirm, setDeleteCo
           />
         </div>
         <div className="space-y-1">
-          <label className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Short description</label>
+          <label htmlFor="env-description" className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Short description</label>
           <input
+            id="env-description"
             type="text"
             placeholder="e.g. Base demo tenant"
             value={form.description}
@@ -577,8 +580,9 @@ function EnvForm({ form, setForm, editing, saveState, deleteConfirm, setDeleteCo
           />
         </div>
         <div className="space-y-1">
-          <label className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Base URL</label>
+          <label htmlFor="env-base-url" className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Base URL</label>
           <input
+            id="env-base-url"
             type="url"
             placeholder="https://sandbox.base.com/api"
             value={form.base_url}
@@ -590,8 +594,9 @@ function EnvForm({ form, setForm, editing, saveState, deleteConfirm, setDeleteCo
           />
         </div>
         <div className="space-y-1">
-          <label className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Bearer token</label>
+          <label htmlFor="env-bearer-token" className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Bearer token</label>
           <input
+            id="env-bearer-token"
             type="password"
             placeholder={editing ? 'Leave blank to keep existing token' : 'Demo API key'}
             value={form.bearer_token}

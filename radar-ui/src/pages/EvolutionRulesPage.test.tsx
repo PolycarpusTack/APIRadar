@@ -5,7 +5,7 @@
 // left believing the rule had changed.
 import '@testing-library/jest-dom/vitest'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, cleanup, waitFor } from '@testing-library/react'
+import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import EvolutionRulesPage from './EvolutionRulesPage'
@@ -84,6 +84,18 @@ describe('EvolutionRulesPage destructive-action safety', () => {
     )
   })
 
+  // N-22: the action-error banner was silent to assistive tech.
+  it('announces the action error as an alert', async () => {
+    mockApi.patch.mockRejectedValue(new Error('read-only mode'))
+    renderPage()
+
+    await userEvent.click(await screen.findByRole('button', { name: 'enabled' }, { timeout: 10_000 }))
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(/Failed to update rule: read-only mode/),
+    )
+  }, 20_000)
+
   it('clears a previous action error once an action succeeds', async () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true)
     mockApi.patch.mockRejectedValueOnce(new Error('read-only mode')).mockResolvedValue({})
@@ -96,4 +108,40 @@ describe('EvolutionRulesPage destructive-action safety', () => {
     await userEvent.click(screen.getByRole('button', { name: 'enabled' }))
     await waitFor(() => expect(screen.queryByText(/read-only mode/)).not.toBeInTheDocument())
   })
+})
+
+// N-22 accessibility pass: the create form's labels were unassociated and the
+// dismiss/close controls were bare icon buttons.
+describe('EvolutionRulesPage accessibility', () => {
+  it('gives every create-form control an accessible name from its label', async () => {
+    renderPage()
+
+    await userEvent.click(await screen.findByRole('button', { name: /Add rule/i }, { timeout: 10_000 }))
+
+    fireEvent.change(screen.getByLabelText(/^Name$/i), { target: { value: 'Allow enum additions' } })
+    expect(screen.getByLabelText(/^Name$/i)).toHaveValue('Allow enum additions')
+    expect(screen.getByLabelText(/^Change kind$/i).tagName).toBe('SELECT')
+    expect(screen.getByLabelText(/Severity override/i)).toHaveValue('non_breaking_risky')
+    expect(screen.getByLabelText(/Path pattern/i).tagName).toBe('INPUT')
+  }, 20_000)
+
+  it('names the icon-only dismiss, close and delete controls', async () => {
+    renderPage()
+
+    // Audience callout dismiss.
+    expect(await screen.findByRole('button', { name: /Dismiss platform engineer note/i }, { timeout: 10_000 }))
+      .toBeInTheDocument()
+    // Row delete — `title` alone is not an accessible name.
+    expect(screen.getByRole('button', { name: `Delete rule ${RULE.name}` })).toBeInTheDocument()
+    // Create-form close.
+    await userEvent.click(screen.getByRole('button', { name: /Add rule/i }))
+    expect(screen.getByRole('button', { name: /Close new evolution rule form/i })).toBeInTheDocument()
+  }, 20_000)
+
+  it('exposes the enable/disable control as a toggle', async () => {
+    renderPage()
+
+    expect(await screen.findByRole('button', { name: 'enabled' }, { timeout: 10_000 }))
+      .toHaveAttribute('aria-pressed', 'true')
+  }, 20_000)
 })

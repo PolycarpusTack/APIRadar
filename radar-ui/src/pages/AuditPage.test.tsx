@@ -84,7 +84,7 @@ describe('AuditPage pagination ordering', () => {
 
     // Two quick "next page" clicks — the first page-turn is still in flight
     // when the second is issued.
-    const next = () => screen.getAllByRole('button')[1]
+    const next = () => screen.getByRole('button', { name: /Next page of policy decisions/i })
     await userEvent.click(next())
     await waitFor(() => expect(pending.has(25)).toBe(true))
     await userEvent.click(next())
@@ -128,4 +128,46 @@ describe('AuditPage error state', () => {
 
     expect(await screen.findByText(/Failed to load policy decisions: audit unavailable/, undefined, { timeout: 5000 })).toBeInTheDocument()
   })
+
+  // N-22: a load failure has to reach a screen-reader user, not just a sighted one.
+  it('announces the failure as an alert', async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.startsWith('/v1/acknowledgements')) return Promise.resolve({ entries: [] })
+      return Promise.reject(new Error('audit unavailable'))
+    })
+
+    renderPage()
+
+    expect(await screen.findByRole('alert', undefined, { timeout: 10_000 }))
+      .toHaveTextContent(/Failed to load policy decisions/)
+  }, 20_000)
+})
+
+// N-22: both lists are paged by the same icon-only chevrons. Without an
+// accessible name they were announced as "button, button, button, button".
+describe('AuditPage pagination accessibility', () => {
+  it('gives each pager a distinct accessible name', async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.startsWith('/v1/acknowledgements')) {
+        return Promise.resolve({
+          entries: [{
+            id: 'ack-1', diff_id: null, service_id: null, consumer_id: null,
+            acknowledged_by: 'alice', reason: 'known', expires_at: null,
+            created_at: '2026-06-01T00:00:00Z',
+          }],
+        })
+      }
+      return Promise.resolve(page(0))
+    })
+
+    renderPage()
+
+    await screen.findByRole('button', { name: /Next page of policy decisions/i }, { timeout: 10_000 })
+    expect(screen.getByRole('button', { name: /Previous page of policy decisions/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Next page of policy decisions/i })).toBeEnabled()
+
+    // The acknowledgements pager is a separate, separately-named control.
+    expect(screen.getByRole('button', { name: /Previous page of acknowledgements/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Next page of acknowledgements/i })).toBeDisabled()
+  }, 20_000)
 })

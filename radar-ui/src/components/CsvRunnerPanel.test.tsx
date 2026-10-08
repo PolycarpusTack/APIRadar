@@ -141,3 +141,33 @@ describe('CsvRunnerPanel historical runs', () => {
     expect(text).not.toContain('carol-from-a')
   })
 })
+
+// N-22 accessibility guard: the request builder's controls were named only by
+// their placeholders (and the method <select> and hidden file input by nothing
+// at all), so a screen-reader user had no way to tell the header name field
+// from the header value field.
+describe('CsvRunnerPanel accessibility', () => {
+  it('names the method, URL and CSV upload controls', async () => {
+    mockApi.get.mockResolvedValue([])
+    render(<CsvRunnerPanel />)
+
+    expect(await screen.findByLabelText(/HTTP method/i)).toHaveValue('GET')
+    expect(screen.getByLabelText(/Request URL/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/Upload CSV file/i)).toHaveAttribute('type', 'file')
+  })
+
+  it('names each header row and the request body distinctly', async () => {
+    mockApi.get.mockResolvedValue([])
+    render(<CsvRunnerPanel />)
+
+    fireEvent.change(await screen.findByLabelText(/HTTP method/i), { target: { value: 'POST' } })
+    expect(screen.getByLabelText(/Request body/i)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /Add header/i }))
+    fireEvent.change(screen.getByLabelText(/Header 1 name/i), { target: { value: 'X-Trace' } })
+    fireEvent.change(screen.getByLabelText(/Header 1 value/i), { target: { value: 'abc' } })
+
+    expect(screen.getByLabelText(/Header 1 name/i)).toHaveValue('X-Trace')
+    expect(screen.getByLabelText(/Header 1 value/i)).toHaveValue('abc')
+  })
+})
