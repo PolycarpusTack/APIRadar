@@ -38,7 +38,7 @@ colored = "3"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tower = "0.5"
 jsonwebtoken = "9"
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 clap_complete = "4"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
