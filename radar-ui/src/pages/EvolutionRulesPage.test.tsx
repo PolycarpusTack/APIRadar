@@ -131,8 +131,10 @@ describe('EvolutionRulesPage accessibility', () => {
     // Audience callout dismiss.
     expect(await screen.findByRole('button', { name: /Dismiss platform engineer note/i }, { timeout: 10_000 }))
       .toBeInTheDocument()
-    // Row delete — `title` alone is not an accessible name.
-    expect(screen.getByRole('button', { name: `Delete rule ${RULE.name}` })).toBeInTheDocument()
+    // Row delete — `title` alone is not an accessible name. The row renders
+    // only after the rules fetch resolves, which the callout does not wait for.
+    expect(await screen.findByRole('button', { name: `Delete rule ${RULE.name}` }, { timeout: 10_000 }))
+      .toBeInTheDocument()
     // Create-form close.
     await userEvent.click(screen.getByRole('button', { name: /Add rule/i }))
     expect(screen.getByRole('button', { name: /Close new evolution rule form/i })).toBeInTheDocument()
