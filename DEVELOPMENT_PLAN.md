@@ -1611,7 +1611,7 @@ And a "Learn more" link opens the Help page glossary
 
 | ID | Title | Size | Dependencies |
 |---|---|---|---|
-| P-1 | Spike: which fixture formats to support first (WireMock mappings, Mockoon environment, Prism/OpenAPI `examples`, plain JSON per operation), and how each maps to `(operation, field_path)` | S | — |
+| P-1 | Spike: which fixture formats to support first (WireMock mappings, Mockoon environment, Prism/OpenAPI `examples`, plain JSON per operation), and how each maps to `(operation, field_path)`. Mockoon: environment JSON `routes[]` (`method` + `endpoint`, prefixed by the env-level `endpointPrefix`; `:param` segments must normalise to OpenAPI `{param}`) → `responses[].body`. Bodies are strings that may contain Handlebars templating (`{{faker …}}`, `{{urlParam …}}`), so the spike must decide how to extract field paths from templated JSON, or skip unparseable bodies with a warning. Also decide whether `databucket` references count | S | — |
 | P-2 | Fixture parser in `radar-scanner` → `(operation, field_path)` pairs from response bodies; field *paths* only, never values | M | P-1, E-7 |
 | P-3 | `radar scan --mocks <path>` (repeatable, explicit like `--collection`); new `EvidenceSourceType::MockFixture`, confidence `medium`; idempotent dedup as in E-7-T4 | M | P-2 |
 | P-4 | PR comment + DiffDetailPage: label `mock_fixture` evidence rows as "stale fixture" so the consumer team knows to regenerate | S | P-3 |
@@ -1623,6 +1623,67 @@ And a "Learn more" link opens the Help page glossary
 - [ ] `radar scan --mocks` writes deduplicated `mock_fixture` Evidence
 - [ ] Demo fixture: a WireMock stub returning `user.phone` appears in the payments-api Blast Radius
 - [ ] Docs + HELP.md updated
+
+---
+
+## EPIC Q — Clean, safe baseline
+
+> **Mode:** DELIVERY · **Tracer bullet:** Q-1
+> **Full backlog:** [`EPIC-Q-R-PLAN.md`](./EPIC-Q-R-PLAN.md) (tasks, Verify, Pull Gates, TD Items). Origin: the 2026-10-23 product review.
+> **Pull order:** EPIC Q before EPIC R and EPIC P.
+> **Status (2026-10-23):** Q-1-T2 ✅, Q-1-T3 ✅ (PR #77 merged as `ffe7a55`); Q-1-T1 (disk headroom) open. `main` CI green except the JS security audit (Electron 33 advisories, Dependabot #63).
+
+| ID | Title | Size | Dependencies |
+|---|---|---|---|
+| Q-1 | PR #77 merges green (build headroom, EvolutionRulesPage test race, merge) | S | — |
+| Q-2 | Branch protection on `main` (N-34) | S | Q-1 |
+| Q-3 | SPIKE: validate with three Pilot Teams (HITL) | M | Q-1 |
+| Q-4 | Per-organisation weekly Digest (N-11) | S | Q-1 |
+| Q-5 | Share Tokens only on explicit share; shared-view severity parity (N-12) | M | Q-1 |
+| Q-6 | SSRF: pin the vetted IP, non-blocking DNS (N-10) | M | Q-1 |
+| Q-7 | Dependabot triage: merge low-risk groups, list majors | S | Q-1, Q-2 |
+| Q-8 | SMOKE: assertive E2E on docker-compose (N-33) | M | Q-4, Q-5, Q-6 |
+| Q-9 | Decompose `radar-api/src/lib.rs` (N-27, REFACTORING) | L | Q-8 |
+| Q-10 | Docs and status tell the truth | S | Q-1 |
+
+### EPIC Q — Phase Gate Checklist
+
+- [ ] Q-1 PR #77 merged, `main` green
+- [ ] Q-2 `main` protected
+- [ ] Q-3 pilot note with go/no-go
+- [ ] Q-4, Q-5, Q-6 closed with regression tests
+- [ ] Q-7 only major-version Dependabot PRs open
+- [ ] Q-8 assertive E2E green on `main`
+- [ ] Q-9 `lib.rs` < 200 lines, module map reconciled
+- [ ] Q-10 status consistent; PICKUP refreshed
+
+---
+
+## EPIC R — A credible diff, cheaper evidence
+
+> **Mode:** DELIVERY · **Full backlog:** [`EPIC-Q-R-PLAN.md`](./EPIC-Q-R-PLAN.md)
+> **New ADRs:** ADR-017 (OpenAPI 3.1 parsing), ADR-018 (port rules vs oasdiff as optional Diff Engine)
+
+| ID | Title | Size | Dependencies |
+|---|---|---|---|
+| R-1 | SPIKE: OpenAPI 3.1 parsing (ADR-017) | S | Q-1 |
+| R-2 | OpenAPI 3.1 end to end (CLI → API → PR comment) | M | R-1 |
+| R-3 | SPIKE: rule gap matrix against oasdiff (ADR-018) | M | R-1 |
+| R-4 | Request-side rules + `RADAR_DIFF_RULESET` flag | M | R-3 |
+| R-5 | Security requirement rules | S | R-4 |
+| R-6 | Response headers and readOnly/writeOnly | M | R-4 |
+| R-7 | Deprecation Signals with named Consumers | M | R-4 |
+| R-8 | Kong Gateway Adapter | M | Q-3 |
+| R-9 | Scanner stops inventing paths | S | Q-1 |
+| R-10 | SMOKE: Spec Corpus CI lane; flip to Ruleset v2 | M | R-2, R-4..R-7 |
+
+### EPIC R — Phase Gate Checklist
+
+- [ ] ADR-017 and ADR-018 Accepted
+- [ ] OpenAPI 3.1 works end to end; docs state supported versions accurately
+- [ ] Ruleset v2 default, corpus lane green
+- [ ] Kong adapter documented and tested
+- [ ] Scanner no longer invents paths
 
 ---
 
@@ -1647,3 +1708,5 @@ And a "Learn more" link opens the Help page glossary
 | 1.5 | 2026-09-01 | Yannick Verrydt | EPIC O drafted — mitigation of the 2026-09-01 full-application review (five-agent, nine workspaces); 23 stories in `EPIC-O-MITIGATION-PLAN.md`: P0 diff-engine blind spots (root-kind change, composed-variant request context, GraphQL scalar false-Breaking + self-diff-zero corpus), service-token auth regression (F-02), Evidence-pipeline leaks (scan early-return, scanner verb/destructuring, Postman normalization, Python SDK), SDK CI lane, batch policy integration; open EPIC N tail (N-8, N-13, N-15, N-16..N-18, N-22..N-25, N-28, N-29, N-31, N-33..N-35) reconfirmed and kept under EPIC N |
 | 1.6 | 2026-09-01 | Yannick Verrydt | EPIC O complete — all 23 stories delivered. P0: diff-engine blind spots (O-1 root-kind change, O-2 composed-variant request context, O-3 GraphQL scalars + self-diff-zero corpus for all 3 formats), O-4 service-token auth regression + OrgExt retired, Evidence pipeline (O-5 scan collection early-return, O-6 real HTTP verb, O-7 destructuring/closures, O-8 Postman normalization, O-9 Python SDK), O-10 SDK CI lane, O-11 desktop dev URL, O-12 CSV Runner, O-13 batch policy, O-14 truthful PR comment. P1: O-15 pinned SSRF client, O-16 no local token persistence, O-17 action fail-mode + injection, O-18 proto streaming + enum taxonomy, O-19 Unified AI Gateway routing, O-20 desktop CSP/splash/iframe. P2: O-21 docs truth + HELP.md, O-22 grouped cleanup, O-23 smoke E2E. Verified: 18 Rust test binaries, 80 UI tests, 23 Python + 4 Node SDK tests, clippy -D warnings clean. Carried forward: packaged Playground E2E + O-23 Postgres lane (CI), open EPIC N tail. |
 | 1.7 | 2026-10-08 | Yannick Verrydt | EPIC P drafted — mock fixtures as Consumer evidence. Absorbs the differentiator of the parked `30-Local-API-Mock-Server`; Radar does not serve mocks itself. Not yet pulled. |
+| 1.8 | 2026-10-23 | Yannick Verrydt | EPIC P-1 spike scope sharpened for the Mockoon environment format: route → operation mapping, Handlebars-templated bodies, databuckets. |
+| 1.9 | 2026-10-23 | Yannick Verrydt | EPIC Q (clean, safe baseline) and EPIC R (OpenAPI 3.1, diff-rule gaps vs oasdiff, Kong adapter, scanner precision) drafted from the 2026-10-23 product review; full backlog in `EPIC-Q-R-PLAN.md`. Pulled before EPIC P. |
