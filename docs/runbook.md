@@ -1,7 +1,7 @@
 # Radar Monitor — Runbook
 
 > **Audience:** On-call engineers and DevOps.  
-> **Last updated:** 2026-05-27
+> **Last updated:** 2026-09-01
 
 ---
 
@@ -33,9 +33,9 @@ radar-api (axum, port 8080)     radar-api sidecar (port 17380, 127.0.0.1 only)
        │                                │
        ├── PostgreSQL 16 (production)   └── SQLite ← AppData/radar-desktop/drift.db
        └── SQLite (local dev)
-              │
-              └── radar-scanner (background worker, reads source dirs)
 ```
+
+`radar-cli` (`radar check` / `radar scan` / `radar batch`) posts diffs, call sites, and collection Evidence to `radar-api`. `radar-scanner` is the library crate `radar scan` uses to read Consumer source directories and Postman collections — it is not a server-side background worker.
 
 **Port summary:**
 
@@ -53,7 +53,7 @@ Key env vars:
 | `DATABASE_URL` | DB connection string | `sqlite:drift.db` |
 | `BIND_ADDR` | Listen address | `0.0.0.0:8080` |
 | `STATIC_DIR` | Path to radar-ui `dist/` | _(none — UI not served)_ |
-| `RADAR_SERVICE_TOKEN` | Static Bearer token required on all v1 routes when set (desktop sets this automatically for its sidecar) | _(none — auth disabled)_ |
+| `RADAR_SERVICE_TOKEN` | Static Bearer token required on all v1 routes when set (desktop sets this automatically for its sidecar) | _(none)_ |
 | `RADAR_JWT_SECRET` | HS256 secret for JWT auth (overrides static token) | _(none)_ |
 | `RADAR_TRUST_PROXY` | Trust `X-Forwarded-For` for rate-limit keying (only behind a trusted proxy); default uses the socket peer | `false` |
 | `RATE_LIMIT_PER_MINUTE` | Max requests/min per client IP (0 = off) | `300` |
@@ -134,16 +134,30 @@ pnpm run dist
 ```bash
 # Pin to the previous image tag
 docker compose down
-sed -i 's/radar-api:latest/radar-api:v0.1.0/' docker-compose.yml
+sed -i 's/radar-api:latest/radar-api:v<previous-version>/' docker-compose.yml
 docker compose up -d
 ```
 
 ### Database rollback
 
-There are **no** down-migrations. Roll back by:
+Every migration (001–034) has a matching down-migration (`radar-api/migrations/*.down.sql`), verified on every CI run by `radar-api/tests/migrations_reversible.rs` (full up → full down on SQLite; the `rust-postgres` job exercises the same files on PostgreSQL 16).
 
-1. Restore database from the pre-deploy snapshot (see §4).
-2. Deploy the previous binary.
+**Revert migrations** with sqlx (each invocation reverts the single most recently applied migration — run it once per migration you want to unwind):
+
+```bash
+DATABASE_URL=postgres://drift:radar_dev@localhost/drift \
+  sqlx migrate revert --source radar-api/migrations
+
+# Check what is applied before and after
+sqlx migrate info --source radar-api/migrations
+```
+
+**Revert vs. restore — choosing:**
+
+- **Prefer `sqlx migrate revert`** when rolling back a just-deployed release whose migrations are additive (new tables, columns, indexes) and no meaningful data has landed in the new structures yet. It is fast, targeted, and keeps all pre-deploy data.
+- **Prefer restore-from-snapshot (§4)** when the migration was destructive or transformed data (a down-migration recreates the *schema*, not dropped data), when production traffic has already written data you would lose with the schema objects, or when the database state is suspect for any other reason. Always take the pre-deploy snapshot regardless — it is the only rollback that recovers data.
+
+After reverting, deploy the previous binary: the server runs migrations on boot, so starting the *new* binary again would immediately re-apply what you just reverted.
 
 ---
 
@@ -183,7 +197,7 @@ The retention window (default 90 days) is read from `SELECT value FROM settings 
 
 ## 5. Prometheus metrics
 
-Metrics are available at `GET /metrics` (Prometheus text format, no auth required).
+Metrics are available at `GET /metrics` (Prometheus text format). When `RADAR_METRICS_TOKEN` is set, the endpoint requires a matching `Authorization: Bearer <token>` header; when unset it is open (acceptable for desktop/localhost — **set the token in production**).
 
 Key metrics:
 
@@ -226,6 +240,7 @@ location / {
 
 ### Auth in production
 
+- **The server refuses to start (exit 2)** when no authentication is configured (`RADAR_REQUIRE_AUTH`, `RADAR_JWT_SECRET`, or `RADAR_SERVICE_TOKEN`) and the bind address is reachable from outside the machine (anything other than loopback). To deliberately serve an unauthenticated API, set `RADAR_ALLOW_UNAUTHENTICATED=true`.
 - Set `RADAR_REQUIRE_AUTH=true` in any internet-facing deployment.
 - Use `RADAR_JWT_SECRET` (not the static `RADAR_SERVICE_TOKEN`) for multi-tenant deployments; the JWT `org_id` claim scopes all reads and writes.
 - `RADAR_JWT_SECRET` and `RADAR_SERVICE_TOKEN` are never logged by the API.
@@ -251,9 +266,10 @@ Bearer tokens stored in Sandbox Environments (Settings → Playground) are maske
 
 ### "radar-api won't start"
 
-1. Check DB connectivity: `psql $DATABASE_URL -c 'SELECT 1'`
-2. Check migration status: `sqlx migrate info --source radar-api/migrations`
-3. Check port conflict: `ss -tlnp | grep 8080`
+1. If it exits immediately with `REFUSING TO START: no authentication is configured…` (exit code 2): configure auth (`RADAR_SERVICE_TOKEN`, `RADAR_JWT_SECRET`, or `RADAR_REQUIRE_AUTH=true`), bind to loopback (`--bind 127.0.0.1:<port>`), or set `RADAR_ALLOW_UNAUTHENTICATED=true` on purpose.
+2. Check DB connectivity: `psql $DATABASE_URL -c 'SELECT 1'`
+3. Check migration status: `sqlx migrate info --source radar-api/migrations`
+4. Check port conflict: `ss -tlnp | grep 8080`
 
 ### "CLI returns 401"
 
@@ -268,7 +284,7 @@ Bearer tokens stored in Sandbox Environments (Settings → Playground) are maske
 
 1. Verify consumers are subscribed: `GET /v1/services/{id}/consumers`
 2. Verify usage events are being ingested: `GET /v1/summary`
-3. If using static scanner: re-run `drift scan` after indexing new call sites.
+3. If using the static scanner: re-run `radar scan` after indexing new call sites.
 
 ### "Compare Specs returns 422 with parse error"
 
@@ -316,7 +332,7 @@ psql $DATABASE_URL -c \
 
 The Playground iframe loads the Scalar API Explorer from `GET /scalar.js` — a locally served static file bundled into the `radar-api` binary. If the iframe is blank:
 
-1. Verify the sidecar is running: `GET /health` should return `{"status":"ok"}`.
+1. Verify the sidecar is running: `GET /health` should return `{"status":"ok","db":"ok","version":"…"}`.
 2. Check that `/scalar.js` returns `HTTP 200` with `Content-Type: application/javascript`.
 3. Confirm the iframe sandbox does **not** include `allow-same-origin` (this would re-enable the parent CSP and block the local script). See `PlaygroundPage.tsx`.
 4. If an override file exists but is corrupt, delete it: `rm <db-dir>/scalar_override.js <db-dir>/scalar_override.version` and restart — the compiled-in bundle will be used.
@@ -376,7 +392,7 @@ The following variables control server behaviour but are not secret:
 | `RADAR_TRUST_PROXY` | When `true`, trust `X-Forwarded-For` (first value) for rate-limit keying — use only behind a reverse proxy that overwrites the header. When `false` (default) the limiter keys on the unspoofable socket peer address. | `false` |
 | `RATE_LIMIT_PER_MINUTE` | Max requests per IP per minute (`0` = unlimited) | `300` |
 | `MAX_BODY_SIZE_MB` | Maximum request body in megabytes | `4` |
-| `BIND_ADDR` | Listen address for the API server | `0.0.0.0:8081` |
+| `BIND_ADDR` | Listen address for the API server | `0.0.0.0:8080` |
 
 ---
 

@@ -1,0 +1,10 @@
+scalar DateTime
+
+type User {
+  id: ID!
+  createdAt: DateTime!
+}
+
+type Query {
+  user(id: ID!): User
+}

@@ -7,9 +7,9 @@ import PageHeader from '../components/PageHeader'
 import CsvRunnerPanel from '../components/CsvRunnerPanel'
 import { api, ApiError } from '../lib/apiClient'
 import { escapeHtmlAttr, escapeJsonForHtml } from '../lib/htmlEscape'
+import { loadLocalEnvs, saveLocalEnvs, type SandboxEnv } from '../lib/sandboxEnvStorage'
 
 const DEFAULT_SPEC = 'https://cdn.jsdelivr.net/npm/@scalar/galaxy/dist/latest.yaml'
-const LOCAL_STORAGE_KEY = 'drift-playground-envs-local'
 // Mirrors --bg-base token (#0B0F19). Used inside iframe srcdoc where the parent's
 // CSS variables are inaccessible. Keep in sync with :root { --bg-base } in index.css.
 const BG_BASE_DARK = '#0B0F19'
@@ -36,33 +36,11 @@ const SCALAR_SRC: string = (() => {
 // Types
 // ---------------------------------------------------------------------------
 
-interface SandboxEnv {
-  id: string
-  name: string
-  base_url: string
-  bearer_token: string
-  description: string
-  created_at?: string
-  updated_at?: string
-}
-
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
-// ---------------------------------------------------------------------------
-// Local-storage fallback (offline / no server)
-// ---------------------------------------------------------------------------
-
-function loadLocalEnvs(): SandboxEnv[] {
-  try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_KEY)
-    if (raw) return JSON.parse(raw) as SandboxEnv[]
-  } catch {}
-  return []
-}
-
-function saveLocalEnvs(envs: SandboxEnv[]) {
-  localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(envs))
-}
+// Local-storage fallback (offline / no server) lives in ../lib/sandboxEnvStorage.
+// It never persists bearer_token values: tokens stay in React state only, so an
+// active env keeps working for the current tab but is gone after a reload.
 
 // ---------------------------------------------------------------------------
 // Scalar iframe builder
@@ -142,18 +120,16 @@ export default function PlaygroundPage() {
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
 
-  const token = localStorage.getItem('radarToken') ?? undefined
-
   // ── Load stored specs ────────────────────────────────────────────────────
   useEffect(() => {
-    api.get<typeof storedSpecs>('/v1/spec-versions', { bearer: token ?? undefined })
+    api.get<typeof storedSpecs>('/v1/spec-versions')
       .then(setStoredSpecs)
       .catch(() => {})
   }, [])
 
   // ── Load sandbox environments ────────────────────────────────────────────
   useEffect(() => {
-    api.get<SandboxEnv[]>('/v1/sandbox-envs', { bearer: token ?? undefined })
+    api.get<SandboxEnv[]>('/v1/sandbox-envs')
       .then((data) => {
         setEnvs(data)
         setServerMode(true)
@@ -199,8 +175,8 @@ export default function PlaygroundPage() {
     if (serverMode) {
       try {
         const saved: SandboxEnv = editing
-          ? await api.put<SandboxEnv>(`/v1/sandbox-envs/${editing.id}`, payload, { bearer: token ?? undefined })
-          : await api.post<SandboxEnv>('/v1/sandbox-envs', payload, { bearer: token ?? undefined })
+          ? await api.put<SandboxEnv>(`/v1/sandbox-envs/${editing.id}`, payload)
+          : await api.post<SandboxEnv>('/v1/sandbox-envs', payload)
         setEnvs((prev) =>
           editing
             ? prev.map((e) => (e.id === editing.id ? saved : e))
@@ -236,7 +212,7 @@ export default function PlaygroundPage() {
   async function handleDelete(id: string) {
     if (serverMode) {
       try {
-        await api.del(`/v1/sandbox-envs/${id}`, { bearer: token ?? undefined })
+        await api.del(`/v1/sandbox-envs/${id}`)
       } catch {}
     }
     const next = envs.filter((e) => e.id !== id)
@@ -290,6 +266,7 @@ export default function PlaygroundPage() {
         <Telescope className="h-4 w-4 flex-shrink-0" style={{ color: 'var(--text-3)' }} />
         <input
           type="url"
+          aria-label="OpenAPI spec URL"
           value={inputUrl}
           onChange={(e) => setInputUrl(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -468,6 +445,7 @@ export default function PlaygroundPage() {
             {!serverMode && (
               <p className="text-[11px]" style={{ color: 'var(--amber)', fontFamily: 'var(--font-mono)' }}>
                 ⚠ Server unreachable — environments are saved in this browser only and not shared with teammates.
+                Bearer tokens are never saved locally: they stay in memory for this tab and must be re-entered after a reload.
               </p>
             )}
           </div>
@@ -509,7 +487,15 @@ export default function PlaygroundPage() {
             key={iframeKey}
             srcDoc={buildScalarHtml(activeUrl, activeEnv)}
             title="API Playground"
-            sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
+            // O-20: no popup tokens. `allow-popups-to-escape-sandbox` let a
+            // malicious spec loaded by URL window.open arbitrary sites, and in
+            // the desktop shell even plain `allow-popups` keeps that phishing
+            // vector: the main process forwards any https window.open to the OS
+            // browser (hardenWindow's setWindowOpenHandler), regardless of the
+            // popup's own sandbox flags. Scalar's core UI (browse the spec, try
+            // requests via fetch) opens no windows — the only loss is external
+            // target=_blank links inside spec descriptions, now blocked.
+            sandbox="allow-scripts allow-forms"
             style={{ width: '100%', height: '100%', border: 'none' }}
           />
         </div>
@@ -558,15 +544,16 @@ function EnvForm({ form, setForm, editing, saveState, deleteConfirm, setDeleteCo
         <p className="text-[11px] font-bold uppercase tracking-widest" style={{ color: 'var(--text-dim)' }}>
           {editing ? 'Edit environment' : 'New environment'}
         </p>
-        <button onClick={onClose} style={{ color: 'var(--text-3)' }}>
+        <button type="button" onClick={onClose} aria-label="Close environment form" style={{ color: 'var(--text-3)' }}>
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
 
       <div className="grid gap-2" style={{ gridTemplateColumns: '1fr 1fr' }}>
         <div className="space-y-1">
-          <label className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Name *</label>
+          <label htmlFor="env-name" className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Name *</label>
           <input
+            id="env-name"
             ref={nameRef}
             type="text"
             placeholder="Production sandbox"
@@ -579,8 +566,9 @@ function EnvForm({ form, setForm, editing, saveState, deleteConfirm, setDeleteCo
           />
         </div>
         <div className="space-y-1">
-          <label className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Short description</label>
+          <label htmlFor="env-description" className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Short description</label>
           <input
+            id="env-description"
             type="text"
             placeholder="e.g. Base demo tenant"
             value={form.description}
@@ -592,8 +580,9 @@ function EnvForm({ form, setForm, editing, saveState, deleteConfirm, setDeleteCo
           />
         </div>
         <div className="space-y-1">
-          <label className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Base URL</label>
+          <label htmlFor="env-base-url" className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Base URL</label>
           <input
+            id="env-base-url"
             type="url"
             placeholder="https://sandbox.base.com/api"
             value={form.base_url}
@@ -605,8 +594,9 @@ function EnvForm({ form, setForm, editing, saveState, deleteConfirm, setDeleteCo
           />
         </div>
         <div className="space-y-1">
-          <label className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Bearer token</label>
+          <label htmlFor="env-bearer-token" className="text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Bearer token</label>
           <input
+            id="env-bearer-token"
             type="password"
             placeholder={editing ? 'Leave blank to keep existing token' : 'Demo API key'}
             value={form.bearer_token}

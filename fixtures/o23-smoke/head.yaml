@@ -1,0 +1,52 @@
+openapi: "3.0.3"
+info:
+  title: Smoke API
+  version: "2.0.0"
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      responses:
+        "200":
+          description: Paginated user list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/User"
+                  total:
+                    type: integer
+  /orders:
+    post:
+      operationId: createOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [coupon]
+                  properties:
+                    amount:
+                      type: number
+                    coupon:
+                      type: string
+      responses:
+        "201":
+          description: Created
+components:
+  schemas:
+    User:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+        phone:
+          type: string

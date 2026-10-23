@@ -6,14 +6,14 @@ use serde::{Deserialize, Serialize};
 // Blast-radius response types (deserialized from the API)
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct ConsumerInfo {
     pub name: String,
     pub owner_team: String,
     pub contact: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct EvidenceItem {
     pub kind: String,
     pub operation: Option<String>,
@@ -22,7 +22,7 @@ pub struct EvidenceItem {
     // last_seen_at (call_site) omitted: serde ignores unknown JSON fields; we show "(static)" in the PR comment
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct BlastRadiusEntry {
     pub consumer: ConsumerInfo,
     pub confidence: String,
@@ -33,7 +33,7 @@ pub struct BlastRadiusEntry {
     pub evidence: Vec<EvidenceItem>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct BlastRadiusResponse {
     pub entries: Vec<BlastRadiusEntry>,
 }

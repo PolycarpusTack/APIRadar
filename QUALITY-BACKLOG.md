@@ -204,6 +204,7 @@ Given a field is defined via `extend type` then it is not reported as removed
 > **Priority:** P1 · **Size:** S · **Hat:** FEATURE
 > **Finding:** `ingestion.rs` OTLP/gateway inserts use `let _ =` and increment `accepted` even when the insert fails (e.g. FK violation) — client told data was stored when it was dropped; inconsistent with `/v1/usage/events` which maps FK errors to 4xx.
 **AC:** a failed row does not increment `accepted`; a user-caused constraint violation returns 4xx; test with an unknown consumer_id.
+**✅ DONE (2026-09-01):** Both OTLP and gateway-log inserts now route through `map_ingest_db_error` — a rejected row is no longer counted as accepted, and an unknown consumer_id returns 4xx. Two regression tests assert 4xx + an empty `usage_event`. The pre-existing `gateway_logs_accepted` test was itself encoding the old dishonesty (it posted unknown ids and asserted `accepted: 2`); it now seeds the rows and asserts they were stored. Commit `79ad9b1`.
 
 ### Story N-10 · SSRF DNS-rebinding + non-blocking DNS
 > **Priority:** P1 · **Size:** M · **Hat:** FEATURE
@@ -224,16 +225,19 @@ Given a field is defined via `extend type` then it is not reported as removed
 > **Priority:** P1 · **Size:** S · **Hat:** REFACTORING
 > **Finding:** `clamp_pagination` (utils.rs) exists but isn't applied in `audit.rs`, `csv_runner.rs`, `decisions.rs`, `acknowledgements.rs` — `limit=-1` dumps the table on SQLite / errors on Postgres.
 **AC:** every list handler routes limit/offset through `clamp_pagination`; a negative-limit test per endpoint.
+**✅ DONE (2026-09-01):** `audit.rs`, `csv_runner.rs`, `decisions.rs` and `acknowledgements.rs` all route limit/offset through `clamp_pagination`. `.min(200)` capped the top but had no floor, so `limit=-1` reached the database; a regression test asserts a negative limit/offset returns 200 on each endpoint. Commit `52ef8e9`.
 
 ### Story N-14 · Scheduled-scan serialization
 > **Priority:** P1 · **Size:** M · **Hat:** FEATURE
 > **Finding:** `scans.rs` scheduler has no cross-instance lock and can double-fire within one instance if `execute_scan` stalls >60s before its first UPDATE; two replicas double-run every scan.
 **AC:** a scan claims a lease (set `last_run_at`/status before work, `FOR UPDATE SKIP LOCKED` or advisory lock on the multi-instance path) so it runs at most once per interval; also fixes `fetch_previous_spec` to use the scan's own prior spec, not any origin's newest.
+**✅ DONE (2026-10-08):** `run_due_scans` now claims each due scan with a compare-and-swap UPDATE on the `last_run_at` it just read (`claim_scan`, with an `IS NULL` branch for never-run scans) before spawning `execute_scan` — one atomic statement on both SQLite and Postgres, so overlapping ticks or two replicas cannot both win. Two tests (racer loses on a stale `last_run_at`; never-run scan claimed once) were shown red against a no-claim stub first. The `fetch_previous_spec` half landed in `2390db7`.
 
 ### Story N-15 · CLI remaining timeouts + panic guard
 > **Priority:** P1 · **Size:** S · **Hat:** FEATURE
 > **Finding:** `explain.rs`, `jira.rs`, `postman.rs`, `register.rs`, `main.rs:687` build `Client::new()` with no timeout (M-12 covered only api_client/github/ai_provider); `explain.rs:134` byte-slices `&diff.id[..8]` and panics if shorter.
 **AC:** all reqwest clients have connect+read timeouts (shared builder); id-slice uses a char-safe/length-checked truncation; unit test for the short-id case.
+**✅ DONE (2026-09-01):** explain/register/jira/postman/`rule test` clients gained api_client's connect+request timeouts. Both byte-slice panics are fixed as character-safe helpers (`spec_excerpt`, `short_diff_id`) with unit tests; both original panics were reproduced standalone first. Commit `c9c056a`.
 
 ---
 
@@ -286,11 +290,13 @@ Given a field is defined via `extend type` then it is not reported as removed
 > **Finding:** Across ~9,600 LOC there is one each of `aria-label`/`role`/`tabIndex`/`onKeyDown`; clickable `<tr onClick>` rows are keyboard-unreachable; icon-only buttons rely on `title`.
 **AC:** interactive rows are buttons/links or have `role`+`tabIndex`+key handlers; icon-only controls have `aria-label`; forms associate `label`/`id`; passes an axe smoke check on the main pages.
 **Tasks:** T1 add an axe/RTL a11y test harness; T2 remediate rows, buttons, forms across pages.
+**✅ DONE (2026-10-08):** T1 — `radar-ui/src/lib/axe.ts` runs axe-core over rendered trees (`color-contrast`/`region` disabled as jsdom-unrunnable, said why); `a11y.smoke.test.tsx` scans the 12 main pages, `accessibility.test.tsx` holds 14 targeted guards. T2 — clickable rows carry `role="button"`+`tabIndex`+Enter/Space, icon-only controls have `aria-label`, labels are bound to inputs, error banners are `role="alert"`, TermTooltip links its popover via `aria-describedby`. UI suite 152/152, lint + typecheck clean.
 
 ### Story N-23 · Shared abortable fetch + honest error states
 > **Priority:** P1 · **Size:** M · **Hat:** REFACTORING
 > **Finding:** ~15 pages hand-roll `useEffect`+`useState`+`api.get` with inconsistent cancellation; `HomePage`/`SettingsPage` swallow errors with `.catch(()=>{})` so failure looks identical to empty; `DiffsPage` pagination and `DiffDetailPage` polling have stale-response races.
 **AC:** a shared `useFetch` (abortable, with `{data,loading,error}`) replaces the ad-hoc pattern on the high-traffic pages; error state is distinct from empty state; pagination/poll requests are ordering-safe.
+**✅ DONE (2026-09-01):** DiffDetailPage, ConsumerDetailPage and AuditPage migrated to the abortable `useFetch`, keyed on the id/offset identifying the request; each race has a deterministic test that resolves the stale promise last. Error states separated from empty ones. `useFetch`/`apiClient` gained their first tests. ~12 lower-traffic pages still hand-roll the pattern — tracked as remaining debt. Commit `793aba8`.
 
 ### Story N-24 · First UI component/page tests + web CSP
 > **Priority:** P1 · **Size:** M · **Hat:** FEATURE
@@ -301,6 +307,7 @@ Given a field is defined via `extend type` then it is not reported as removed
 > **Priority:** P2 · **Size:** S · **Hat:** FEATURE
 > **Finding:** `SettingsPage` `deleteWebhook`/`deleteScan` are destructive with no confirmation and uncaught (unhandled promise rejection on failure).
 **AC:** confirm before delete; catch and surface failures; also fix remaining hardcoded `#fff`/`var(--blue,#…)` literals by adding the missing AIR tokens.
+**✅ DONE (2026-09-01):** EvolutionRulesPage toggle/delete no longer swallow errors in `.catch(() => {})` (visible banner) and delete confirms first, matching the codebase's `window.confirm` idiom. SettingsPage was already fixed by `6563e26` but untested; it gained regression guards. Commit `793aba8`.
 
 ---
 
@@ -327,11 +334,13 @@ Given a field is defined via `extend type` then it is not reported as removed
 > **Priority:** P2 · **Size:** S · **Hat:** REFACTORING
 > **Finding:** `deliver_webhook_event` vs `retry_pending_delivery` duplicate ~90 lines of retry logic; `delivered_at` is bound before the retry loop (wrong timestamp on later attempts).
 **AC:** single retry helper; `delivered_at` recorded at actual delivery time. (The diff-persistence duplication is handled by N-3.)
+**✅ DONE (2026-09-01):** `deliver_webhook_event` and `retry_pending_delivery` now share `run_delivery_attempts`; the duplicated delay table, signing and status updates are gone. The pending-delivery INSERT no longer swallows its error (it aborted delivery would be untracked by the outbox), and the remaining `let _ =` updates log. 27 webhook tests pass unchanged. Commit `7f38d48`.
 
 ### Story N-29 · Per-org settings (from M-21)
 > **Priority:** P2 · **Size:** M · **Hat:** FEATURE
 > **Finding:** `settings` table (migration 007) has no `org_id`; `PUT/GET /v1/settings` are global.
 **AC:** migration adds `org_id` to `settings` (and reworks the digest-dedup keys); handlers scope to the caller's org; cross-org isolation test.
+**✅ DONE (2026-09-01):** migration 035 rebuilds `settings` with a composite `(org_id, key)` primary key (existing rows land on the `''` single-tenant scope); both handlers take `CallerOrg`. The retention job now purges per org — each configured org with its own window, everything else on the default — so one tenant can no longer purge another's history. Red→Green on both counts. Commit `8da2594`.
 
 ---
 
@@ -348,11 +357,13 @@ Given a field is defined via `extend type` then it is not reported as removed
 > **Priority:** P2 · **Size:** S · **Hat:** FEATURE
 > **Finding:** `radar-desktop` has no `lint`/`typecheck` scripts so `pnpm --recursive lint` skips it; it's never type-checked or `electron-vite build`-compiled until a release tag (M-16's criterion was not actually met); root `package.json` `lint` calls a nonexistent `radar-desktop lint`.
 **AC:** add `typecheck` (and lint) scripts to radar-desktop; CI runs typecheck + an unsigned `electron-vite build`; fix the root lint script.
+**✅ ALREADY DONE (verified 2026-09-01):** desktop typecheck + build are gated in ci.yml's node job and `desktop-package` asserts the sidecar is bundled (`b5fb544`). Remaining gap, NOT closed: the main process (spawn/PID/health-poll/migration-recovery) still has no test harness, and radar-desktop has no eslint.
 
 ### Story N-32 · JS supply-chain scanning
 > **Priority:** P2 · **Size:** S · **Hat:** FEATURE
 > **Finding:** `cargo audit`+SBOM exist, but there's no `pnpm audit` and no Dependabot/Renovate — an Electron app's dependency tree is unscanned.
 **AC:** add a `pnpm audit` CI step (advisory or gating) and a `.github/dependabot.yml` for cargo + npm + actions.
+**✅ DONE (2026-09-01):** `js-security-audit.yml` adds a daily blocking `pnpm audit --audit-level=high`, mirroring the Rust `security-audit.yml`, with ci.yml's advisory step pointing at it. Commit `857fa0b`.
 
 ### Story N-33 · Make E2E assertive
 > **Priority:** P2 · **Size:** M · **Hat:** FEATURE
@@ -373,6 +384,7 @@ Given a field is defined via `extend type` then it is not reported as removed
 > **Priority:** P2 · **Size:** S · **Hat:** REFACTORING
 > **Finding:** Tracked `drift.db`/`radar.db` (data-leak + merge noise), orphaned `radar-sdk-node`/`radar-sdk-python` (in no workspace, Node SDK untested), duplicate root `Dockerfile.api` and stray `package-lock.json`, and the still-untracked `AGENTS.md`/`docs/cliff-notes.md`/`docs/APIRadar_Icon.png`.
 **AC:** untrack + gitignore the `.db` files; decide the SDKs' fate (adopt into a workspace with CI, or remove); delete the dead Dockerfile/lockfile; commit or remove the intended untracked docs.
+**✅ ALREADY DONE (verified 2026-09-01):** no `.db` files tracked, `.gitignore` covers them, stray root artifacts removed, `AGENTS.md` committed, and both SDKs are now gated by `sdk.yml` (`e5993b5`). Untracked `docs/cliff-notes.md` and `docs/APIRadar_Icon.png` remain — user decision whether to commit or drop.
 
 ---
 

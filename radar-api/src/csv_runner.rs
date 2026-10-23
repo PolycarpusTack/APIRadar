@@ -279,14 +279,16 @@ pub(crate) async fn get_csv_run_results(
         return Err(ApiError::NotFound("csv run not found".into()));
     }
 
+    // N-13: clamp (see utils::clamp_pagination).
+    let (limit, offset) = crate::utils::clamp_pagination(Some(params.limit), Some(params.offset));
     let rows = q!(
         "SELECT row_number, http_status, duration_ms, error, url, response_body, row_data \
          FROM csv_run_result WHERE job_id = ? ORDER BY row_number ASC \
          LIMIT ? OFFSET ?",
     )
     .bind(&id)
-    .bind(params.limit)
-    .bind(params.offset)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await?;
 

@@ -1,0 +1,122 @@
+/* ═══════════════════════════════════════════════════════
+   Vendored from ../_TEMPLATE/design-tokens.css (Mediagenix AIR)
+   — re-sync when the styleguide changes; do not edit locally.
+   ═══════════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════════
+   Ideas Suite — Design Tokens
+   Source of truth: /mnt/c/Projects/unified-styleguide.html
+   Re-exports the Mediagenix AIR Platform tokens so every
+   idea's UI can @import this file and stay in-system.
+
+   USAGE:
+     @import "../_TEMPLATE/design-tokens.css";
+
+   DO NOT change values here. If a value needs to change,
+   change the styleguide, then mirror it into this file.
+   ═══════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Surface System ── */
+  --bg-base:      #0B0F19;
+  --bg-surface:   #111827;
+  --bg-raised:    #1C2333;
+  --bg-hover:     #232E45;
+  --bg-active:    #2A3855;
+
+  /* ── Borders ── */
+  --border:       #1F2D45;
+  --border-mid:   #2E3F5C;
+  --border-hi:    #3D5070;
+
+  /* ── Text ── */
+  --text-1:       #F0F4FF;
+  --text-2:       #9BAAC4;
+  --text-3:       #5E6F8A;
+  --text-dim:     #3D4F68;
+
+  /* ── Brand (Mediagenix) ── */
+  --cobalt:       #3805E3;
+  --cobalt-mid:   #5B33F0;
+  --dark-purple:  #3e257c;
+  --mauve:        #B8AFDA;
+  --neon-green:   #B3FC4F;
+
+  /* ── Operational palette ── */
+  --amber:        #F59E0B;  --amber-dim:  #78490A;  --amber-bg:  #1A1205;
+  --teal:         #2DD4BF;  --teal-dim:   #0F5E56;  --teal-bg:   #051412;
+  --red:          #F87171;  --red-dim:    #7A1515;  --red-bg:    #1A0505;
+  --blue:         #60A5FA;  --blue-dim:   #1E3A6B;  --blue-bg:   #050D1A;
+  --purple:       #A78BFA;  --purple-dim: #3D2070;  --purple-bg: #0A0515;
+  --green:        #4ADE80;  --green-dim:  #1B5E35;  --green-bg:  #031009;
+
+  /* ── Live / broadcast ── */
+  --live-red:     #E63946;
+  --live-pulse:   #FF4757;
+  --recording:    #EF4444;
+  --online:       #10B981;
+  --offline:      #6B7280;
+
+  /* ── Semantic ── */
+  --success:      #10B981;  --success-bg: rgba(16, 185, 129, 0.12);
+  --warning:      #F59E0B;  --warning-bg: rgba(245, 158, 11, 0.12);
+  --error:        #EF4444;  --error-bg:   rgba(239, 68, 68, 0.12);
+  --info:         #3B82F6;  --info-bg:    rgba(59, 130, 246, 0.12);
+
+  /* ── Gradients ── */
+  --gradient-cobalt: linear-gradient(135deg, #3805E3 0%, #5B33F0 100%);
+  --gradient-brand:  linear-gradient(135deg, #3805E3 0%, #B8AFDA 100%);
+  --gradient-neon:   linear-gradient(135deg, #B3FC4F 0%, #7DD836 100%);
+  --gradient-amber:  linear-gradient(135deg, #F59E0B 0%, #D97706 100%);
+
+  /* ── Typography ── */
+  --font-sans:    'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-head:    'Space Grotesk', sans-serif;
+  --font-mono:    'JetBrains Mono', 'IBM Plex Mono', monospace;
+  --font-brand:   'Space Grotesk', sans-serif;
+
+  /* ── Modular type scale (1.2) ── */
+  --text-xs:   0.694rem;
+  --text-sm:   0.833rem;
+  --text-base: 1rem;
+  --text-lg:   1.2rem;
+  --text-xl:   1.44rem;
+  --text-2xl:  1.728rem;
+  --text-3xl:  2.074rem;
+  --text-4xl:  2.488rem;
+  --text-5xl:  2.986rem;
+
+  /* ── Spacing (4px base) ── */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-10: 40px;
+  --space-12: 48px; --space-16: 64px; --space-20: 80px;
+
+  /* ── Radius ── */
+  --radius-sm: 4px; --radius-md: 6px; --radius-lg: 10px;
+  --radius-xl: 14px; --radius-full: 9999px;
+
+  /* ── Shadows ── */
+  --shadow-sm: 0 2px 8px rgba(0,0,0,0.3);
+  --shadow-md: 0 4px 20px rgba(0,0,0,0.4);
+  --shadow-lg: 0 8px 40px rgba(0,0,0,0.5);
+  --shadow-xl: 0 24px 64px rgba(0,0,0,0.6);
+
+  /* ── Glow ── */
+  --glow-cobalt: 0 0 20px rgba(56, 5, 227, 0.3), 0 0 40px rgba(56, 5, 227, 0.1);
+  --glow-teal:   0 0 20px rgba(45, 212, 191, 0.3), 0 0 40px rgba(45, 212, 191, 0.1);
+  --glow-amber:  0 0 20px rgba(245, 158, 11, 0.3), 0 0 40px rgba(245, 158, 11, 0.1);
+  --glow-live:   0 0 20px rgba(230, 57, 70, 0.4), 0 0 40px rgba(230, 57, 70, 0.2);
+  --glow-neon:   0 0 20px rgba(179, 252, 79, 0.3), 0 0 40px rgba(179, 252, 79, 0.1);
+
+  /* ── Motion ── */
+  --ease-default: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out:     cubic-bezier(0, 0, 0.2, 1);
+  --ease-bounce:  cubic-bezier(0.68, -0.55, 0.265, 1.55);
+  --duration-fast:   150ms;
+  --duration-normal: 200ms;
+  --duration-slow:   300ms;
+
+  /* ── Z-index ── */
+  --z-dropdown: 100; --z-sticky: 200; --z-overlay: 300;
+  --z-modal: 400; --z-popover: 500; --z-toast: 600;
+}

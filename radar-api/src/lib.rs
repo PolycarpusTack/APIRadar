@@ -32,10 +32,13 @@ pub(crate) mod utils;
 pub(crate) mod webhooks;
 
 #[cfg(test)]
+mod review_regressions;
+
+#[cfg(test)]
 pub(crate) use ai_tests::templates_from_changes;
 pub(crate) use auth::{
     auth_middleware, oidc_callback, oidc_login, oidc_logout, oidc_me, JwtSecretExt, RequireAuth,
-    SingleTenantMode,
+    ServiceTokenExt, SingleTenantMode,
 };
 #[cfg(test)]
 pub(crate) use auth::{sign_jwt, JwtClaims};
@@ -45,7 +48,10 @@ pub use csv_runner::purge_old_csv_runs;
 pub(crate) use errors::get_prometheus_handle;
 #[cfg(test)]
 pub(crate) use serde_json::Value;
-pub use settings::{expire_old_evidence, purge_old_usage_events};
+pub use settings::{
+    configured_retention_days, expire_old_evidence, purge_old_csv_runs_scoped,
+    purge_old_usage_events_scoped, RetentionScope,
+};
 #[cfg(test)]
 pub(crate) use utils::{
     apply_evolution_rules, field_in_deny_list, is_severity_downgrade, normalise_path,
@@ -364,6 +370,30 @@ pub fn build_router(
     require_auth: bool,
     jwt_secret: Option<String>,
 ) -> Router {
+    // O-4: the static service token is read once here (never per request) and
+    // threaded through `build_router_with_auth`, which tests call directly so
+    // service-token mode is exercisable without process-global env vars.
+    let service_token = std::env::var("RADAR_SERVICE_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
+    build_router_with_auth(
+        pool,
+        static_dir,
+        max_body_bytes,
+        require_auth,
+        jwt_secret,
+        service_token,
+    )
+}
+
+pub(crate) fn build_router_with_auth(
+    pool: sqlx::AnyPool,
+    static_dir: Option<&str>,
+    max_body_bytes: usize,
+    require_auth: bool,
+    jwt_secret: Option<String>,
+    service_token: Option<String>,
+) -> Router {
     let v1 = Router::new()
         .route(
             "/services",
@@ -528,21 +558,22 @@ pub fn build_router(
         // Outermost layer: inject RequireAuth + JwtSecretExt before auth_middleware runs.
         .layer(middleware::from_fn({
             let jwt_secret = jwt_secret.clone();
+            let service_token = service_token.clone();
             // F-02: a server has no tenant concept only when nothing enforces
             // identity — no JWT secret, no service token, no require_auth.
             // Decided once here rather than per request, so a stray env var
             // cannot widen a caller's scope at runtime.
             let single_tenant = !require_auth
                 && jwt_secret.as_deref().unwrap_or_default().is_empty()
-                && std::env::var("RADAR_SERVICE_TOKEN")
-                    .unwrap_or_default()
-                    .is_empty();
+                && service_token.is_none();
             move |mut req: Request, next: Next| {
                 let s = jwt_secret.clone();
+                let st = service_token.clone();
                 async move {
                     req.extensions_mut().insert(RequireAuth(require_auth));
                     req.extensions_mut().insert(SingleTenantMode(single_tenant));
                     req.extensions_mut().insert(JwtSecretExt(s));
+                    req.extensions_mut().insert(ServiceTokenExt(st));
                     next.run(req).await
                 }
             }
@@ -684,11 +715,13 @@ async fn health(State(pool): State<sqlx::AnyPool>) -> impl IntoResponse {
     match q!("SELECT 1").execute(&pool).await {
         Ok(_) => (
             StatusCode::OK,
-            Json(json!({"status": "ok", "db": "ok", "version": "0.1.0"})),
+            Json(json!({"status": "ok", "db": "ok", "version": env!("CARGO_PKG_VERSION")})),
         ),
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"status": "degraded", "db": "unreachable", "version": "0.1.0"})),
+            Json(
+                json!({"status": "degraded", "db": "unreachable", "version": env!("CARGO_PKG_VERSION")}),
+            ),
         ),
     }
 }
@@ -790,7 +823,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
+        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None);
 
         let body = serde_json::json!([
             {
@@ -818,6 +851,179 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["accepted"], 2);
+
+        let stored: i64 = qs!("SELECT COUNT(*) FROM usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 2, "accepted must mean actually stored");
+    }
+
+    // N-13: a negative limit reached the database — a full-table dump on
+    // SQLite and a hard error on PostgreSQL. Every list endpoint clamps.
+    #[tokio::test]
+    async fn negative_limit_is_clamped_on_every_list_endpoint() {
+        let pool = test_pool().await;
+        let client = test_helpers::TestClient::new(pool.clone());
+
+        for uri in [
+            "/v1/audit-events?limit=-1&offset=-5",
+            "/v1/policy-decisions?limit=-1&offset=-5",
+            "/v1/acknowledgements?limit=-1&offset=-5",
+        ] {
+            let resp = client.get(uri).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "{uri} must clamp rather than error or dump: {}",
+                resp.text()
+            );
+        }
+    }
+
+    // N-29: settings are per-org — one tenant's PUT must not rewrite another's
+    // policy, and the retention job must not purge across org boundaries.
+    #[tokio::test]
+    async fn settings_are_scoped_per_org() {
+        let pool = test_pool().await;
+        let acme = test_helpers::TestClient::new_with_jwt(pool.clone(), "acme");
+        let globex = test_helpers::TestClient::new_with_jwt(pool.clone(), "globex");
+
+        let body = serde_json::json!({
+            "policy_block_on": "never",
+            "policy_lookback_days": 7,
+            "policy_allow_override_with": "acme-ack",
+            "retention_days": 5
+        });
+        assert_eq!(acme.put_json("/v1/settings", &body).await.status(), 200);
+
+        let acme_view = acme.get("/v1/settings").await.json();
+        assert_eq!(acme_view["policy_block_on"], "never");
+        assert_eq!(acme_view["retention_days"], 5);
+
+        // The other tenant still sees defaults — not acme's values.
+        let globex_view = globex.get("/v1/settings").await.json();
+        assert_eq!(
+            globex_view["policy_block_on"], "active_consumers",
+            "one org's settings must not leak into another's: {globex_view}"
+        );
+        assert_eq!(globex_view["retention_days"], 90);
+    }
+
+    #[tokio::test]
+    async fn retention_purge_does_not_cross_orgs() {
+        let pool = test_pool().await;
+
+        for (svc, org) in [("svc-acme", "acme"), ("svc-globex", "globex")] {
+            q!("INSERT INTO service (id, name, repo_url, owner_team, spec_format, org_id) VALUES (?, ?, ?, ?, ?, ?)")
+                .bind(svc)
+                .bind(svc)
+                .bind("https://example.test/repo")
+                .bind("team")
+                .bind("openapi")
+                .bind(org)
+                .execute(&pool)
+                .await
+                .unwrap();
+            q!("INSERT INTO consumer (id, name, repo_url, owner_team, contact, org_id) VALUES (?, ?, ?, ?, ?, ?)")
+                .bind(format!("con-{org}"))
+                .bind(format!("con-{org}"))
+                .bind("https://example.test/consumer")
+                .bind("team")
+                .bind("a@example.test")
+                .bind(org)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let old_ts = (Utc::now() - Duration::days(100)).to_rfc3339();
+            q!("INSERT INTO usage_event (id, consumer_id, service_id, operation, recorded_at) VALUES (?, ?, ?, ?, ?)")
+                .bind(Uuid::new_v4().to_string())
+                .bind(format!("con-{org}"))
+                .bind(svc)
+                .bind("GET /x")
+                .bind(&old_ts)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // Purge acme only — globex's event must survive.
+        let scope = RetentionScope::Org("acme");
+        let deleted = purge_old_usage_events_scoped(&pool, 30, &scope)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1, "exactly acme's event should be purged");
+
+        let remaining: i64 =
+            qs!("SELECT COUNT(*) FROM usage_event WHERE service_id = 'svc-globex'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            remaining, 1,
+            "another org's history must survive a tenant's retention window"
+        );
+
+        // The default pass covers every org EXCEPT the configured one.
+        let configured = vec!["acme".to_string()];
+        let rest = RetentionScope::UnconfiguredOrgs(&configured);
+        let deleted_rest = purge_old_usage_events_scoped(&pool, 30, &rest)
+            .await
+            .unwrap();
+        assert_eq!(deleted_rest, 1, "globex falls under the default window");
+    }
+
+    // O-4: RADAR_SERVICE_TOKEN mode is an advertised deployment mode; a correct
+    // bearer token must authorize CallerOrg endpoints (it 401'd them after the
+    // F-02 refactor — the first test for this mode).
+    #[tokio::test]
+    async fn service_token_mode_authorizes_caller_org_endpoints() {
+        let pool = test_pool().await;
+        let app = build_router_with_auth(
+            pool,
+            None,
+            4 * 1024 * 1024,
+            false,
+            None,
+            Some("sekret-token".into()),
+        );
+
+        let with_auth = |auth: Option<&str>| {
+            let mut b = HttpRequest::builder().method("GET").uri("/v1/services");
+            if let Some(a) = auth {
+                b = b.header("authorization", a);
+            }
+            b.body(Body::empty()).unwrap()
+        };
+
+        let resp = app
+            .clone()
+            .oneshot(with_auth(Some("Bearer sekret-token")))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a correct service token must authorize a CallerOrg endpoint"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(with_auth(Some("Bearer wrong-token")))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a wrong service token must be rejected"
+        );
+
+        let resp = app.clone().oneshot(with_auth(None)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a missing token must be rejected in service-token mode"
+        );
     }
 
     #[tokio::test]
@@ -917,7 +1123,10 @@ mod tests {
         .unwrap();
 
         // Purge rows older than 30 days — should delete the 100-day-old row.
-        let deleted = purge_old_usage_events(&pool, 30).await.unwrap();
+        let all_orgs = RetentionScope::UnconfiguredOrgs(&[]);
+        let deleted = purge_old_usage_events_scoped(&pool, 30, &all_orgs)
+            .await
+            .unwrap();
         assert!(
             deleted >= 1,
             "expected at least 1 deleted row, got {deleted}"
@@ -939,7 +1148,9 @@ mod tests {
         .unwrap();
 
         // Purge again — fresh event should NOT be deleted.
-        let deleted2 = purge_old_usage_events(&pool, 30).await.unwrap();
+        let deleted2 = purge_old_usage_events_scoped(&pool, 30, &all_orgs)
+            .await
+            .unwrap();
         assert_eq!(
             deleted2, 0,
             "fresh event should not be purged, but got {deleted2} deletions"
@@ -3509,6 +3720,79 @@ mod tests {
         assert_eq!(json["accepted"], 1);
     }
 
+    // N-9: a row the database rejected must not be reported as accepted.
+    // Both ingest paths used `let _ =` + an unconditional `accepted += 1`,
+    // so an unknown consumer_id was answered "accepted: 1" and dropped.
+    #[tokio::test]
+    async fn otlp_traces_unknown_consumer_is_rejected_not_counted() {
+        let pool = test_pool().await;
+        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None);
+        let body = serde_json::json!({
+            "resourceSpans": [{
+                "resource": { "attributes": [] },
+                "scopeSpans": [{
+                    "spans": [{
+                        "kind": 3,
+                        "attributes": [
+                            { "key": "http.method", "value": { "stringValue": "GET" } },
+                            { "key": "http.route",  "value": { "stringValue": "/users/{id}" } },
+                            { "key": "radar.consumer_id", "value": { "stringValue": "no-such-consumer" } },
+                            { "key": "radar.service_id",  "value": { "stringValue": "no-such-service" } }
+                        ]
+                    }]
+                }]
+            }]
+        });
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/v1/otlp/v1/traces")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_client_error(),
+            "an unknown consumer_id is the caller's error, got {}",
+            resp.status()
+        );
+
+        let stored: i64 = qs!("SELECT COUNT(*) FROM usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "nothing should have been stored");
+    }
+
+    #[tokio::test]
+    async fn gateway_logs_unknown_consumer_is_rejected_not_counted() {
+        let pool = test_pool().await;
+        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None);
+        let body = serde_json::json!([{
+            "consumer_id": "no-such-consumer",
+            "service_id": "no-such-service",
+            "method": "GET",
+            "path": "/users/{id}"
+        }]);
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/v1/gateway/logs")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_client_error(),
+            "an unknown consumer_id is the caller's error, got {}",
+            resp.status()
+        );
+
+        let stored: i64 = qs!("SELECT COUNT(*) FROM usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "nothing should have been stored");
+    }
+
     #[tokio::test]
     async fn otlp_traces_skips_server_spans() {
         let pool = test_pool().await;
@@ -3561,7 +3845,30 @@ mod tests {
     #[tokio::test]
     async fn gateway_logs_accepted() {
         let pool = test_pool().await;
-        let app = build_router(pool, None, 4 * 1024 * 1024, false, None);
+
+        // N-9: the referenced consumer and service must exist. This test used
+        // to post unknown ids and still assert "accepted: 2" — it was encoding
+        // the very dishonesty N-9 removes (the rows were never stored).
+        q!("INSERT INTO consumer (id, name, repo_url, owner_team, contact) VALUES (?, ?, ?, ?, ?)")
+            .bind("c1")
+            .bind("gateway-consumer")
+            .bind("")
+            .bind("")
+            .bind("")
+            .execute(&pool)
+            .await
+            .unwrap();
+        q!("INSERT INTO service (id, name, repo_url, owner_team, spec_format) VALUES (?, ?, ?, ?, ?)")
+            .bind("s1")
+            .bind("gateway-service")
+            .bind("")
+            .bind("")
+            .bind("openapi")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let app = build_router(pool.clone(), None, 4 * 1024 * 1024, false, None);
         let body = serde_json::json!([
             { "method": "POST", "path": "/payments", "consumer_id": "c1", "service_id": "s1", "status_code": 201 },
             { "method": "GET",  "path": "/users/99",  "consumer_id": "c1", "service_id": "s1" }
@@ -3577,6 +3884,12 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["accepted"], 2);
+
+        let stored: i64 = qs!("SELECT COUNT(*) FROM usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 2, "accepted must mean actually stored");
     }
 
     #[tokio::test]

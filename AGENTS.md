@@ -31,14 +31,17 @@ Always use terms from the Domain Glossary in `DEVELOPMENT_PLAN.md`. Never use sy
 ## Workspace structure
 
 ```
-radar-core/       Shared Rust types (ChangeKind, Severity, Consumer, Diff, …)
-radar-cli/        CLI binary (clap 4) + radar_cli_lib (pub: github, render, api_client, policy)
-radar-api/        axum HTTP service; run with --db sqlite:PATH or --db postgres://...
-radar-scanner/    tree-sitter code scanner + Postman Collection v2.1 parser
-radar-ui/         Vite 6 + React 19 web renderer (shared with desktop)
-radar-desktop/    Electron 33 shell (wraps radar-ui, spawns radar-api sidecar)
-fixtures/         Demo scenario fixtures for E-6 integration tests
-docs/             Runbook, enterprise plan, openapi.yaml
+radar-core/        Shared Rust types (ChangeKind, Severity, Consumer, Diff, …)
+radar-cli/         CLI binary (clap 4) + radar_cli_lib (pub: github, render, api_client, policy)
+radar-api/         axum HTTP service; run with --db sqlite:PATH or --db postgres://...
+radar-scanner/     tree-sitter code scanner + Postman Collection v2.1 parser
+radar-ui/          Vite 6 + React 19 web renderer (shared with desktop)
+radar-desktop/     Electron 33 shell (wraps radar-ui, spawns radar-api sidecar)
+radar-action/      Composite GitHub Action wrapping `radar check` (PR gate; inputs in action.yml)
+radar-sdk-node/    Node.js middleware SDK (@radar-monitor/sdk) — posts runtime usage Evidence
+radar-sdk-python/  Python ASGI middleware SDK (radar-monitor-sdk) — posts runtime usage Evidence
+fixtures/          Demo scenario fixtures for E-6 integration tests
+docs/              Runbook, enterprise plan, openapi.yaml
 ```
 
 ---

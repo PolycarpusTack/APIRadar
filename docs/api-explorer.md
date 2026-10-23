@@ -26,12 +26,12 @@ GET /scalar.js ─────────────────────�
        │  (fetched by the Playground iframe at load time)
        │
 PlaygroundPage (React)
-  └── <iframe sandbox="allow-scripts allow-forms allow-popups …">
+  └── <iframe sandbox="allow-scripts allow-forms">
         srcdoc = <html>…<script src="http://…/scalar.js">…</html>
 ```
 
 **Why a null-origin iframe?**  
-The Playground iframe is created with `srcdoc` and its `sandbox` attribute deliberately omits `allow-same-origin`. This produces a *null-origin* iframe whose requests are not subject to the parent page's Content Security Policy, letting it freely load the Scalar script from the local radar-api server.  Because the iframe has a null origin, the `src` attribute of the `<script>` tag must be an absolute URL — relative URLs do not work.
+The Playground iframe is created with `srcdoc` and its `sandbox` attribute deliberately omits `allow-same-origin`, producing a *null-origin* iframe that cannot reach the parent app's DOM, storage, or IPC bridge. Note that the srcdoc document still **inherits the parent page's Content-Security-Policy** (N-20), so the desktop and web CSPs explicitly allow the sources the iframe needs — the sidecar-served Scalar script and the demo/stored spec URLs (see `radar-desktop/src/renderer/index.html` and `buildCsp()` in `radar-ui/vite.config.ts`). Because the iframe has a null origin, the `src` attribute of the `<script>` tag must be an absolute URL — relative URLs do not work. The sandbox also grants no popup tokens (O-20): a malicious spec must not be able to open windows that the desktop shell would forward to the OS browser.
 
 **URL selection at runtime (see `PlaygroundPage.tsx`):**
 

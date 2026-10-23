@@ -7,58 +7,129 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 pub(crate) enum AiProvider {
-    Anthropic { api_key: String },
-    OpenAI { api_key: String, base_url: String },
-    GitHubCopilot { token: String },
+    /// O-19: the suite-mandated Unified AI Gateway (OpenAI-compatible;
+    /// X-API-Key auth; auto-routes when no model hint is given). Wins over
+    /// direct provider keys.
+    Gateway {
+        base_url: String,
+        api_key: Option<String>,
+        model: Option<String>,
+    },
+    Anthropic {
+        api_key: String,
+        model: String,
+    },
+    OpenAI {
+        api_key: String,
+        base_url: String,
+        model: String,
+    },
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
 pub(crate) fn detect_provider() -> Option<AiProvider> {
-    if let Ok(k) = std::env::var("ANTHROPIC_API_KEY") {
-        if !k.is_empty() {
-            return Some(AiProvider::Anthropic { api_key: k });
-        }
+    let model_override = env_nonempty("RADAR_AI_MODEL");
+    if let Some(url) = env_nonempty("RADAR_AI_GATEWAY_URL") {
+        return Some(AiProvider::Gateway {
+            base_url: url,
+            api_key: env_nonempty("RADAR_AI_GATEWAY_KEY"),
+            model: model_override,
+        });
     }
-    if let Ok(k) = std::env::var("OPENAI_API_KEY") {
-        if !k.is_empty() {
-            let base = std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".into());
-            return Some(AiProvider::OpenAI {
-                api_key: k,
-                base_url: base,
-            });
-        }
+    if let Some(k) = env_nonempty("ANTHROPIC_API_KEY") {
+        return Some(AiProvider::Anthropic {
+            api_key: k,
+            model: model_override.unwrap_or_else(|| "claude-sonnet-4-6".into()),
+        });
     }
-    if let Ok(t) = std::env::var("GITHUB_COPILOT_TOKEN") {
-        if !t.is_empty() {
-            return Some(AiProvider::GitHubCopilot { token: t });
-        }
+    if let Some(k) = env_nonempty("OPENAI_API_KEY") {
+        let base =
+            env_nonempty("OPENAI_BASE_URL").unwrap_or_else(|| "https://api.openai.com/v1".into());
+        return Some(AiProvider::OpenAI {
+            api_key: k,
+            base_url: base,
+            model: model_override.unwrap_or_else(|| "gpt-4o".into()),
+        });
     }
+    // The GitHub Copilot path was removed (O-19 ST0): it posted a raw token
+    // to an endpoint shape that never worked and failed silently.
     None
 }
 
 impl AiProvider {
     pub(crate) async fn complete(&self, prompt: &str, max_tokens: u32) -> Option<String> {
         match self {
-            Self::Anthropic { api_key } => ai_call_anthropic(api_key, prompt, max_tokens).await,
-            Self::OpenAI { api_key, base_url } => {
-                ai_call_openai_compat(api_key, base_url, prompt, max_tokens).await
-            }
-            Self::GitHubCopilot { token } => {
-                ai_call_openai_compat(
-                    token,
-                    "https://api.githubcopilot.com/v1",
+            Self::Gateway {
+                base_url,
+                api_key,
+                model,
+            } => {
+                ai_call_gateway(
+                    base_url,
+                    api_key.as_deref(),
+                    model.as_deref(),
                     prompt,
                     max_tokens,
                 )
                 .await
             }
+            Self::Anthropic { api_key, model } => {
+                ai_call_anthropic(api_key, model, prompt, max_tokens).await
+            }
+            Self::OpenAI {
+                api_key,
+                base_url,
+                model,
+            } => ai_call_openai_compat(api_key, base_url, model, prompt, max_tokens).await,
         }
     }
 }
 
-async fn ai_call_anthropic(api_key: &str, prompt: &str, max_tokens: u32) -> Option<String> {
+async fn ai_call_gateway(
+    base_url: &str,
+    api_key: Option<&str>,
+    model: Option<&str>,
+    prompt: &str,
+    max_tokens: u32,
+) -> Option<String> {
+    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+    let mut body = json!({
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}]
+    });
+    if let Some(m) = model {
+        body["model"] = json!(m);
+    }
+    let mut req = reqwest::Client::new()
+        .post(&url)
+        .header("content-type", "application/json");
+    if let Some(key) = api_key {
+        req = req.header("X-API-Key", key);
+    }
+    let resp = req.json(&body).send().await.ok()?;
+    if !resp.status().is_success() {
+        tracing::warn!("AI Gateway error {}: {}", url, resp.status());
+        return None;
+    }
+    let data: Value = resp.json().await.ok()?;
+    data["choices"]
+        .as_array()?
+        .first()
+        .and_then(|c| c["message"]["content"].as_str())
+        .map(str::to_owned)
+}
+
+async fn ai_call_anthropic(
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    max_tokens: u32,
+) -> Option<String> {
     let body = json!({
-        "model": "claude-sonnet-4-6",
+        "model": model,
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}]
     });
@@ -87,12 +158,13 @@ async fn ai_call_anthropic(api_key: &str, prompt: &str, max_tokens: u32) -> Opti
 async fn ai_call_openai_compat(
     api_key: &str,
     base_url: &str,
+    model: &str,
     prompt: &str,
     max_tokens: u32,
 ) -> Option<String> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let body = json!({
-        "model": "gpt-4o",
+        "model": model,
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}]
     });

@@ -4,18 +4,11 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
-mod ai_provider;
-mod api_client;
-mod apitesting;
-mod claude;
-mod explain;
-mod github;
-mod jira;
-mod policy;
-mod postman;
-mod register;
-mod render;
-mod test_gen;
+// O-22: consume the library target rather than re-declaring the modules,
+// so the shared code is compiled once and the bin and lib cannot diverge.
+use radar_cli_lib::{
+    api_client, explain, github, jira, policy, postman, register, render, scan, test_gen,
+};
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -52,6 +45,9 @@ enum RuleAction {
         /// Optional bearer token.
         #[arg(long, env = "RADAR_SERVICE_TOKEN")]
         token: Option<String>,
+        /// Emit machine-readable JSON output.
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Delete an evolution rule by ID.
     Delete {
@@ -108,17 +104,13 @@ struct Cli {
 enum Commands {
     /// Compare two spec versions and report breaking changes.
     Check {
-        /// Base git ref (commit / branch / tag) or spec file path.
+        /// Path to the base spec file (OpenAPI / GraphQL SDL / proto).
         #[arg(long)]
         base: String,
 
-        /// Head git ref (commit / branch / tag) or spec file path.
+        /// Path to the head spec file (OpenAPI / GraphQL SDL / proto).
         #[arg(long)]
         head: String,
-
-        /// Path to a spec file (overrides git-based resolution).
-        #[arg(long)]
-        spec: Option<String>,
 
         /// Spec format: openapi | graphql | protobuf.
         #[arg(long)]
@@ -185,7 +177,7 @@ enum Commands {
         contact: String,
 
         /// Optional bearer token for the radar-api server.
-        #[arg(long)]
+        #[arg(long, env = "RADAR_SERVICE_TOKEN")]
         token: Option<String>,
     },
 
@@ -216,6 +208,10 @@ enum Commands {
         /// Example: --operation-map "userId=GET /users" --operation-map "email=GET /users"
         #[arg(long, value_name = "FIELD=OP")]
         operation_map: Vec<String>,
+
+        /// Emit machine-readable JSON output.
+        #[arg(long, default_value_t = false)]
+        json: bool,
 
         /// Postman Collection v2.1 JSON files to scan for Consumer evidence.
         /// Can be repeated. These auto-register the consumer and post evidence to the API.
@@ -278,6 +274,10 @@ enum Commands {
         /// Optional bearer token.
         #[arg(long, env = "RADAR_SERVICE_TOKEN")]
         token: Option<String>,
+
+        /// Path to .radar.yml policy file (defaults to ./.radar.yml).
+        #[arg(long)]
+        policy: Option<PathBuf>,
     },
 
     /// Print shell completion script to stdout.
@@ -334,7 +334,6 @@ async fn main() -> Result<()> {
         Commands::Check {
             base,
             head,
-            spec: _spec,
             format,
             policy,
             post_comment,
@@ -388,9 +387,10 @@ async fn main() -> Result<()> {
 
             let use_color = !no_color && std::env::var("NO_COLOR").is_err();
 
-            if json {
-                render::print_json(&changes);
-            } else {
+            // O-22: in --json mode the single JSON object (changes + verdict +
+            // diff id + blast radius) is emitted at the end of the run, so
+            // stdout stays pure and machine-consumers see the decision.
+            if !json {
                 render::print_table(&changes, use_color);
             }
 
@@ -585,9 +585,17 @@ async fn main() -> Result<()> {
                             verdict_str,
                             fm_str,
                             &test_suites,
+                            // O-14: an InsufficientCoverage block collapses to
+                            // "block" on the wire; the comment must still explain
+                            // the real (no-Evidence) reason and name the
+                            // configured override label.
+                            decision.verdict == policy::Verdict::InsufficientCoverage,
+                            pol.allow_override_with.as_deref().unwrap_or("drift-ack"),
                         );
                         match github::post_or_update_comment(&ctx, &comment_body).await {
-                            Ok(url) => println!("PR comment posted: {url}"),
+                            // O-22: stdout must stay pure JSON under --json.
+                            Ok(url) if !json => println!("PR comment posted: {url}"),
+                            Ok(_) => {}
                             Err(e) => eprintln!("Warning: failed to post PR comment: {e}"),
                         }
                     }
@@ -631,6 +639,27 @@ async fn main() -> Result<()> {
                 }
             }
 
+            if json {
+                let fm_str = match &decision.fail_mode {
+                    policy::FailMode::Closed => "closed",
+                    policy::FailMode::Open => "open",
+                    policy::FailMode::Warn => "warn",
+                };
+                let out = serde_json::json!({
+                    "changes": changes,
+                    "breaking_count": changes
+                        .iter()
+                        .filter(|c| c.severity == radar_core::models::Severity::Breaking)
+                        .count(),
+                    "policy_verdict": decision.verdict.wire_str(),
+                    "fail_mode": fm_str,
+                    "exit_code": decision.exit_code,
+                    "diff_id": posted_diff_id,
+                    "blast_radius": blast_radius_data,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
+
             if decision.exit_code != 0 {
                 std::process::exit(decision.exit_code);
             }
@@ -666,10 +695,17 @@ async fn main() -> Result<()> {
                         println!("  pattern:  {p}");
                     }
                 }
-                RuleAction::List { api_url, token } => {
+                RuleAction::List {
+                    api_url,
+                    token,
+                    json,
+                } => {
                     let rules =
                         api_client::list_evolution_rules(&api_url, token.as_deref()).await?;
-                    if rules.is_empty() {
+                    if json {
+                        // O-22: suite convention — every CLI honours --json.
+                        println!("{}", serde_json::to_string_pretty(&rules)?);
+                    } else if rules.is_empty() {
                         println!("No evolution rules configured.");
                     } else {
                         println!(
@@ -715,7 +751,12 @@ async fn main() -> Result<()> {
                     token,
                 } => {
                     // Fetch the diff — evolution rules are already applied server-side.
-                    let client = reqwest::Client::new();
+                    // N-15: bound every request (see api_client).
+                    let client = reqwest::Client::builder()
+                        .connect_timeout(std::time::Duration::from_secs(10))
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .unwrap_or_default();
                     let mut req = client.get(format!("{api_url}/v1/diffs/{diff_id}"));
                     if let Some(ref t) = token {
                         req = req.bearer_auth(t);
@@ -755,6 +796,7 @@ async fn main() -> Result<()> {
             no_color,
             api_url,
             token,
+            policy: policy_path,
         } => {
             let content = std::fs::read_to_string(&csv)
                 .map_err(|e| anyhow::anyhow!("cannot read '{}': {e}", csv.display()))?;
@@ -766,6 +808,16 @@ async fn main() -> Result<()> {
                 );
             }
 
+            // O-13: batch rows go through the same policy engine as `check` —
+            // .radar.yml (block_on, fail_mode) decides the exit code, and each
+            // row's verdict is posted as a policy decision when an API is
+            // configured. Previously batch exited on raw breaking counts,
+            // failing CI that a `fail_mode: warn` policy would allow, with no
+            // audit row.
+            let config = policy::load_config(policy_path.as_deref())?;
+            let pol = config.policy();
+            let fail_mode = config.fail_mode();
+
             let use_color = !no_color && std::env::var("NO_COLOR").is_err();
 
             struct RowResult {
@@ -774,8 +826,22 @@ async fn main() -> Result<()> {
                 breaking: usize,
                 diff_id: Option<String>,
                 error: Option<String>,
+                decision: policy::PolicyDecision,
             }
             let mut row_results: Vec<RowResult> = Vec::new();
+
+            // Batch never fetches Blast Radius, so consumer coverage is
+            // honestly Unknown for every row (FIT-01 semantics apply).
+            let row_error_decision = || {
+                policy::decide(
+                    &[],
+                    &pol,
+                    &fail_mode,
+                    policy::ConsumerEvidence::Unknown,
+                    false,
+                    true, // evaluation error: fail-mode decides
+                )
+            };
 
             for row in &rows {
                 let base_content = match std::fs::read_to_string(&row.base) {
@@ -788,6 +854,7 @@ async fn main() -> Result<()> {
                             breaking: 0,
                             diff_id: None,
                             error: Some(format!("cannot read '{}': {e}", row.base)),
+                            decision: row_error_decision(),
                         });
                         continue;
                     }
@@ -802,6 +869,7 @@ async fn main() -> Result<()> {
                             breaking: 0,
                             diff_id: None,
                             error: Some(format!("cannot read '{}': {e}", row.head)),
+                            decision: row_error_decision(),
                         });
                         continue;
                     }
@@ -841,6 +909,7 @@ async fn main() -> Result<()> {
                             breaking: 0,
                             diff_id: None,
                             error: Some(e.to_string()),
+                            decision: row_error_decision(),
                         });
                         continue;
                     }
@@ -884,12 +953,44 @@ async fn main() -> Result<()> {
                     }
                 }
 
+                let decision = policy::decide(
+                    &changes,
+                    &pol,
+                    &fail_mode,
+                    policy::ConsumerEvidence::Unknown,
+                    false,
+                    false,
+                );
+
+                // CLAUDE.md rule: always post the policy decision after a check.
+                if let Some(ref url) = api_url {
+                    let fm_str = match &decision.fail_mode {
+                        policy::FailMode::Closed => "closed",
+                        policy::FailMode::Open => "open",
+                        policy::FailMode::Warn => "warn",
+                    };
+                    if let Err(e) = api_client::post_policy_decision(
+                        url,
+                        posted_diff_id.as_deref(),
+                        row.service_id.as_deref(),
+                        decision.verdict.wire_str(),
+                        fm_str,
+                        "radar-cli",
+                        token.as_deref(),
+                    )
+                    .await
+                    {
+                        eprintln!("  Warning: failed to post policy decision: {e}");
+                    }
+                }
+
                 row_results.push(RowResult {
                     label: row.label.clone(),
                     total: changes.len(),
                     breaking,
                     diff_id: posted_diff_id,
                     error: None,
+                    decision,
                 });
             }
 
@@ -903,6 +1004,7 @@ async fn main() -> Result<()> {
                             "breaking": r.breaking,
                             "diff_id":  r.diff_id,
                             "error":    r.error,
+                            "verdict":  r.decision.verdict.wire_str(),
                         })
                     })
                     .collect();
@@ -925,19 +1027,20 @@ async fn main() -> Result<()> {
                     } else {
                         "PASS"
                     };
+                    let verdict = r.decision.verdict.wire_str();
                     println!(
-                        "{:<42} {:>7} {:>10}  {}",
-                        r.label, r.total, r.breaking, status
+                        "{:<42} {:>7} {:>10}  {status} ({verdict})",
+                        r.label, r.total, r.breaking
                     );
                 }
                 println!("{sep}");
             }
 
-            let has_failures = row_results
-                .iter()
-                .any(|r| r.breaking > 0 || r.error.is_some());
-            if has_failures {
-                std::process::exit(1);
+            let decisions: Vec<policy::PolicyDecision> =
+                row_results.iter().map(|r| r.decision.clone()).collect();
+            let code = policy::batch_exit_code(&decisions);
+            if code != 0 {
+                std::process::exit(code);
             }
         }
 
@@ -1046,6 +1149,7 @@ async fn main() -> Result<()> {
             api_url,
             token,
             operation_map,
+            json,
             collection,
         } => {
             // Parse --operation-map "field=METHOD /path" pairs into a lookup table.
@@ -1062,126 +1166,17 @@ async fn main() -> Result<()> {
                 eprintln!("      Use --operation-map \"field=METHOD /path\" to tie fields to concrete API operations.");
             }
 
-            println!("Scanning {}…", source_dir.display());
-            let records = radar_scanner::scan_directory(&source_dir);
-            println!("Found {} property accesses.", records.len());
-
-            if records.is_empty() {
-                return Ok(());
-            }
-
-            let sites: Vec<api_client::CallSiteBody> = records
-                .into_iter()
-                .map(|r| {
-                    // S2: use scanner-detected operation; fall back to --operation-map for S1
-                    let operation = r
-                        .operation
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string())
-                        .or_else(|| op_map.get(&r.field_path).cloned())
-                        .unwrap_or_default();
-                    api_client::CallSiteBody {
-                        consumer_id: consumer_id.clone(),
-                        service_id: service_id.clone(),
-                        operation,
-                        file_path: r.file_path,
-                        line_number: r.line_number as i64,
-                        field_path: r.field_path,
-                    }
-                })
-                .collect();
-
-            // Post in chunks of 500 to stay within server limit.
-            let mut total = 0usize;
-            for chunk in sites.chunks(500) {
-                match api_client::post_call_sites(&api_url, chunk, token.as_deref()).await {
-                    Ok(n) => total += n,
-                    Err(e) => eprintln!("Warning: failed to post call sites: {e}"),
-                }
-            }
-            println!("Posted {total} call site record(s) to {api_url}.");
-
-            // E-7: scan collection files and write impact_evidence directly.
-            if !collection.is_empty() {
-                println!("Scanning {} collection file(s)…", collection.len());
-                for col_path in &collection {
-                    match radar_scanner::parse_collection(col_path) {
-                        Err(e) => eprintln!("Warning: skipping {}: {e}", col_path.display()),
-                        Ok((col_name, requests)) => {
-                            // Auto-register consumer by collection name
-                            let resolved_consumer_id = match api_client::upsert_consumer_by_name(
-                                &api_url,
-                                &col_name,
-                                "collection_file",
-                                token.as_deref(),
-                            )
-                            .await
-                            {
-                                Ok((id, created)) => {
-                                    if created {
-                                        println!("  Registered consumer '{col_name}' ({id})");
-                                    }
-                                    id
-                                }
-                                Err(e) => {
-                                    eprintln!("Warning: could not register consumer '{col_name}': {e}; using --consumer-id");
-                                    consumer_id.clone()
-                                }
-                            };
-
-                            // Build evidence items — one per (request × field_path), or one
-                            // with empty field_path when the request has no test assertions.
-                            let mut evidence: Vec<api_client::CollectionEvidenceBody> = Vec::new();
-                            let file_base = col_path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("<collection>");
-                            for req in &requests {
-                                let op = req.operation.as_deref().unwrap_or("").to_string();
-                                if req.field_paths.is_empty() {
-                                    evidence.push(api_client::CollectionEvidenceBody {
-                                        consumer_id: resolved_consumer_id.clone(),
-                                        service_id: service_id.clone(),
-                                        operation: op,
-                                        field_path: String::new(),
-                                        evidence_uri: format!("file://{file_base}#{}", req.name),
-                                    });
-                                } else {
-                                    for fp in &req.field_paths {
-                                        evidence.push(api_client::CollectionEvidenceBody {
-                                            consumer_id: resolved_consumer_id.clone(),
-                                            service_id: service_id.clone(),
-                                            operation: op.clone(),
-                                            field_path: fp.clone(),
-                                            evidence_uri: format!(
-                                                "file://{file_base}#{}",
-                                                req.name
-                                            ),
-                                        });
-                                    }
-                                }
-                            }
-
-                            match api_client::post_collection_evidence(
-                                &api_url,
-                                &evidence,
-                                token.as_deref(),
-                            )
-                            .await
-                            {
-                                Ok((accepted, inserted)) => println!(
-                                    "  {}: {accepted} request(s), {inserted} new evidence row(s)",
-                                    col_path.display()
-                                ),
-                                Err(e) => {
-                                    eprintln!("Warning: failed to post collection evidence: {e}")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            scan::run_scan(
+                &api_url,
+                &consumer_id,
+                &service_id,
+                &source_dir,
+                token.as_deref(),
+                &op_map,
+                &collection,
+                json,
+            )
+            .await?;
         }
         Commands::Explain {
             diff_id,
@@ -1287,8 +1282,14 @@ fn split_csv_line(line: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    for ch in line.chars() {
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
         match ch {
+            // RFC 4180: a doubled quote inside a quoted field is a literal quote.
+            '"' if in_quotes && chars.peek() == Some(&'"') => {
+                chars.next();
+                current.push('"');
+            }
             '"' => in_quotes = !in_quotes,
             ',' if !in_quotes => {
                 result.push(current.trim().to_owned());
@@ -1299,4 +1300,27 @@ fn split_csv_line(line: &str) -> Vec<String> {
     }
     result.push(current.trim().to_owned());
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_csv_line;
+
+    // O-13: escaped quotes per RFC 4180 — previously `""` toggled the quote
+    // state twice and the literal quote was lost.
+    #[test]
+    fn split_csv_line_handles_escaped_quotes() {
+        assert_eq!(
+            split_csv_line(r#""a""b",c"#),
+            vec![r#"a"b"#.to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_csv_line_quoted_comma_stays_one_field() {
+        assert_eq!(
+            split_csv_line(r#""specs/base, v1.yaml",head.yaml"#),
+            vec!["specs/base, v1.yaml".to_string(), "head.yaml".to_string()]
+        );
+    }
 }

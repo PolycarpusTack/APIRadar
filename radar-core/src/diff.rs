@@ -157,12 +157,6 @@ fn normalize_op_key(method_path: &str) -> String {
     out
 }
 
-/// True when a schema `prefix` refers to a request body (where required/optional
-/// semantics are the mirror image of a response).
-fn is_request_context(prefix: &str) -> bool {
-    prefix == "request_body" || prefix.starts_with("request_body.")
-}
-
 // ---------------------------------------------------------------------------
 // Internal helpers — operation collection
 // ---------------------------------------------------------------------------
@@ -563,6 +557,7 @@ fn diff_request_body(
                     diff_schema_properties(
                         op_path,
                         "request_body",
+                        true,
                         base_schema,
                         head_schema,
                         base_spec,
@@ -702,6 +697,7 @@ fn diff_responses(
                 diff_schema_properties(
                     op_path,
                     "response",
+                    false,
                     base_schema,
                     head_schema,
                     base_spec,
@@ -759,11 +755,15 @@ fn status_code_str(status: &StatusCode) -> String {
 
 /// Recursively compare the properties of two object schemas.
 /// `prefix` is the dot-separated label used after the arrow in DiffChange.path,
-/// e.g. "response" or "response.user".
+/// e.g. "response" or "response.user". `is_request` says whether this schema
+/// sits in a request body — where required/optional semantics are the mirror
+/// image of a response. It is threaded explicitly (O-2): the old prefix
+/// string-sniffing broke inside composed variants ("request_body[0]").
 #[allow(clippy::too_many_arguments)] // recursive schema walker; args are inherent
 fn diff_schema_properties(
     op_path: &str,
     prefix: &str,
+    is_request: bool,
     base_schema: &Schema,
     head_schema: &Schema,
     base_spec: &OpenAPI,
@@ -788,10 +788,12 @@ fn diff_schema_properties(
         changes.push(DiffChange {
             path: format!("{} \u{2192} {}", op_path, prefix),
             kind: ChangeKind::NullabilityChanged,
-            severity: if base_nullable && !head_nullable {
-                Severity::Breaking // nullable → non-nullable breaks consumers that send null
+            severity: if (is_request && base_nullable) || (!is_request && head_nullable) {
+                // Requests must still accept old values; responses must not
+                // introduce null where Consumers previously relied on a value.
+                Severity::Breaking
             } else {
-                Severity::Safe // non-nullable → nullable is more permissive
+                Severity::Safe
             },
             description: Some(format!(
                 "'{}' changed from {} to {}",
@@ -812,6 +814,11 @@ fn diff_schema_properties(
 
     // Enum value changes — applies to string/integer schemas
     diff_enum_values(op_path, prefix, base_schema, head_schema, changes);
+
+    // Constraints belong to the schema itself, not only named properties.
+    // Running this at each recursive node also covers root scalars and array
+    // items. The property walker must not compare these a second time.
+    diff_scalar_constraints(op_path, prefix, base_schema, head_schema, changes);
 
     // N-5: composed schemas (allOf / oneOf / anyOf). These previously fell through
     // to the `_ => return` arm below and were entirely undiffed.
@@ -836,6 +843,7 @@ fn diff_schema_properties(
             diff_object_types(
                 op_path,
                 prefix,
+                is_request,
                 &base_merged,
                 &head_merged,
                 base_spec,
@@ -850,12 +858,37 @@ fn diff_schema_properties(
         (SchemaKind::OneOf { one_of: bv }, SchemaKind::OneOf { one_of: hv })
         | (SchemaKind::AnyOf { any_of: bv }, SchemaKind::AnyOf { any_of: hv }) => {
             diff_composed_variants(
-                op_path, prefix, bv, hv, base_spec, head_spec, changes, visited,
+                op_path, prefix, is_request, bv, hv, base_spec, head_spec, changes, visited,
             );
             visited.remove(&self_ptr);
             return;
         }
         _ => {}
+    }
+
+    // O-1: the schemas' top-level kinds differ (array → object, object → string,
+    // object → oneOf, oneOf → anyOf, …). Every such pair previously fell through
+    // to the `_ => return` arm below and produced no change at all — the silent
+    // miss on e.g. "bare array response becomes a paginated object". allOf pairs
+    // never reach this point (flattened and returned above); matched oneOf/anyOf
+    // pairs likewise. An untyped side (`SchemaKind::Any`) makes no kind claim, so
+    // nothing is compared.
+    if let (Some(base_label), Some(head_label)) = (
+        schema_kind_label(&base_schema.schema_kind),
+        schema_kind_label(&head_schema.schema_kind),
+    ) {
+        if base_label != head_label {
+            changes.push(DiffChange {
+                path: format!("{op_path} \u{2192} {prefix}"),
+                kind: ChangeKind::TypeChanged,
+                severity: Severity::Breaking,
+                description: Some(format!(
+                    "'{prefix}' type changed from '{base_label}' to '{head_label}'"
+                )),
+            });
+            visited.remove(&self_ptr);
+            return;
+        }
     }
 
     let (base_obj, head_obj) = match (&base_schema.schema_kind, &head_schema.schema_kind) {
@@ -870,7 +903,7 @@ fn diff_schema_properties(
                     resolve_boxed_schema(head_spec, hi),
                 ) {
                     diff_schema_properties(
-                        op_path, prefix, bs, hs, base_spec, head_spec, changes, visited,
+                        op_path, prefix, is_request, bs, hs, base_spec, head_spec, changes, visited,
                     );
                 }
             }
@@ -884,7 +917,7 @@ fn diff_schema_properties(
     };
 
     diff_object_types(
-        op_path, prefix, base_obj, head_obj, base_spec, head_spec, changes, visited,
+        op_path, prefix, is_request, base_obj, head_obj, base_spec, head_spec, changes, visited,
     );
 
     visited.remove(&self_ptr);
@@ -934,6 +967,7 @@ fn merge_all_of(
 fn diff_composed_variants(
     op_path: &str,
     prefix: &str,
+    is_request: bool,
     base_variants: &[ReferenceOr<Schema>],
     head_variants: &[ReferenceOr<Schema>],
     base_spec: &OpenAPI,
@@ -951,6 +985,7 @@ fn diff_composed_variants(
             diff_schema_properties(
                 op_path,
                 &variant_prefix,
+                is_request,
                 bs,
                 hs,
                 base_spec,
@@ -986,6 +1021,7 @@ fn diff_composed_variants(
 fn diff_object_types(
     op_path: &str,
     prefix: &str,
+    is_request: bool,
     base_obj: &ObjectType,
     head_obj: &ObjectType,
     base_spec: &OpenAPI,
@@ -993,7 +1029,7 @@ fn diff_object_types(
     changes: &mut Vec<DiffChange>,
     visited: &mut std::collections::HashSet<*const Schema>,
 ) {
-    let field_noun = if is_request_context(prefix) {
+    let field_noun = if is_request {
         "Request property"
     } else {
         "Response property"
@@ -1011,13 +1047,18 @@ fn diff_object_types(
         }
     }
 
-    // Properties added → FieldAdded (Safe)
+    // A new required request property rejects requests that previously omitted
+    // it. Optional request additions and response additions remain safe.
     for (prop_name, _) in &head_obj.properties {
         if !base_obj.properties.contains_key(prop_name) {
             changes.push(DiffChange {
                 path: format!("{} \u{2192} {}.{}", op_path, prefix, prop_name),
                 kind: ChangeKind::FieldAdded,
-                severity: Severity::Safe,
+                severity: if is_request && head_obj.required.contains(prop_name) {
+                    Severity::Breaking
+                } else {
+                    Severity::Safe
+                },
                 description: Some(format!("{} '{}' was added", field_noun, prop_name)),
             });
         }
@@ -1079,9 +1120,8 @@ fn diff_object_types(
             },
         };
 
-        let prop_label = format!("{}.{}", prefix, prop_name);
-
         // Type changed? → Breaking TypeChanged
+        let mut type_change_reported = false;
         if let (Some(base_type), Some(head_type)) = (
             type_label_from_kind(&base_prop_schema.schema_kind),
             type_label_from_kind(&head_prop_schema.schema_kind),
@@ -1096,17 +1136,9 @@ fn diff_object_types(
                         prop_name, base_type, head_type
                     )),
                 });
+                type_change_reported = true;
             }
         }
-
-        // N-8: format / numeric / string constraint drift.
-        diff_scalar_constraints(
-            op_path,
-            &prop_label,
-            base_prop_schema,
-            head_prop_schema,
-            changes,
-        );
 
         // Required status changed? Severity is direction-aware: in a REQUEST body,
         // making a field required breaks clients that omit it (Breaking) and
@@ -1114,7 +1146,7 @@ fn diff_object_types(
         // dropping the guarantee (required→optional) is risky for consumers.
         let base_required = base_obj.required.contains(prop_name);
         let head_required = head_obj.required.contains(prop_name);
-        let request_ctx = is_request_context(prefix);
+        let request_ctx = is_request;
 
         if !base_required && head_required {
             // optional → required
@@ -1158,11 +1190,17 @@ fn diff_object_types(
             });
         }
 
-        // Recurse into nested objects
+        // Recurse into nested objects — unless this property's kind change was
+        // already reported above: the O-1 root-kind check inside the recursion
+        // would re-report the same change at the same path.
+        if type_change_reported {
+            continue;
+        }
         let nested_prefix = format!("{}.{}", prefix, prop_name);
         diff_schema_properties(
             op_path,
             &nested_prefix,
+            is_request,
             base_prop_schema,
             head_prop_schema,
             base_spec,
@@ -1230,6 +1268,25 @@ fn extract_enum_values(schema: &Schema) -> Vec<String> {
 /// Return a short string describing the primitive type of a schema kind.
 /// For arrays, includes the item type: "array<string>", "array<integer>", etc.
 /// Returns `None` for complex/compound kinds.
+/// A comparable label for a schema's top-level kind, including composed kinds —
+/// unlike `type_label_from_kind`, which only labels concrete `Type` kinds.
+/// `SchemaKind::Any` (untyped) yields `None`: it makes no kind claim to compare.
+fn schema_kind_label(kind: &SchemaKind) -> Option<String> {
+    match kind {
+        // Arrays are labelled without their item type: a `$ref` item labels as
+        // "any" in `type_label_from_kind`, which would falsely differ from an
+        // inline item. Item-kind changes are caught by the recursion into the
+        // item schemas, where this comparison runs again on the resolved kinds.
+        SchemaKind::Type(Type::Array(_)) => Some("array".to_string()),
+        SchemaKind::Type(_) => type_label_from_kind(kind),
+        SchemaKind::OneOf { .. } => Some("oneOf".to_string()),
+        SchemaKind::AnyOf { .. } => Some("anyOf".to_string()),
+        SchemaKind::AllOf { .. } => Some("allOf".to_string()),
+        SchemaKind::Not { .. } => Some("not".to_string()),
+        SchemaKind::Any(_) => None,
+    }
+}
+
 fn type_label_from_kind(kind: &SchemaKind) -> Option<String> {
     match kind {
         SchemaKind::Type(t) => Some(match t {
@@ -2292,10 +2349,10 @@ paths:
     }
 
     // -----------------------------------------------------------------------
-    // 17. Nullable true→false → Breaking NullabilityChanged
+    // 17. Response nullable true→false → Safe NullabilityChanged
     // -----------------------------------------------------------------------
     #[test]
-    fn test_nullable_removed_is_breaking() {
+    fn test_response_nullable_removed_is_safe() {
         let base_yaml = r#"
 openapi: "3.0.0"
 info:
@@ -2334,6 +2391,66 @@ paths:
                 properties:
                   nickname:
                     type: string
+"#;
+        let base = parse(base_yaml);
+        let head = parse(head_yaml);
+        let changes = diff_openapi(&base, &head);
+        let changed: Vec<_> = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::NullabilityChanged && c.severity == Severity::Safe)
+            .collect();
+        assert_eq!(
+            changed.len(),
+            1,
+            "Expected 1 NullabilityChanged/Safe, got: {:?}",
+            changes
+        );
+        assert!(changed[0].path.contains("nickname"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 18. Response nullable false→true → Breaking NullabilityChanged
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_response_nullable_added_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nickname:
+                    type: string
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nickname:
+                    type: string
+                    nullable: true
 "#;
         let base = parse(base_yaml);
         let head = parse(head_yaml);
@@ -2348,66 +2465,6 @@ paths:
             changed.len(),
             1,
             "Expected 1 NullabilityChanged/Breaking, got: {:?}",
-            changes
-        );
-        assert!(changed[0].path.contains("nickname"));
-    }
-
-    // -----------------------------------------------------------------------
-    // 18. Nullable false→true → Safe NullabilityChanged
-    // -----------------------------------------------------------------------
-    #[test]
-    fn test_nullable_added_is_safe() {
-        let base_yaml = r#"
-openapi: "3.0.0"
-info:
-  title: Test
-  version: "1"
-paths:
-  /users:
-    get:
-      responses:
-        '200':
-          description: ok
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  nickname:
-                    type: string
-"#;
-        let head_yaml = r#"
-openapi: "3.0.0"
-info:
-  title: Test
-  version: "1"
-paths:
-  /users:
-    get:
-      responses:
-        '200':
-          description: ok
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  nickname:
-                    type: string
-                    nullable: true
-"#;
-        let base = parse(base_yaml);
-        let head = parse(head_yaml);
-        let changes = diff_openapi(&base, &head);
-        let changed: Vec<_> = changes
-            .iter()
-            .filter(|c| c.kind == ChangeKind::NullabilityChanged && c.severity == Severity::Safe)
-            .collect();
-        assert_eq!(
-            changed.len(),
-            1,
-            "Expected 1 NullabilityChanged/Safe, got: {:?}",
             changes
         );
         assert!(changed[0].path.contains("nickname"));
@@ -3416,6 +3473,310 @@ paths:
                 .any(|c| c.kind == ChangeKind::ResponseRemoved),
             "'200' vs '2XX' must not be a ResponseRemoved, got: {:?}",
             changes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // O-1: a schema whose top-level kind changes must diff as Breaking
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_response_array_to_object_is_breaking() {
+        // The most common breaking list-endpoint change: bare array → paginated object.
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                  total: { type: integer }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        assert!(
+            changes.iter().any(|c| c.kind == ChangeKind::TypeChanged
+                && c.severity == Severity::Breaking
+                && c.path == "GET /users \u{2192} response"),
+            "array → object at the response root must be a Breaking TypeChanged, got: {:?}",
+            changes
+        );
+    }
+
+    #[test]
+    fn test_response_object_to_string_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /status:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { type: string }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /status:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: string
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking),
+            "object → string at the response root must be a Breaking TypeChanged, got: {:?}",
+            changes
+        );
+    }
+
+    #[test]
+    fn test_response_object_to_oneof_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /payment:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  amount: { type: number }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /payment:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      amount: { type: number }
+                  - type: object
+                    properties:
+                      error: { type: string }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking),
+            "object → oneOf wrapper at the response root must be a Breaking TypeChanged, got: {:?}",
+            changes
+        );
+    }
+
+    #[test]
+    fn test_oneof_to_anyof_is_breaking() {
+        let base_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /search:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      hit: { type: string }
+"#;
+        let head_yaml = r#"
+openapi: "3.0.0"
+info: { title: Test, version: "1" }
+paths:
+  /search:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - type: object
+                    properties:
+                      hit: { type: string }
+"#;
+        let changes = diff_openapi(&parse(base_yaml), &parse(head_yaml));
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.kind == ChangeKind::TypeChanged && c.severity == Severity::Breaking),
+            "oneOf → anyOf at the schema root must be a Breaking TypeChanged, got: {:?}",
+            changes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // O-3: realistic-spec self-diff corpus — identical specs yield zero changes
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_realistic_openapi_self_diff_zero_changes() {
+        let corpus = include_str!("../../fixtures/self-diff-corpus/realistic.yaml");
+        let demo = include_str!("../../fixtures/demo-payments-api/v1.yaml");
+        for (name, yaml) in [("realistic.yaml", corpus), ("demo v1.yaml", demo)] {
+            let spec = parse(yaml);
+            let changes = diff_openapi(&spec, &spec);
+            assert!(
+                changes.is_empty(),
+                "{name} self-diff must be empty, got: {changes:?}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // O-2: request/response context must survive composed (oneOf/anyOf) variants
+    // -----------------------------------------------------------------------
+    fn oneof_body_spec(location: &str, required: bool) -> String {
+        // `location` is "requestBody:\n        content" or a response body; built
+        // by the two tests below to keep the variant schema identical.
+        // The two bodies nest at different depths, so the `required:` line
+        // (sibling of `properties:`) needs a per-branch indent.
+        let required_line = if required {
+            if location == "request" {
+                "\n                  required: [name]"
+            } else {
+                "\n                    required: [name]"
+            }
+        } else {
+            ""
+        };
+        match location {
+            "request" => format!(
+                r#"
+openapi: "3.0.0"
+info: {{ title: Test, version: "1" }}
+paths:
+  /orders:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  properties:
+                    name: {{ type: string }}{required_line}
+      responses:
+        '200': {{ description: ok }}
+"#
+            ),
+            _ => format!(
+                r#"
+openapi: "3.0.0"
+info: {{ title: Test, version: "1" }}
+paths:
+  /orders:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      name: {{ type: string }}{required_line}
+"#
+            ),
+        }
+    }
+
+    #[test]
+    fn test_request_oneof_variant_optional_to_required_is_breaking() {
+        let base = parse(&oneof_body_spec("request", false));
+        let head = parse(&oneof_body_spec("request", true));
+        let changes = diff_openapi(&base, &head);
+        let c = changes
+            .iter()
+            .find(|c| c.kind == ChangeKind::RequiredChanged)
+            .unwrap_or_else(|| panic!("expected a RequiredChanged, got: {changes:?}"));
+        assert_eq!(
+            c.severity,
+            Severity::Breaking,
+            "optional → required inside a request oneOf variant breaks callers, got: {c:?}"
+        );
+        assert!(
+            c.description.as_deref().unwrap_or("").contains("Request"),
+            "description must use request wording, got: {c:?}"
+        );
+    }
+
+    #[test]
+    fn test_response_oneof_variant_optional_to_required_is_safe() {
+        let base = parse(&oneof_body_spec("response", false));
+        let head = parse(&oneof_body_spec("response", true));
+        let changes = diff_openapi(&base, &head);
+        let c = changes
+            .iter()
+            .find(|c| c.kind == ChangeKind::RequiredChanged)
+            .unwrap_or_else(|| panic!("expected a RequiredChanged, got: {changes:?}"));
+        assert_eq!(
+            c.severity,
+            Severity::Safe,
+            "optional → required inside a response oneOf variant is a stronger guarantee, got: {c:?}"
         );
     }
 }

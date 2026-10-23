@@ -140,6 +140,10 @@ pub(crate) async fn list_audit_events(
     let org_id = caller.sql_scope().to_string();
     let org_id = org_id.as_str();
 
+    // N-13: clamp. A negative LIMIT dumps the whole table on SQLite and is a
+    // hard error on PostgreSQL; an unbounded one is a denial-of-service.
+    let (limit, offset) = crate::utils::clamp_pagination(Some(q.limit), Some(q.offset));
+
     let base = "SELECT id, org_id, actor, action, entity_type, entity_id, meta, created_at \
                 FROM audit_event WHERE org_id = ?";
 
@@ -149,8 +153,8 @@ pub(crate) async fn list_audit_events(
         ))
         .bind(org_id)
         .bind(format!("%{action_filter}%"))
-        .bind(q.limit)
-        .bind(q.offset)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&pool)
         .await
     } else if let Some(et) = &q.entity_type {
@@ -159,15 +163,15 @@ pub(crate) async fn list_audit_events(
         ))
         .bind(org_id)
         .bind(et)
-        .bind(q.limit)
-        .bind(q.offset)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&pool)
         .await
     } else {
         qa!(&format!("{base} ORDER BY created_at DESC LIMIT ? OFFSET ?"))
             .bind(org_id)
-            .bind(q.limit)
-            .bind(q.offset)
+            .bind(limit)
+            .bind(offset)
             .fetch_all(&pool)
             .await
     }

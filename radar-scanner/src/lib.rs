@@ -387,7 +387,14 @@ fn detect_http_op(node: &tree_sitter::Node<'_>, lang: &Lang, source: &[u8]) -> O
     } else if func.kind() == "identifier" {
         let name = func.utf8_text(source).ok()?;
         match name.to_lowercase().as_str() {
-            "fetch" | "axios" => "GET",
+            // O-6: the real verb comes from the options object's `method:`.
+            // Previously this arm hard-coded GET, so `fetch("/orders",
+            // { method: "POST" })` recorded Evidence on a phantom GET /orders.
+            "fetch" | "axios" => match options_object_method(node, source) {
+                OptionsMethod::Absent => "GET", // both clients default to GET
+                OptionsMethod::Literal(m) => m,
+                OptionsMethod::Unresolvable => return None, // don't guess
+            },
             _ => return None,
         }
     } else {
@@ -396,6 +403,55 @@ fn detect_http_op(node: &tree_sitter::Node<'_>, lang: &Lang, source: &[u8]) -> O
     let url = extract_string_literal_arg(node, lang, source)?;
     let path = normalize_http_path(&url)?;
     Some(format!("{method} {path}"))
+}
+
+/// The `method:` option found in a bare `fetch`/`axios` call's options object.
+enum OptionsMethod {
+    /// No options object, or no `method` key — the client defaults to GET.
+    Absent,
+    /// A string-literal method mapping to a known HTTP verb.
+    Literal(&'static str),
+    /// A `method:` is present but is not a resolvable string literal — the
+    /// verb cannot be known statically, so no operation should be recorded.
+    Unresolvable,
+}
+
+/// Find a literal `method:` value in any object-literal argument of a call.
+fn options_object_method(node: &tree_sitter::Node<'_>, source: &[u8]) -> OptionsMethod {
+    let Some(args) = node.child_by_field_name("arguments") else {
+        return OptionsMethod::Absent;
+    };
+    let mut cursor = args.walk();
+    for child in args.children(&mut cursor) {
+        if child.kind() != "object" {
+            continue;
+        }
+        let mut entries = child.walk();
+        for entry in child.children(&mut entries) {
+            if entry.kind() != "pair" {
+                continue;
+            }
+            let Some(key) = entry.child_by_field_name("key") else {
+                continue;
+            };
+            let key_text = key.utf8_text(source).unwrap_or("");
+            if clean_string_literal(key_text) != "method" {
+                continue;
+            }
+            let Some(value) = entry.child_by_field_name("value") else {
+                return OptionsMethod::Unresolvable;
+            };
+            if matches!(value.kind(), "string" | "template_string") {
+                let cleaned = clean_string_literal(value.utf8_text(source).unwrap_or(""));
+                // A template string with substitutions won't map to a verb.
+                if let Some(m) = http_method_from(cleaned.trim()) {
+                    return OptionsMethod::Literal(m);
+                }
+            }
+            return OptionsMethod::Unresolvable;
+        }
+    }
+    OptionsMethod::Absent
 }
 
 /// Known bare-name HTTP client receivers (case-insensitive).
@@ -551,10 +607,11 @@ fn first_identifier_text(node: &tree_sitter::Node<'_>, source: &[u8]) -> Option<
     None
 }
 
-/// Walk up from a call node to find the variable its result is assigned to, e.g.
-/// `const response = await api.get(id)` → `Some("response")`. Returns None when
-/// the call result is not bound to a simple variable in the same scope.
-fn assigned_variable(call: &tree_sitter::Node<'_>, lang: &Lang, source: &[u8]) -> Option<String> {
+/// Walk up from a call node to the left-hand side its result is bound to, e.g.
+/// `const response = await api.get(id)` → the `response` node, and
+/// `const { phone } = await api.get(id)` → the object-pattern node. Returns
+/// None when the call result is not bound in the same scope.
+fn binding_target<'a>(call: &tree_sitter::Node<'a>, lang: &Lang) -> Option<tree_sitter::Node<'a>> {
     let mut cur = *call;
     // Bounded walk over the handful of wrapper nodes between a call and its binding
     // (await_expression, expression_list, …).
@@ -565,14 +622,72 @@ fn assigned_variable(call: &tree_sitter::Node<'_>, lang: &Lang, source: &[u8]) -
         }
         for (kind, field) in lang.assignment_kinds() {
             if parent.kind() == *kind {
-                if let Some(lhs) = parent.child_by_field_name(field) {
-                    return first_identifier_text(&lhs, source);
-                }
+                return parent.child_by_field_name(field);
             }
         }
         cur = parent;
     }
     None
+}
+
+/// O-7: a destructured binding (`const { phone, email } = await call`) consumes
+/// the named API fields directly — previously the operation was mapped to the
+/// first destructured identifier (never accessed as a member), so the dominant
+/// modern style produced no field Evidence at all. Emits one record per
+/// pattern key; a renamed entry (`{ phone: p }`) records the API-side key
+/// `phone`. Deeper flows (nested patterns' inner fields, rest elements) are
+/// deliberately out of scope.
+fn emit_destructured_fields(
+    pattern: &tree_sitter::Node<'_>,
+    source: &[u8],
+    op: &str,
+    out: &mut Vec<CallSiteRecord>,
+) {
+    let mut cursor = pattern.walk();
+    for child in pattern.children(&mut cursor) {
+        let name_node = match child.kind() {
+            // `{ phone }`
+            "shorthand_property_identifier_pattern" => Some(child),
+            // `{ phone: p }` — the key is the API field
+            "pair_pattern" => child.child_by_field_name("key"),
+            // `{ phone = "fallback" }`
+            "object_assignment_pattern" => child.child_by_field_name("left"),
+            _ => None,
+        };
+        if let Some(n) = name_node {
+            if let Ok(name) = n.utf8_text(source) {
+                let cleaned = name.trim_matches(|c| c == '"' || c == '\'');
+                if !cleaned.is_empty() {
+                    out.push(CallSiteRecord {
+                        file_path: String::new(),
+                        line_number: n.start_position().row + 1,
+                        field_path: cleaned.to_string(),
+                        operation: Some(op.to_string()),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// O-7: resolve a derived variable through the scope chain, so a field access
+/// inside a nested callback (`orders.forEach(o => use(user.phone))`) still
+/// sees variables bound in an enclosing function. An inner rebinding from a
+/// non-API value is not tracked, so the nearest tracked binding wins.
+fn lookup_derived<'a>(
+    node: tree_sitter::Node<'_>,
+    lang: &Lang,
+    root: &str,
+    derived: &'a std::collections::HashMap<(usize, String), String>,
+) -> Option<&'a String> {
+    let mut scope = enclosing_scope(node, lang);
+    loop {
+        if let Some(op) = derived.get(&(scope.id(), root.to_string())) {
+            return Some(op);
+        }
+        let parent = scope.parent()?;
+        scope = enclosing_scope(parent, lang);
+    }
 }
 
 /// Resolve the leftmost (root) identifier of a member/attribute/selector chain,
@@ -621,11 +736,16 @@ fn collect_ops(
             None
         };
         if let Some(op) = op {
-            if let Some(var) = assigned_variable(node, lang, source) {
-                let scope_id = enclosing_scope(*node, lang).id();
-                // Later assignments to the same variable legitimately override
-                // earlier ones; distinct variables never collide.
-                derived.insert((scope_id, var), op);
+            if let Some(lhs) = binding_target(node, lang) {
+                if lhs.kind() == "object_pattern" {
+                    // O-7: destructured keys are the consumed API fields.
+                    emit_destructured_fields(&lhs, source, &op, http_records);
+                } else if let Some(var) = first_identifier_text(&lhs, source) {
+                    let scope_id = enclosing_scope(*node, lang).id();
+                    // Later assignments to the same variable legitimately
+                    // override earlier ones; distinct variables never collide.
+                    derived.insert((scope_id, var), op);
+                }
             }
         }
     }
@@ -650,8 +770,9 @@ fn collect_derived_fields(
 ) {
     if node.kind() == lang.member_kind() {
         if let Some(root) = member_root_identifier(node, lang, source) {
-            let scope_id = enclosing_scope(*node, lang).id();
-            if let Some(op) = derived.get(&(scope_id, root)) {
+            // O-7: walk the scope chain, not just the innermost scope, so
+            // accesses inside nested callbacks resolve.
+            if let Some(op) = lookup_derived(*node, lang, &root, derived) {
                 if let Some(prop) = node.child_by_field_name(lang.property_field()) {
                     if let Ok(name) = prop.utf8_text(source) {
                         out.push(CallSiteRecord {
@@ -703,7 +824,7 @@ pub fn scan_s2(content: &[u8], lang: &Lang) -> Vec<CallSiteRecord> {
 
 /// Walk `dir` recursively, skipping common non-source directories, and collect all
 /// property accesses found in TypeScript, Python, and Go source files.
-/// TypeScript files use the S2 operation-aware scanner; Python and Go use S1.
+/// All supported languages use the S2 operation-aware scanner.
 pub fn scan_directory(dir: &Path) -> Vec<CallSiteRecord> {
     let mut records = Vec::new();
     let mut skipped_large = 0usize;
@@ -868,7 +989,13 @@ fn collect_requests(items: &[serde_json::Value], out: &mut Vec<CollectionRequest
 }
 
 fn extract_request(item: &serde_json::Value) -> Option<CollectionRequest> {
-    let item_name = item.get("name")?.as_str()?.to_string();
+    // O-8: `name` is optional in the Postman v2.1 schema — an unnamed item
+    // still carries a request and must not be dropped.
+    let item_name = item
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<unnamed>")
+        .to_string();
     let req = item.get("request")?;
 
     let method = req
@@ -920,34 +1047,13 @@ fn extract_operation(req: &serde_json::Value) -> Option<String> {
     // Handles: "http://host/path", "{{base_url}}/path", "{{a}}{{b}}/path"
     let path_part = strip_url_prefix(&raw_url);
 
-    // Drop query string / fragment (everything from the first '?' or '#').
-    let path_part = path_part.split(['?', '#']).next().unwrap_or(path_part);
-
-    // Trim a trailing slash (but never reduce below "/").
-    let path_part = {
-        let trimmed = path_part.trim_end_matches('/');
-        if trimmed.is_empty() {
-            "/"
-        } else {
-            trimmed
-        }
-    };
-
-    // Ensure it starts with /
-    let with_leading_slash = if path_part.starts_with('/') {
-        path_part.to_string()
-    } else {
-        format!("/{path_part}")
-    };
-
-    // Normalise Postman `:var` path segments to brace-style `{var}`.
-    let normalised = normalise_colon_params(&with_leading_slash);
-
-    if normalised.is_empty() {
-        None
-    } else {
-        Some(normalised)
-    }
+    // O-8: convert remaining Postman `{{var}}` (mid-path) to brace-style
+    // `{var}`, then run the SAME normalizer as the code scanner — query/
+    // fragment stripping, `:var`/`${var}` conversion, numeric-id
+    // templatization, trailing-slash handling — so collection operations can
+    // actually match spec operations like `/users/{id}`.
+    let braced = path_part.replace("{{", "{").replace("}}", "}");
+    normalize_http_path(&braced)
 }
 
 /// Build a raw-URL-like string from a URL object's `host` and `path` arrays.
@@ -974,22 +1080,6 @@ fn build_raw_from_host_path(url_obj: &serde_json::Value) -> String {
     }
 }
 
-/// Normalise Postman `:var` path segments to brace-style `{var}`.
-/// e.g. "/users/:userId/orders/:orderId" → "/users/{userId}/orders/{orderId}".
-fn normalise_colon_params(path: &str) -> String {
-    path.split('/')
-        .map(|seg| {
-            if let Some(var) = seg.strip_prefix(':') {
-                if !var.is_empty() {
-                    return format!("{{{var}}}");
-                }
-            }
-            seg.to_string()
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 /// Strip any scheme://host or leading `{{variable}}` segments, returning the path only.
 fn strip_url_prefix(url: &str) -> &str {
     // Remove scheme://host (e.g. "https://api.example.com")
@@ -1014,10 +1104,23 @@ fn strip_url_prefix(url: &str) -> &str {
         break;
     }
 
-    // If there's still a host (no leading / after stripping variables), strip up to first /
+    // If there's still a host (no leading / after stripping variables), strip
+    // up to the first /. O-8: only when the first segment actually looks like
+    // a host (contains '.' or ':') — a relative URL like "users/1" must keep
+    // its first path segment, and a host-only URL is the root path.
     if !rest.starts_with('/') && !rest.starts_with('{') {
-        if let Some(slash) = rest.find('/') {
-            rest = &rest[slash..];
+        match rest.find('/') {
+            Some(slash) => {
+                let first = &rest[..slash];
+                if first.contains('.') || first.contains(':') {
+                    rest = &rest[slash..];
+                }
+            }
+            None => {
+                if rest.contains('.') || rest.contains(':') {
+                    return "/";
+                }
+            }
         }
     }
 
@@ -1127,6 +1230,12 @@ fn extract_variable_field_accesses(line: &str) -> Vec<String> {
     // Look for known response-variable prefixes.
     for prefix in &["json.", "data.", "response.body.", "response."] {
         for (pos, _) in line.match_indices(prefix) {
+            // O-22: skip when the longer known prefix also matches at this
+            // position — `response.` inside `response.body.phone` would
+            // otherwise emit the spurious intermediate field "body".
+            if *prefix == "response." && line[pos..].starts_with("response.body.") {
+                continue;
+            }
             // Word-boundary check: the prefix must begin a standalone variable, not
             // be the tail of a larger identifier or member chain. This rejects
             // `pm.response.json()` (preceded by `.`) and `metadata.total`
@@ -1681,6 +1790,16 @@ func process(svc *Service, id string) string {
     }
 
     #[test]
+    fn response_body_prefix_yields_field_not_body() {
+        let fields = extract_variable_field_accesses("pm.expect(response.body.phone).to.exist;");
+        assert!(fields.iter().any(|f| f == "phone"), "got {fields:?}");
+        assert!(
+            !fields.iter().any(|f| f == "body"),
+            "'body' is a path segment, not a consumed field; got {fields:?}"
+        );
+    }
+
+    #[test]
     fn parse_collection_strips_bom() {
         let json = "\u{feff}{\"info\":{\"name\":\"C\"},\"item\":[]}";
         let (name, _) = parse_collection_str(json).expect("BOM should be stripped");
@@ -1694,6 +1813,71 @@ func process(svc *Service, id string) string {
         ]}"#;
         let (_, reqs) = parse_collection_str(json).expect("parse");
         assert_eq!(reqs[0].operation.as_deref(), Some("/users/{id}"));
+    }
+
+    // --- O-8: Postman operations must normalize like the code scanner's paths ---
+
+    #[test]
+    fn parse_collection_mid_path_variable_normalizes() {
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"name":"R","request":{"method":"GET","url":{"raw":"{{base_url}}/users/{{userId}}"}}}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        assert_eq!(
+            reqs[0].operation.as_deref(),
+            Some("/users/{userId}"),
+            "mid-path {{{{var}}}} must become {{var}} so it can match spec operations"
+        );
+    }
+
+    #[test]
+    fn parse_collection_numeric_segment_templatizes() {
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"name":"R","request":{"method":"GET","url":{"raw":"{{base_url}}/users/12345"}}}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        assert_eq!(
+            reqs[0].operation.as_deref(),
+            Some("/users/{id}"),
+            "literal ids must templatize exactly as the code scanner does"
+        );
+    }
+
+    #[test]
+    fn parse_collection_relative_url_keeps_first_segment() {
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"name":"R","request":{"method":"GET","url":{"raw":"users/1"}}}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        assert_eq!(
+            reqs[0].operation.as_deref(),
+            Some("/users/{id}"),
+            "a relative URL must not lose its first path segment"
+        );
+    }
+
+    #[test]
+    fn parse_collection_host_only_url_yields_root() {
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"name":"R","request":{"method":"GET","url":{"raw":"https://api.example.com"}}}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        assert_eq!(
+            reqs[0].operation.as_deref(),
+            Some("/"),
+            "a host-only URL is the root operation, not a path named after the host"
+        );
+    }
+
+    #[test]
+    fn parse_collection_unnamed_item_still_parsed() {
+        // `name` is optional in the Postman v2.1 schema.
+        let json = r#"{"info":{"name":"C"},"item":[
+            {"request":{"method":"GET","url":{"raw":"{{base_url}}/users"}}}
+        ]}"#;
+        let (_, reqs) = parse_collection_str(json).expect("parse");
+        assert_eq!(reqs.len(), 1, "an unnamed item must not be dropped");
+        assert_eq!(reqs[0].operation.as_deref(), Some("/users"));
     }
 
     // --- M-11: TypeScript/TSX scanner accuracy ---
@@ -1863,6 +2047,111 @@ async function loadBoth(usersApi, ordersApi, id) {
                 .iter()
                 .any(|r| r.operation.as_deref() == Some("GET /users/{id}")),
             "fetch(\"/users/1\") should yield GET /users/{{id}}; got {records:?}"
+        );
+    }
+
+    // O-7: destructuring and closures — the dominant modern TS access styles
+    // must produce field Evidence.
+    #[test]
+    fn s2_destructured_fields_emit_evidence() {
+        let src = b"
+async function loadUser(usersApi, id) {
+    const { phone, email } = await usersApi.getUserById(id);
+    return phone + email;
+}
+";
+        let records = scan_typescript_s2(src);
+        for field in ["phone", "email"] {
+            let rec = records
+                .iter()
+                .find(|r| r.field_path == field)
+                .unwrap_or_else(|| panic!("expected {field} evidence; got {records:?}"));
+            assert_eq!(
+                rec.operation.as_deref(),
+                Some("GET /users/{id}"),
+                "{field} must attribute to the destructured call's operation"
+            );
+        }
+    }
+
+    #[test]
+    fn s2_renamed_destructure_uses_api_field_name() {
+        // `{ phone: p }` consumes the API field `phone`, whatever the local name.
+        let src = b"
+async function loadUser(usersApi, id) {
+    const { phone: p } = await usersApi.getUserById(id);
+    return p;
+}
+";
+        let records = scan_typescript_s2(src);
+        let fields: Vec<&str> = records.iter().map(|r| r.field_path.as_str()).collect();
+        assert!(
+            fields.contains(&"phone"),
+            "the API field name must be recorded; got {fields:?}"
+        );
+        assert!(
+            !fields.contains(&"p"),
+            "the local rename is not an API field; got {fields:?}"
+        );
+    }
+
+    #[test]
+    fn s2_closure_access_resolves_outer_scope() {
+        let src = b"
+async function notify(usersApi, orders, id) {
+    const user = await usersApi.getUserById(id);
+    orders.forEach(o => { console.log(user.phone); });
+}
+";
+        let records = scan_typescript_s2(src);
+        let phone = records
+            .iter()
+            .find(|r| r.field_path == "phone")
+            .unwrap_or_else(|| {
+                panic!("expected phone evidence from inside the callback; got {records:?}")
+            });
+        assert_eq!(phone.operation.as_deref(), Some("GET /users/{id}"));
+    }
+
+    // O-6: bare fetch/axios calls must record the real verb from the options
+    // object, not a hard-coded GET.
+    #[test]
+    fn s2_fetch_with_method_option_records_real_verb() {
+        let src = b"const r = fetch(\"/orders\", { method: \"POST\", body: payload });";
+        let records = scan_s2(src, &Lang::TypeScript);
+        assert!(
+            records
+                .iter()
+                .any(|r| r.operation.as_deref() == Some("POST /orders")),
+            "fetch with method: \"POST\" must record POST, got {records:?}"
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|r| r.operation.as_deref() == Some("GET /orders")),
+            "the phantom GET must not be recorded, got {records:?}"
+        );
+    }
+
+    #[test]
+    fn s2_axios_with_method_option_records_real_verb() {
+        let src = b"const r = axios(\"/orders\", { method: 'delete' });";
+        let records = scan_s2(src, &Lang::TypeScript);
+        assert!(
+            records
+                .iter()
+                .any(|r| r.operation.as_deref() == Some("DELETE /orders")),
+            "axios with method: 'delete' must record DELETE, got {records:?}"
+        );
+    }
+
+    #[test]
+    fn s2_fetch_with_dynamic_method_yields_no_operation() {
+        let src = b"const r = fetch(\"/orders\", { method: verb });";
+        let records = scan_s2(src, &Lang::TypeScript);
+        assert!(
+            !records.iter().any(|r| r.operation.is_some()),
+            "an unresolvable method expression must not be guessed, got {records:?}"
         );
     }
 

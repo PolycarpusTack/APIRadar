@@ -155,16 +155,12 @@ pub(crate) async fn list_acknowledgements(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = caller.sql_scope().to_string();
-    let limit: i64 = params
-        .get("limit")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(50)
-        .min(200);
-    let offset: i64 = params
-        .get("offset")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-
+    // N-13: `.min(200)` capped the top but had no floor, so limit=-1 reached
+    // the database. clamp_pagination bounds both ends.
+    let (limit, offset) = crate::utils::clamp_pagination(
+        params.get("limit").and_then(|v| v.parse().ok()),
+        params.get("offset").and_then(|v| v.parse().ok()),
+    );
     let rows = q!(
         "SELECT id, diff_id, change_id, consumer_id, service_id, acknowledged_by, reason, expires_at, created_at \
          FROM acknowledgement \

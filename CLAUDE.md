@@ -8,8 +8,8 @@ This project uses the AI-Native Software Delivery framework. All task execution 
 - `Agents/backlog-builder-v5.1.md` — story/task templates, DoR/DoD
 - `Agents/core-specification-v1.md` — shared principles, modes, global DoD
 
-Current execution mode: MAINTENANCE (all EPICs A–L complete)
-Active stories: none — see `DEVELOPMENT_PLAN.md` for full history. Phases 1–5 of the maturity plan are also complete.
+Current execution mode: MAINTENANCE (all EPICs A–L complete; EPIC O complete)
+Active stories: none in EPIC O — all 23 stories delivered (see `EPIC-O-MITIGATION-PLAN.md`, phase gate at the end). Next up is the open EPIC N tail (N-8, N-13, N-15, N-16..N-18, N-22..N-25, N-28, N-29, N-31, N-33..N-35) in `QUALITY-BACKLOG.md`, plus two EPIC O items that need CI to close: the packaged-desktop Playground E2E (O-20) and O-23 on the Postgres lane. See `DEVELOPMENT_PLAN.md` for full history; Phases 1–5 of the maturity plan are complete.
 
 ---
 
@@ -31,14 +31,17 @@ Always use terms from the Domain Glossary in `DEVELOPMENT_PLAN.md`. Never use sy
 ## Workspace structure
 
 ```
-radar-core/       Shared Rust types (ChangeKind, Severity, Consumer, Diff, …)
-radar-cli/        CLI binary (clap 4) + radar_cli_lib (pub: github, render, api_client, policy)
-radar-api/        axum HTTP service; run with --db sqlite:PATH or --db postgres://...
-radar-scanner/    tree-sitter code scanner + Postman Collection v2.1 parser
-radar-ui/         Vite 6 + React 19 web renderer (shared with desktop)
-radar-desktop/    Electron 33 shell (wraps radar-ui, spawns radar-api sidecar)
-fixtures/         Demo scenario fixtures for E-6 integration tests
-docs/             Runbook, enterprise plan, openapi.yaml
+radar-core/        Shared Rust types (ChangeKind, Severity, Consumer, Diff, …)
+radar-cli/         CLI binary (clap 4) + radar_cli_lib (pub: github, render, api_client, policy)
+radar-api/         axum HTTP service; run with --db sqlite:PATH or --db postgres://...
+radar-scanner/     tree-sitter code scanner + Postman Collection v2.1 parser
+radar-ui/          Vite 6 + React 19 web renderer (shared with desktop)
+radar-desktop/     Electron 33 shell (wraps radar-ui, spawns radar-api sidecar)
+radar-action/      Composite GitHub Action wrapping `radar check` (PR gate; inputs in action.yml)
+radar-sdk-node/    Node.js middleware SDK (@radar-monitor/sdk) — posts runtime usage Evidence
+radar-sdk-python/  Python ASGI middleware SDK (radar-monitor-sdk) — posts runtime usage Evidence
+fixtures/          Demo scenario fixtures for E-6 integration tests
+docs/              Runbook, enterprise plan, openapi.yaml
 ```
 
 ---
@@ -108,7 +111,7 @@ All evidence flows through `impact_evidence` (append-only, migration 011). Three
 `radar-cli/src/policy.rs` — `decide()` takes `(changes, policy, fail_mode, has_active_consumers, has_label_override, api_error)`. Always post the result to `POST /v1/policy-decisions` after `drift check`.
 
 ### Library target
-`radar-cli` exposes `radar_cli_lib` as a `[lib]` target. Integration tests in `radar-cli/tests/` import from `radar_cli_lib`. Keep `lib.rs` to just `pub mod` declarations for: `api_client`, `github`, `policy`, `render`.
+`radar-cli` exposes `radar_cli_lib` as a `[lib]` target. Integration tests in `radar-cli/tests/` import from `radar_cli_lib`. Keep `lib.rs` to just `pub mod` declarations for: `api_client`, `github`, `policy`, `render`, `scan`.
 
 ---
 

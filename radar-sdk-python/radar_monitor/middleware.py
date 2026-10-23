@@ -2,15 +2,23 @@
 from __future__ import annotations
 
 import json
+import queue
 import threading
 import time
 import urllib.request
-from typing import Callable, Sequence
+from typing import Callable, Optional, Sequence
 from urllib.error import URLError
 
 
 class RadarBatcher:
-    """Thread-safe batch queue that flushes usage events to radar-api."""
+    """Thread-safe batch queue that flushes usage events to radar-api.
+
+    Network I/O never runs on the calling thread: push()/flush() only swap
+    the drained batch onto a send queue under the lock; a single daemon
+    worker thread performs the actual HTTP POSTs. The middleware calls
+    push() from the async request path, so a synchronous urlopen there
+    would stall the event loop for up to the 3s socket timeout.
+    """
 
     def __init__(
         self,
@@ -28,6 +36,11 @@ class RadarBatcher:
         self._max_batch = max_batch
         self._queue: list[dict] = []
         self._lock = threading.Lock()
+        self._send_queue: queue.Queue[Optional[list]] = queue.Queue()
+        self._worker = threading.Thread(
+            target=self._send_loop, name="radar-batcher-send", daemon=True
+        )
+        self._worker.start()
         self._timer = threading.Timer(flush_interval, self._scheduled_flush)
         self._timer.daemon = True
         self._timer.start()
@@ -51,10 +64,30 @@ class RadarBatcher:
             self._flush_locked()
 
     def _flush_locked(self) -> None:
+        """Drain up to max_batch events and hand them to the send worker.
+
+        Caller must hold the lock. No network I/O happens here — the lock
+        is held only for the queue swap.
+        """
         if not self._queue:
             return
         batch = self._queue[:self._max_batch]
         self._queue = self._queue[self._max_batch:]
+        self._send_queue.put(batch)
+
+    def _send_loop(self) -> None:
+        while True:
+            batch = self._send_queue.get()
+            try:
+                if batch is None:
+                    return  # destroy() sentinel
+                self._send(batch)
+            except Exception:
+                pass  # fire-and-forget; the worker must never die
+            finally:
+                self._send_queue.task_done()
+
+    def _send(self, batch: list) -> None:
         body = json.dumps(batch).encode()
         headers = {"Content-Type": "application/json"}
         if self._token:
@@ -75,6 +108,11 @@ class RadarBatcher:
     def destroy(self) -> None:
         self._timer.cancel()
         self.flush()
+        # Stop the worker after it drains what is already enqueued (FIFO:
+        # the sentinel lands behind the final batch). Bounded wait — this
+        # stays best-effort fire-and-forget.
+        self._send_queue.put(None)
+        self._worker.join(timeout=5.0)
 
 
 class RadarMiddleware:
@@ -130,10 +168,13 @@ class RadarMiddleware:
             return
 
         method = scope.get("method", "GET").upper()
-        # Use the route pattern if available (set by Starlette routing).
-        route = scope.get("route", None)
-        route_path = route.path if route and hasattr(route, "path") else path
-        operation = f"{method} {route_path}"
 
         await self.app(scope, receive, send)
-        self._batcher.push(operation)
+
+        # Record AFTER the app call: Starlette/FastAPI set scope["route"]
+        # during routing (inside the call above), mutating the scope dict in
+        # place. Reading it earlier would only ever see the raw path and
+        # record per-ID operations (/users/123) instead of the route pattern.
+        route = scope.get("route", None)
+        route_path = route.path if route and hasattr(route, "path") else path
+        self._batcher.push(f"{method} {route_path}")

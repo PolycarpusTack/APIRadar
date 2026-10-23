@@ -42,7 +42,7 @@ export default function GenerateTestsPage() {
   const [result, setResult] = useState<GenerateResult | null>(null)
 
   useEffect(() => {
-    api.get<Suite[]>('/v1/generate-tests', { bearer: localStorage.getItem('radarToken') ?? undefined })
+    api.get<Suite[]>('/v1/generate-tests')
       .then(setSuites)
       .catch(() => {})
       .finally(() => setLoading(false))
@@ -61,11 +61,7 @@ export default function GenerateTestsPage() {
     }
 
     try {
-      const data = await api.post<GenerateResult>(
-        '/v1/generate-tests',
-        body,
-        { bearer: localStorage.getItem('radarToken') ?? undefined },
-      )
+      const data = await api.post<GenerateResult>('/v1/generate-tests', body)
       setResult(data)
       setSuites((prev) => [
         {
@@ -126,9 +122,16 @@ export default function GenerateTestsPage() {
         {/* Jira input row */}
         <div className="space-y-2">
           <div className="flex items-center gap-3">
-            <span className="text-[12px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-2)' }}>
-              Jira ticket
-            </span>
+            {/* The control below swaps between two fields, so the label points
+                at whichever one is mounted — and names it, rather than leaving
+                the placeholder to do the job. */}
+            <label
+              htmlFor={jiraMode === 'key' ? 'gen-tests-jira-key' : 'gen-tests-jira-text'}
+              className="text-[12px] font-semibold uppercase tracking-wide"
+              style={{ color: 'var(--text-2)' }}
+            >
+              {jiraMode === 'key' ? 'Jira ticket key' : 'Jira ticket text'}
+            </label>
             <button
               type="button"
               onClick={() => setJiraMode(jiraMode === 'key' ? 'text' : 'key')}
@@ -141,6 +144,7 @@ export default function GenerateTestsPage() {
 
           {jiraMode === 'key' ? (
             <input
+              id="gen-tests-jira-key"
               type="text"
               placeholder="e.g. PROJ-123"
               value={jiraKey}
@@ -154,6 +158,7 @@ export default function GenerateTestsPage() {
             />
           ) : (
             <textarea
+              id="gen-tests-jira-text"
               rows={5}
               placeholder="Paste the full Jira ticket text here (title on first line, description below)"
               value={jiraText}
@@ -171,10 +176,11 @@ export default function GenerateTestsPage() {
 
         {/* Spec YAML */}
         <div className="space-y-2">
-          <label className="text-[12px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-2)' }}>
+          <label htmlFor="gen-tests-spec" className="text-[12px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-2)' }}>
             OpenAPI spec (YAML / JSON)
           </label>
           <textarea
+            id="gen-tests-spec"
             rows={10}
             placeholder="Paste your openapi.yaml or openapi.json content here…"
             value={specYaml}
@@ -192,10 +198,11 @@ export default function GenerateTestsPage() {
 
         {/* Base URL */}
         <div className="space-y-2">
-          <label className="text-[12px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-2)' }}>
+          <label htmlFor="gen-tests-base-url" className="text-[12px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-2)' }}>
             API base URL
           </label>
           <input
+            id="gen-tests-base-url"
             type="text"
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
@@ -209,7 +216,7 @@ export default function GenerateTestsPage() {
         </div>
 
         {error && (
-          <p className="text-[12px] px-3 py-2 rounded" style={{ background: 'var(--red-bg)', color: 'var(--red)' }}>
+          <p role="alert" className="text-[12px] px-3 py-2 rounded" style={{ background: 'var(--red-bg)', color: 'var(--red)' }}>
             {error}
           </p>
         )}

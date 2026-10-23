@@ -112,7 +112,7 @@ radar register \
 | `service-id` | no | `""` | Producer service ID in Radar API |
 | `radar-url` | no | `""` | Radar API base URL |
 | `radar-token` | no | `""` | Bearer token (use a secret) |
-| `fail-mode` | no | `closed` | `closed` \| `open` \| `warn` |
+| `fail-mode` | no | `closed` | `closed` \| `open` \| `warn` — only applies when the repo has no `.radar.yml` (see [Fail modes](#fail-modes)) |
 | `post-comment` | no | `false` | Post PR comment |
 | `spec-format` | no | auto | `openapi` \| `graphql` \| `protobuf` |
 
@@ -128,11 +128,19 @@ radar register \
 
 ## Fail modes
 
-| Mode | Radar API unreachable | Breaking change found |
+| Mode | Radar API unreachable | Breaking Change found (API ok or not configured) |
 |---|---|---|
-| `closed` (default) | Exit 1 | Exit 1 |
-| `open` | Exit 0 with warning | Exit 1 if active consumers |
-| `warn` | Exit 0 | Exit 0 with warning |
+| `closed` (default) | Exit 1 | Exit per `block_on` policy (default `any_break` → exit 1) |
+| `open` | Exit from the local diff + `block_on` policy; verdict `warn` | Exit per `block_on` policy; verdict `warn` |
+| `warn` | Exit 0 — never blocks | Exit 0 — never blocks; verdict `warn` |
+
+`radar check` reads its Fail Mode from a policy file (`fail_mode:` in `.radar.yml`), not from a CLI flag. The action's `fail-mode` input therefore works like this:
+
+- A `.radar.yml` in your repository root **always wins** — the input is ignored, and the action logs a warning when the input was set to `open` or `warn`.
+- Without a `.radar.yml`, `fail-mode: open` or `warn` makes the action write a minimal policy file (`fail_mode: <value>`) into the runner temp directory and pass it via `radar check --policy`. Your repository checkout is never modified.
+- `fail-mode: closed` needs no file — it is `radar check`'s built-in default.
+
+To combine a Fail Mode with other policy settings (`block_on`, `allow_override_with`, …), set `fail_mode:` in `.radar.yml` instead of using the input.
 
 ## Override a block
 

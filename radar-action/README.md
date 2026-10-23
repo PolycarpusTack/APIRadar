@@ -26,7 +26,7 @@ jobs:
 
       - name: Check API drift
         id: radar
-        uses: PolycarpusTack/radar-monitor/radar-action@main
+        uses: PolycarpusTack/radar-monitor/radar-action@v0.3.0
         with:
           base-spec: /tmp/base.yaml
           head-spec: api/openapi.yaml
@@ -52,7 +52,7 @@ jobs:
 | `service-id` | no | `""` | Producer service ID in Radar API (enables blast radius) |
 | `radar-url` | no | `""` | Base URL of your Radar API instance |
 | `radar-token` | no | `""` | Bearer token for Radar API auth — use a GitHub secret |
-| `fail-mode` | no | `closed` | `closed` \| `open` \| `warn` — behavior when Radar API is unreachable |
+| `fail-mode` | no | `closed` | `closed` \| `open` \| `warn` — Fail Mode for the check; only applies when the workspace has no `.radar.yml` (see [Fail modes](#fail-modes)) |
 | `post-comment` | no | `false` | `true` to post/update a PR comment with the drift summary |
 | `spec-format` | no | auto | `openapi` \| `graphql` \| `protobuf` — auto-detected from file extension |
 
@@ -68,11 +68,21 @@ jobs:
 
 ## Fail modes
 
-| `fail-mode` | Radar API unreachable | Breaking change found |
+| `fail-mode` | Radar API unreachable | Breaking Change found (API ok or not configured) |
 |---|---|---|
-| `closed` (default) | Exit 1 — block PR | Exit 1 — block PR |
-| `open` | Exit 0 with warning | Exit 1 if active consumers, else 0 |
-| `warn` | Exit 0 with warning | Exit 0 with warning |
+| `closed` (default) | Exit 1 — block PR | Exit per `block_on` policy (default `any_break` → exit 1) |
+| `open` | Exit from the local diff + `block_on` policy; verdict `warn` | Exit per `block_on` policy; verdict `warn` |
+| `warn` | Exit 0 — never blocks | Exit 0 — never blocks; verdict `warn` |
+
+### How the `fail-mode` input is applied
+
+`radar check` reads its Fail Mode from a policy file (`fail_mode:` in `.radar.yml`), not from a CLI flag. The action bridges the input with this precedence:
+
+- A `.radar.yml` in the workspace root **always wins** — the `fail-mode` input is ignored, and the action logs a warning when the input was set to `open` or `warn`.
+- Without a workspace `.radar.yml`, `fail-mode: open` or `warn` makes the action write a minimal policy file (`fail_mode: <value>`) into the runner temp directory and pass it via `radar check --policy`. Your workspace is never modified.
+- `fail-mode: closed` needs no file — it is `radar check`'s built-in default.
+
+To combine a Fail Mode with other policy settings (`block_on`, `allow_override_with`, …), set `fail_mode:` in `.radar.yml` instead of using the input.
 
 ## Policy override
 
@@ -82,8 +92,10 @@ Add the label `drift-ack` to a PR to override a block verdict (requires `allow_o
 
 ### Warn-only mode (never block CI)
 
+Applies when the repository has no `.radar.yml`; otherwise set `fail_mode: warn` in that file instead.
+
 ```yaml
-- uses: PolycarpusTack/radar-monitor/radar-action@main
+- uses: PolycarpusTack/radar-monitor/radar-action@v0.3.0
   with:
     base-spec: old.yaml
     head-spec: new.yaml
@@ -93,7 +105,7 @@ Add the label `drift-ack` to a PR to override a block verdict (requires `allow_o
 ### With PR comment and full blast radius
 
 ```yaml
-- uses: PolycarpusTack/radar-monitor/radar-action@main
+- uses: PolycarpusTack/radar-monitor/radar-action@v0.3.0
   with:
     base-spec: old.yaml
     head-spec: new.yaml
@@ -110,7 +122,7 @@ Add the label `drift-ack` to a PR to override a block verdict (requires `allow_o
 ```yaml
 - name: Run drift check
   id: radar
-  uses: PolycarpusTack/radar-monitor/radar-action@main
+  uses: PolycarpusTack/radar-monitor/radar-action@v0.3.0
   with:
     base-spec: old.yaml
     head-spec: new.yaml

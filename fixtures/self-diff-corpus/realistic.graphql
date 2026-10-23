@@ -1,0 +1,57 @@
+"""Self-diff corpus: a realistic SDL — custom scalars included, which is
+what the minimal test schemas historically missed."""
+scalar DateTime
+scalar JSON
+
+interface Node {
+  id: ID!
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  SHIPPED
+  CANCELLED
+}
+
+type Order implements Node {
+  id: ID!
+  amount: Float!
+  currency: String!
+  status: OrderStatus!
+  placedAt: DateTime!
+  metadata: JSON
+  lines: [OrderLine!]!
+}
+
+type OrderLine {
+  sku: String!
+  quantity: Int!
+}
+
+type Refund {
+  id: ID!
+  order: Order!
+  reason: String
+}
+
+union PaymentEvent = Order | Refund
+
+input CreateOrderInput {
+  amount: Float!
+  currency: String!
+  couponCode: String
+}
+
+type Query {
+  order(id: ID!): Order
+  orders(status: OrderStatus, first: Int = 20): [Order!]!
+}
+
+type Mutation {
+  createOrder(input: CreateOrderInput!): Order!
+}
+
+extend type Query {
+  refund(id: ID!): Refund
+}

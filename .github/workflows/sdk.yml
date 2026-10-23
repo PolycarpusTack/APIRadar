@@ -1,0 +1,65 @@
+name: SDKs
+
+# O-10: the SDKs live outside the pnpm workspace and the cargo workspace, so
+# no other workflow ever built or tested them — which is how an invalid
+# index.d.ts and a broken Python build backend shipped silently. This lane
+# gates every SDK change (no continue-on-error anywhere).
+#
+# Path-filtered as a separate workflow (the repo's established pattern — see
+# test-radar-action.yml) rather than per-job filtering inside ci.yml, which
+# has none.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'radar-sdk-node/**'
+      - 'radar-sdk-python/**'
+      - '.github/workflows/sdk.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'radar-sdk-node/**'
+      - 'radar-sdk-python/**'
+      - '.github/workflows/sdk.yml'
+
+jobs:
+  sdk:
+    name: SDK tests (node + python)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # The node SDK has zero runtime dependencies and is not part of the pnpm
+      # workspace, so there is nothing to install — node --test runs directly.
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+
+      - name: Node SDK tests
+        working-directory: radar-sdk-node
+        run: node --test src/index.test.js
+
+      # `typecheck` pins typescript@6.0.3 via npx — the same version the repo
+      # is capped at (see radar-ui) — and runs tsc --strict --skipLibCheck
+      # false over src/index.d.ts, the file package.json points `types` at.
+      - name: Node SDK type declarations compile
+        working-directory: radar-sdk-node
+        run: npm run typecheck
+
+      # Python: same system-python + pip pattern as the openapi job in ci.yml.
+      - name: Install python build frontend
+        run: pip install build
+
+      - name: Python SDK builds a wheel
+        working-directory: radar-sdk-python
+        run: python -m build
+
+      # -s tests: the tests/ directory is not a package, so default discovery
+      # from '.' finds nothing ("NO TESTS RAN").
+      - name: Python SDK tests
+        working-directory: radar-sdk-python
+        run: python -m unittest discover -s tests -v

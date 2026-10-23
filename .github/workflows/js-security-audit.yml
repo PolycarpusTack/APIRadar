@@ -1,0 +1,53 @@
+name: JS security audit
+
+# N-32: the blocking half of the JS supply-chain audit, mirroring
+# security-audit.yml's split for cargo audit (F-16).
+#
+# `pnpm audit` compares pnpm-lock.yaml against the live npm advisory database,
+# so its outcome changes with time rather than with the code — a poor per-PR
+# gate, since a newly published advisory against any transitive dependency
+# would fail unrelated pull requests. ci.yml therefore keeps `pnpm audit`
+# advisory on every push/PR. Running it here on a schedule keeps the signal
+# loud and blocking while attributing it to the repository rather than to
+# whoever happened to open a PR that morning — exactly the cargo audit split.
+on:
+  schedule:
+    # 05:15 UTC daily — a quarter hour after the cargo audit job, so the two
+    # don't contend for runner minutes if they ever share a queue.
+    - cron: '15 5 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      # A dependency change is the one code event that can introduce an
+      # advisory, so gate those at merge time too (mirrors Cargo.toml/
+      # Cargo.lock in security-audit.yml).
+      - '**/package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/js-security-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: pnpm audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Security audit (blocking)
+        run: pnpm audit --audit-level=high

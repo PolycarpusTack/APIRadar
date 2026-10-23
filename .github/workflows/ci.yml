@@ -429,11 +429,13 @@ jobs:
             pnpm install --no-frozen-lockfile
           fi
 
-      # N-32: JS supply-chain scan. Advisory (non-gating): `|| true` keeps the
-      # job green so a transitive low/moderate advisory with no available fix
-      # doesn't block unrelated PRs. Dependabot (.github/dependabot.yml) opens
-      # the actual upgrade PRs. Tighten to gating (drop `|| true`) once the tree
-      # is clean at --audit-level=high.
+      # N-32: JS supply-chain scan — ADVISORY here, blocking in the nightly
+      # js-security-audit workflow (same cargo audit / security-audit.yml
+      # split, and for the same reason: `pnpm audit`'s result depends on when
+      # it runs, not on what the PR changed, so a newly published advisory
+      # would otherwise red-light every open PR). `|| true` keeps this job
+      # green; Dependabot (.github/dependabot.yml) opens the actual upgrade
+      # PRs; js-security-audit.yml still fails loudly within a day.
       - name: JS dependency audit (advisory)
         run: pnpm audit --audit-level=high || true
 

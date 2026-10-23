@@ -97,6 +97,12 @@ Dependencies point inward: cli → api; radar-ui → api (HTTP); radar-desktop �
 | ADR-015 | Backstage integration via polling importer (HTTP client reads Backstage catalog API) | No Backstage plugin required on consumer side; importer runs as a scheduled job in `radar-api`; org can point Radar at any Backstage instance without Backstage changes | Backstage plugin (requires consumer-side Backstage upgrade), webhook push (requires Backstage config changes) |
 | ADR-016 | Encryption at rest deferred to OS/infrastructure layer | SQLite deployments rely on OS filesystem encryption (FileVault/BitLocker); Postgres relies on infrastructure-level storage encryption (e.g., EBS/GCS encryption at rest). No SQLCipher dependency introduced. Column-level encryption deferred until a specific compliance requirement (SOC 2 Type II, HIPAA, etc.) names it — at which point SQLCipher for SQLite and `pgcrypto` column encryption for Postgres are the preferred paths. | SQLCipher (adds a native binary dependency, complicates cross-compilation, requires key management); `pgcrypto` column encryption (premature without a named compliance requirement; adds query complexity) |
 
+#### Maintenance update — 6 October 2026
+
+The [review remediation plan](docs/review-remediation-2026-10-06.md) records eight correctness fixes and their regression coverage. Spec Version identities now include content and format as well as readable refs; stored snapshots are never updated on identity conflicts. Submitted Diffs use a canonical Change-report fingerprint for the metadata-only base because that endpoint does not receive a base spec.
+
+Evidence ingestion validates both Producer and Consumer ownership before batch writes. Blast Radius discovers collection Consumers through `impact_evidence` even without subscriptions, includes matching unexpired collection Evidence at medium confidence, and does not duplicate that already-durable Evidence on reads.
+
 ### Value Hypotheses (Stakeholder)
 
 | # | Hypothesis | Measurable signal | Validated by |
@@ -1590,6 +1596,36 @@ And a "Learn more" link opens the Help page glossary
 
 ---
 
+## EPIC P — Mock Fixtures as Consumer Evidence
+
+> **Mode:** DELIVERY
+> **Theme:** Treat committed mock fixture files as a Consumer evidence source (same pattern as E-7 collection files), and flag fixtures that no longer conform to a Breaking Change.
+> **Origin:** Absorbs the one differentiator of `30-Local-API-Mock-Server`, parked 2026-10-08. A mock server is a crowded market (WireMock, Prism, Mockoon, Microcks, Hoverfly). The thing none of them can do is tie a stale fixture to a Breaking Change and a named Consumer. Radar can, because it owns the Diff and the Evidence.
+> **Non-goal:** Radar does not serve mocks. Teams keep their existing mock tool.
+> **Exit criteria:**
+> - `radar scan --mocks <path>` writes `impact_evidence` rows with `source_type=mock_fixture` for at least WireMock mappings and plain JSON fixtures
+> - A Breaking Change on a field a fixture returns shows that fixture in Blast Radius and in the PR comment evidence table
+> - Re-scanning unchanged fixtures writes no duplicate Evidence
+
+**Stories (DoR to be completed before pull)**
+
+| ID | Title | Size | Dependencies |
+|---|---|---|---|
+| P-1 | Spike: which fixture formats to support first (WireMock mappings, Mockoon environment, Prism/OpenAPI `examples`, plain JSON per operation), and how each maps to `(operation, field_path)` | S | — |
+| P-2 | Fixture parser in `radar-scanner` → `(operation, field_path)` pairs from response bodies; field *paths* only, never values | M | P-1, E-7 |
+| P-3 | `radar scan --mocks <path>` (repeatable, explicit like `--collection`); new `EvidenceSourceType::MockFixture`, confidence `medium`; idempotent dedup as in E-7-T4 | M | P-2 |
+| P-4 | PR comment + DiffDetailPage: label `mock_fixture` evidence rows as "stale fixture" so the consumer team knows to regenerate | S | P-3 |
+| P-5 | Docs: `docs/evidence-confidence.md` + HELP.md reference row for `--mocks` | S | P-3 |
+
+### EPIC P — Phase Gate Checklist
+
+- [ ] P-1 spike recorded as an ADR with the chosen format order
+- [ ] `radar scan --mocks` writes deduplicated `mock_fixture` Evidence
+- [ ] Demo fixture: a WireMock stub returning `user.phone` appears in the payments-api Blast Radius
+- [ ] Docs + HELP.md updated
+
+---
+
 ## Changelog
 
 | Version | Date | Author | Change |
@@ -1608,3 +1644,6 @@ And a "Learn more" link opens the Help page glossary
 | 1.2 | 2026-05-25 | Yannick Verrydt | EPIC I complete — I-1 demo fixtures + seed-demo.sh + payments-api GitHub workflow; I-2 README architecture diagram + 5-minute demo section; I-3/I-4 docs/evidence-confidence.md + docs/demo-scenario.md + docs/enterprise-deployment.md; I-5 radar-core/benches/diff_bench.rs (Criterion); I-6 LICENSE file (cargo-audit + SBOM already in CI); I-7 docs/generated-artifacts.md + docs/demo-video-script.md; 83 API tests + clippy clean |
 | 1.3 | 2026-05-26 | Yannick Verrydt | EPIC J drafted — Non-Technical User Experience; 7 stories: inline spec comparison (tracer bullet), consumer registration form, first-run wizard, jargon tooltips, post-create nudge, release notes UI trigger, evolution rules callout; backlog-builder-v5.1 format; readiness decision 8/9 |
 | 1.4 | 2026-05-26 | Yannick Verrydt | EPIC J complete — J-1 CompareSpecsPanel + POST /v1/services/:id/diffs/compare (201/422); J-2 RegisterConsumerForm (ConsumersPage); J-3 FirstRunBanner (HomePage); J-4 TermTooltip (7 terms across DiffDetailPage, EvolutionRulesPage); J-5 post-create nudge in ServicesPage; J-6 release-notes generate route + UI trigger in DiffDetailPage; J-7 evolution rules callout in EvolutionRulesPage; HelpPage developer guide updated; 94 API tests + 259 workspace tests green; pnpm lint clean; clippy clean |
+| 1.5 | 2026-09-01 | Yannick Verrydt | EPIC O drafted — mitigation of the 2026-09-01 full-application review (five-agent, nine workspaces); 23 stories in `EPIC-O-MITIGATION-PLAN.md`: P0 diff-engine blind spots (root-kind change, composed-variant request context, GraphQL scalar false-Breaking + self-diff-zero corpus), service-token auth regression (F-02), Evidence-pipeline leaks (scan early-return, scanner verb/destructuring, Postman normalization, Python SDK), SDK CI lane, batch policy integration; open EPIC N tail (N-8, N-13, N-15, N-16..N-18, N-22..N-25, N-28, N-29, N-31, N-33..N-35) reconfirmed and kept under EPIC N |
+| 1.6 | 2026-09-01 | Yannick Verrydt | EPIC O complete — all 23 stories delivered. P0: diff-engine blind spots (O-1 root-kind change, O-2 composed-variant request context, O-3 GraphQL scalars + self-diff-zero corpus for all 3 formats), O-4 service-token auth regression + OrgExt retired, Evidence pipeline (O-5 scan collection early-return, O-6 real HTTP verb, O-7 destructuring/closures, O-8 Postman normalization, O-9 Python SDK), O-10 SDK CI lane, O-11 desktop dev URL, O-12 CSV Runner, O-13 batch policy, O-14 truthful PR comment. P1: O-15 pinned SSRF client, O-16 no local token persistence, O-17 action fail-mode + injection, O-18 proto streaming + enum taxonomy, O-19 Unified AI Gateway routing, O-20 desktop CSP/splash/iframe. P2: O-21 docs truth + HELP.md, O-22 grouped cleanup, O-23 smoke E2E. Verified: 18 Rust test binaries, 80 UI tests, 23 Python + 4 Node SDK tests, clippy -D warnings clean. Carried forward: packaged Playground E2E + O-23 Postgres lane (CI), open EPIC N tail. |
+| 1.7 | 2026-10-08 | Yannick Verrydt | EPIC P drafted — mock fixtures as Consumer evidence. Absorbs the differentiator of the parked `30-Local-API-Mock-Server`; Radar does not serve mocks itself. Not yet pulled. |

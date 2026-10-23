@@ -1,4 +1,4 @@
-use crate::auth::CallerOrg;
+use crate::auth::{require_evidence_owned, CallerOrg};
 use crate::errors::ApiError;
 use crate::sampling::load_sampling;
 use crate::utils::{field_in_deny_list, normalise_path, otlp_attr, sample_keep};
@@ -71,6 +71,7 @@ pub(crate) async fn ingest_usage_event(
     // never hold a write connection while issuing sampling queries.
     let mut to_insert: Vec<&UsageEventRequest> = Vec::with_capacity(events.len());
     for event in &events {
+        require_evidence_owned(&pool, &event.consumer_id, &event.service_id, &org_id).await?;
         if !event.field_path.is_empty() {
             let sampling = load_sampling(&pool, &event.service_id, &org_id).await;
             let deny_str = sampling.field_deny_list.join(",");
@@ -112,6 +113,7 @@ pub(crate) async fn ingest_usage_event(
 // POST /v1/call-sites
 pub(crate) async fn upsert_call_sites(
     State(pool): State<sqlx::AnyPool>,
+    caller: CallerOrg,
     Json(sites): Json<Vec<CallSiteInput>>,
 ) -> Result<impl IntoResponse, ApiError> {
     if sites.len() > 5000 {
@@ -122,6 +124,15 @@ pub(crate) async fn upsert_call_sites(
 
     let now = Utc::now().to_rfc3339();
     let count = sites.len();
+    for site in &sites {
+        require_evidence_owned(
+            &pool,
+            &site.consumer_id,
+            &site.service_id,
+            caller.sql_scope(),
+        )
+        .await?;
+    }
 
     // Wrap the whole upsert batch in one transaction so a mid-batch failure rolls
     // back rather than leaving a partial commit. The deterministic call_site_id keeps
@@ -176,7 +187,7 @@ pub(crate) async fn ingest_otlp_traces(
 ) -> Result<impl IntoResponse, ApiError> {
     let org_id = caller.sql_scope().to_string();
     let now = Utc::now().to_rfc3339();
-    let mut accepted = 0usize;
+    let mut events = Vec::new();
 
     let resource_spans = body
         .get("resourceSpans")
@@ -244,6 +255,8 @@ pub(crate) async fn ingest_otlp_traces(
                     None => continue,
                 };
 
+                require_evidence_owned(&pool, &consumer_id, &service_id, &org_id).await?;
+
                 let method = otlp_attr(&attrs, "http.method").unwrap_or_default();
                 let route = otlp_attr(&attrs, "http.route")
                     .or_else(|| otlp_attr(&attrs, "http.target").map(|p| normalise_path(&p)))
@@ -259,25 +272,28 @@ pub(crate) async fn ingest_otlp_traces(
                     continue;
                 }
 
-                let id = Uuid::new_v4().to_string();
-                let _ = q!(
-                    "INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at)
-                     VALUES (?, ?, ?, ?, ?, ?)",
-                )
-                .bind(&id)
-                .bind(&consumer_id)
-                .bind(&service_id)
-                .bind(&operation)
-                .bind("")
-                .bind(&now)
-                .execute(&pool)
-                .await;
-
-                accepted += 1;
+                events.push((consumer_id, service_id, operation));
             }
         }
     }
 
+    // Resolve and authorise every span before any write. Keep database failures
+    // atomic too, matching the usage-event endpoint's retry guarantees.
+    let mut tx = pool.begin().await?;
+    for (consumer_id, service_id, operation) in &events {
+        q!("INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(consumer_id)
+            .bind(service_id)
+            .bind(operation)
+            .bind("")
+            .bind(&now)
+            .execute(&mut *tx)
+            .await
+            .map_err(crate::errors::map_ingest_db_error)?;
+    }
+    tx.commit().await?;
+    let accepted = events.len();
     Ok((StatusCode::ACCEPTED, Json(json!({ "accepted": accepted }))))
 }
 
@@ -298,19 +314,31 @@ pub(crate) async fn ingest_gateway_logs(
     let mut accepted = 0usize;
 
     for entry in &entries {
+        require_evidence_owned(&pool, &entry.consumer_id, &entry.service_id, &org_id).await?;
+    }
+
+    // Sampling performs reads on the pool; finish filtering before acquiring the
+    // transaction (test and SQLite pools may have only one connection).
+    let mut to_insert = Vec::new();
+    for entry in &entries {
+        let sampling = load_sampling(&pool, &entry.service_id, &org_id).await;
+        if sample_keep(sampling.sample_rate) {
+            to_insert.push(entry);
+        }
+    }
+    let mut tx = pool.begin().await?;
+
+    for entry in &to_insert {
         let operation = format!(
             "{} {}",
             entry.method.to_uppercase(),
             normalise_path(&entry.path),
         );
 
-        let sampling = load_sampling(&pool, &entry.service_id, &org_id).await;
-        if !sample_keep(sampling.sample_rate) {
-            continue;
-        }
-
         let id = Uuid::new_v4().to_string();
-        let _ = q!(
+        // N-9: see the OTLP path — a dropped row must not be reported as
+        // accepted, and a constraint violation is the caller's error (4xx).
+        q!(
             "INSERT INTO usage_event (id, consumer_id, service_id, operation, field_path, recorded_at)
              VALUES (?, ?, ?, ?, ?, ?)",
         )
@@ -320,11 +348,13 @@ pub(crate) async fn ingest_gateway_logs(
         .bind(&operation)
         .bind("")
         .bind(&now)
-        .execute(&pool)
-        .await;
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::errors::map_ingest_db_error)?;
 
         accepted += 1;
     }
+    tx.commit().await?;
 
     Ok((StatusCode::ACCEPTED, Json(json!({ "accepted": accepted }))))
 }

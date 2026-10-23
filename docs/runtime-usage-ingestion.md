@@ -16,7 +16,14 @@ in a static scan.
 | `POST /v1/gateway/logs` | JSON array | API gateway log forwarding |
 | SDK middleware | Auto-wired | Node.js / Python services |
 
-All paths write to the same `impact_evidence` table with `source_type = runtime_usage`.
+All runtime paths store rows in `usage_event`. Blast Radius matches those rows to
+Change records and appends matching `runtime_usage` Evidence to `impact_evidence`.
+
+For organisation-scoped requests, both Producer and Consumer IDs are checked
+before batch writes. A foreign resource rejects the whole batch with HTTP 403,
+without persisting even its valid items. The same ownership rule applies to
+`POST /v1/call-sites` and `POST /v1/evidence/collection`. Legacy unscoped resources
+retain the existing compatibility behavior.
 
 ---
 

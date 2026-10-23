@@ -1,0 +1,11 @@
+scalar DateTime
+
+type User {
+  id: ID!
+  phone: String
+  createdAt: DateTime!
+}
+
+type Query {
+  user(id: ID!): User
+}

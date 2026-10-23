@@ -57,8 +57,6 @@ export function apiBase(): string {
 }
 
 export interface FetchOptions {
-  /** Bearer token for Authorization header (AI endpoints). */
-  bearer?: string
   /** Pass 'include' for OIDC session cookie on /auth/* routes. */
   credentials?: RequestCredentials
   signal?: AbortSignal
@@ -72,9 +70,8 @@ async function request<T>(
 ): Promise<T> {
   const headers: Record<string, string> = {}
   if (body !== undefined) headers['Content-Type'] = 'application/json'
-  // Desktop sidecar session token, unless a per-call bearer overrides it.
+  // Desktop sidecar session token (resolved once via IPC in initApiClient).
   if (_token) headers['Authorization'] = `Bearer ${_token}`
-  if (opts.bearer) headers['Authorization'] = `Bearer ${opts.bearer}`
 
   const res = await fetch(`${_base}${path}`, {
     method,

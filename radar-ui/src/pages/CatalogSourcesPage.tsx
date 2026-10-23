@@ -147,16 +147,21 @@ export default function CatalogSourcesPage() {
           <div className="rounded-lg p-5" style={{ border: '1px solid rgba(56,5,227,0.3)', background: 'var(--bg-surface)' }}>
             <div className="flex items-center justify-between mb-4">
               <p className="text-[13px] font-semibold" style={{ color: 'var(--text-1)' }}>New Catalog Source</p>
-              <button onClick={() => { setShowCreate(false); setCreateError(null) }}>
+              <button
+                type="button"
+                onClick={() => { setShowCreate(false); setCreateError(null) }}
+                aria-label="Close new catalog source form"
+              >
                 <X className="h-4 w-4" style={{ color: 'var(--text-3)' }} />
               </button>
             </div>
             <form onSubmit={handleCreate} className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                <label htmlFor="catalog-kind" className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
                   Kind
                 </label>
                 <select
+                  id="catalog-kind"
                   value={form.kind}
                   onChange={(e) => setForm((f) => ({ ...f, kind: e.target.value }))}
                   className="w-full rounded-md border px-2.5 py-1.5 text-[12.5px]"
@@ -169,10 +174,11 @@ export default function CatalogSourcesPage() {
                 </select>
               </div>
               <div>
-                <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                <label htmlFor="catalog-name" className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
                   Name
                 </label>
                 <input
+                  id="catalog-name"
                   required
                   value={form.name}
                   onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
@@ -182,10 +188,11 @@ export default function CatalogSourcesPage() {
                 />
               </div>
               <div className="col-span-2">
-                <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                <label htmlFor="catalog-url" className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
                   URL
                 </label>
                 <input
+                  id="catalog-url"
                   value={form.url}
                   onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
                   placeholder="https://backstage.internal.example.com"
@@ -194,10 +201,11 @@ export default function CatalogSourcesPage() {
                 />
               </div>
               <div>
-                <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                <label htmlFor="catalog-token-env" className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
                   Token env var
                 </label>
                 <input
+                  id="catalog-token-env"
                   value={form.token_env}
                   onChange={(e) => setForm((f) => ({ ...f, token_env: e.target.value }))}
                   placeholder="BACKSTAGE_TOKEN"
@@ -206,10 +214,11 @@ export default function CatalogSourcesPage() {
                 />
               </div>
               <div>
-                <label className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
+                <label htmlFor="catalog-sync-interval" className="block mb-1 text-[10.5px] font-semibold uppercase tracking-[0.8px]" style={{ color: 'var(--text-3)' }}>
                   Sync interval (secs)
                 </label>
                 <input
+                  id="catalog-sync-interval"
                   type="number"
                   value={form.sync_interval_secs}
                   onChange={(e) => setForm((f) => ({ ...f, sync_interval_secs: e.target.value }))}
@@ -219,7 +228,7 @@ export default function CatalogSourcesPage() {
                 />
               </div>
               {createError && (
-                <p className="col-span-2 text-[12px]" style={{ color: 'var(--red)' }}>{createError}</p>
+                <p role="alert" className="col-span-2 text-[12px]" style={{ color: 'var(--red)' }}>{createError}</p>
               )}
               <div className="col-span-2 flex justify-end gap-2 mt-1">
                 <button
@@ -252,7 +261,7 @@ export default function CatalogSourcesPage() {
           </div>
 
           {error ? (
-            <div className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>
+            <div role="alert" className="px-4 py-3 text-[12.5px]" style={{ color: 'var(--red)' }}>
               Failed to load catalog sources: {error}
             </div>
           ) : sources.length === 0 && !loading ? (
@@ -335,6 +344,7 @@ export default function CatalogSourcesPage() {
                       </td>
                       <td className="px-3 py-2.5 group-hover:bg-[var(--bg-hover)]">
                         <button
+                          type="button"
                           onClick={() => handleSync(src.id)}
                           disabled={syncing[src.id]}
                           className="flex items-center gap-1 rounded-md border px-2.5 py-1 text-[11.5px] font-medium transition-colors hover:bg-[var(--bg-hover)]"

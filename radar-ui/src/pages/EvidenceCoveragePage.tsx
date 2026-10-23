@@ -160,7 +160,7 @@ export default function EvidenceCoveragePage() {
           </div>
         ) : error ? (
           <div className="flex items-center justify-center h-48">
-            <p className="text-[13px]" style={{ color: 'var(--red)' }}>
+            <p role="alert" className="text-[13px]" style={{ color: 'var(--red)' }}>
               {error}
             </p>
           </div>
