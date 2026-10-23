@@ -133,6 +133,7 @@ Expected additions (final names fixed by ADR-018): parameter_changed, request_me
 
 ## Q-1 · PR #77 merges green ⚡ TRACER BULLET
 
+- **Status (2026-10-23):** T2 ✅ (`03126a6`) · T3 ✅ (merged as `ffe7a55`, local `main` resynced) · T1 open (cache cleanup chosen). Follow-up found after merge: the JS security audit fails on `main` (Electron 33 high advisories), see Not yet specified.
 - **Persona:** As the maintainer I want PR #77's commits on `main` with every check green so that later work starts from a trusted baseline.
 - **Business Value:** 3 · **Priority:** H — every other story branches from `main`.
 - **Size:** S · **INVEST:** I✓ N✓ V✓ E✓ S✓ T✓ · **DoR:** READY
@@ -928,6 +929,7 @@ Scenario: Regression
 
 ## Not yet specified
 
+- **Electron 44 upgrade (Dependabot #63) — urgent:** the JS security audit (`pnpm audit --audit-level=high`) fails on `main` on high Electron advisories (patched ≥ 39.8.1). Graduate to a story before Q-2 makes checks required. Open question: what breaks across 33 → 44 (sandbox, preload, CSP, electron-builder).
 - **Major dependency upgrades** (axum 0.8, sqlx 0.9, jsonwebtoken 11, thiserror 2, tower-http 0.6, React Router 7, Vite 8, Tailwind 4, TypeScript 7, ESLint 10, Electron 44): one upgrade story each; kept here because eleven stories would breach the 25-story limit. Graduates when Q-7-T1 lists the PRs still open.
 - **Java, C# and Ruby scanning** (N-17 tail): which languages? Graduates from Q-3's Consumer-language answers.
 - **Field-level scanner precision** (track the response variable instead of any same-named property in scope): how much data flow is enough? Graduates from a SPIKE after R-9.

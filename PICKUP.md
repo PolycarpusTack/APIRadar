@@ -1,47 +1,51 @@
-# Pickup Prompt — API Contract Radar Monitor (continue EPIC N tail)
+# Pickup Prompt — API Contract Radar Monitor (EPIC Q in progress)
 
 > Paste the block below as your first message to a fresh session in this repo.
-> Snapshot taken 2026-10-08.
+> Snapshot taken 2026-10-23.
 
 ---
 
 ## Where we are
 
-- **EPIC O is complete** (23 stories, `EPIC-O-MITIGATION-PLAN.md`). EPICs A–L and M are done as well.
-- **PR #77** (`quality/epic-o-and-n-tail` → `main`) holds 37 commits: all of EPIC O plus the EPIC N tail below. They had never been pushed, so this PR is their first CI run, including the required Postgres 16 lane. **Check its CI first.** Merge it when green; if Postgres fails, fix it on the branch.
-- **Local verification at PR time:** clippy clean; `cargo test --workspace` green on SQLite (radar-api 284); radar-ui 152/152 with lint + typecheck clean.
-- **Backlog of record:** `QUALITY-BACKLOG.md` (EPIC N). Done stories carry a ✅ note with a date.
+- **Backlog of record:** [`EPIC-Q-R-PLAN.md`](./EPIC-Q-R-PLAN.md) (EPIC Q: clean, safe baseline · EPIC R: OpenAPI 3.1, diff-rule gaps vs oasdiff, Kong adapter, scanner precision). Summary tables and gate checklists are in `DEVELOPMENT_PLAN.md`. Critic pass 2 approved it. Carried follow-ups are in its **Validation history**: fix the ones named for a task before pulling that task.
+- **Why:** the 2026-10-23 review and competitor comparison ([review page](https://claude.ai/artifact/NYJj2gVHhhuv3iKP9quU5C)). Named Blast Radius is unclaimed for REST/gRPC; the diff engine lags oasdiff; OpenAPI 3.1 is probably unsupported; there are no users yet.
+- **PR #82** (`docs/epic-q-r-plan`) holds the plan files. Docs only; merge it when convenient.
+- EPIC N items in `QUALITY-BACKLOG.md` that EPIC Q/R absorb (N-10, N-11, N-12, N-27, N-33, N-34, part of N-37) are now tracked there, not in EPIC N.
 
-## Done in EPIC N (don't redo)
+## Q-1 status
 
-N-1..N-9, N-13, N-14, N-15, N-16..N-20, N-22, N-23, N-25, N-26, N-28, N-29, N-30, N-31, N-32, N-36.
+- ✅ **Q-1-T2:** EvolutionRulesPage a11y test race fixed (`03126a6`: `findByRole` for the row; reproduced red with a delayed fetch).
+- ✅ **Q-1-T3:** PR #77 merged as merge commit `ffe7a55` with all 13 PR checks green. Local `main` was reset to `origin/main` after `git cherry` showed no local-only work.
+- ☐ **Q-1-T1: disk headroom.** C: had ~8.5 GB free; a full Rust build needs ~18 GB. Yannick chose **clearing caches under `C:\Projects`**. A scan was started but not finished. Re-run it: find `node_modules`, `target`, `.venv`/`venv`, `__pycache__`, `.next`, `dist`, `coverage`, `.vite`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.turbo`, `.gradle`. Delete only directories that `git check-ignore` confirms are ignored, and show Yannick the size list first. List folders outside a git repo (`_archive`, `_backups`, …) separately; don't delete them without asking. Verify: `df -h /c` ≥ 20 GB free.
 
-## Open work (priority order)
+## ⚠ New: `main` is not fully green
 
-**P1 — data exposure first:**
-- **N-11** Per-org weekly digest. It currently aggregates all orgs into one email, which leaks data across orgs.
-- **N-12** Share tokens are minted as a side effect of `GET /v1/diffs/:id`; the shared view also skips evolution-rule severities.
-- **N-10** SSRF DNS rebinding + DNS resolution blocking the async runtime.
-- **N-21** Desktop auto-update (wire it or drop `electron-updater`) + crash/process-gone logging.
-- **N-17** Scanner reach (direct HTTP clients, Java/C#/Ruby).
-- **N-24** Remaining UI page tests + web CSP.
+The **JS security audit** workflow (`pnpm audit --audit-level=high`) fails on `main`: high Electron advisories (GHSA-532v-xpq5-8h95 and others; patched ≥ 39.8.1), path `radar-desktop>electron` (33.4.11). It doesn't run on PRs, so PR #77 didn't show it. The fix is the Electron major bump (Dependabot **#63**, 33 → 44). Treat it as its own upgrade story *before* Q-2 makes checks required: sandbox/CSP, preload and `electron-builder` changes need checking, so don't merge it blind. Add it to `EPIC-Q-R-PLAN.md` as a story when you start it.
 
-**P2:** N-27 (split `radar-api/src/lib.rs`, ~5.8k lines; pure REFACTORING), N-33 (assertive compose-backed E2E), N-34 (branch protection), N-35 (release signing), N-37 tail items.
+## Next actions (in order)
 
-**Carried from EPIC O:** packaged-desktop Playground E2E (O-20); O-23 smoke on the Postgres lane (PR #77 covers it).
+1. Finish **Q-1-T1** (cache cleanup above).
+2. Electron upgrade (#63) so the JS security audit goes green.
+3. **Q-2** branch protection (HITL, GitHub settings), **Q-3** pilot (HITL, timebox ends 2026-12-31) and **Q-7** Dependabot triage can run any time.
+4. Code work in order: **Q-4** (per-org Digest; **A-7 needs Yannick's confirmation** before Q-4-T2) → **Q-5** (share action) → **Q-6** (SSRF async DNS + mapped IPv6) → **Q-8** (assertive full-stack E2E) → **Q-9** (`lib.rs` split, scripted batches).
+5. EPIC R can start at **R-1** (3.1 spike) and **R-9** (scanner paths) once Q-1-T1 is done.
 
-**Housekeeping:**
-- About 20 Dependabot PRs are open (#54–#76). Several are **major** bumps: axum 0.8, sqlx 0.9, jsonwebtoken 11, thiserror 2, tower-http 0.6, React Router 7, Vite 8, Tailwind 4, TypeScript 7, ESLint 10, Electron 44. Don't batch-merge them; handle each major bump as its own upgrade story. Minor/patch groups (#74, #75) and action bumps (#76) are low-risk.
-- `docs/cliff-notes.md` and `docs/APIRadar_Icon.png` are still untracked. Yannick decides: commit or drop.
+## Open PRs (2026-10-23)
+
+- **#82** plan docs.
+- **Dependabot**, low-risk groups (Q-7): #81 cargo minor/patch, #75 npm minor/patch, #78/#79/#52/#51 Actions, #56 base64, #55 tree-sitter, #54 criterion (dev).
+- **Dependabot**, majors (one story each, see Not yet specified): #57 axum 0.8, #60 sqlx 0.9, #58 jsonwebtoken 11, #61 thiserror 2, #59 tower-http 0.6, #69 React Router 7, #68 Vite 8, #67 plugin-react 6, #70 Tailwind 4, #66 TypeScript 7, #64 ESLint 10, #65 jest-dom 7, #71 jsdom 30, **#63 Electron 44 (urgent, see above)**.
+- `docs/cliff-notes.md` and `docs/APIRadar_Icon.png` are still untracked. Yannick decides (Q-10).
 
 ## How to work here (guardrails)
 
-- **Framework:** `Agents/gpm-v2.1.md`, `backlog-builder-v5.1.md`, `core-specification-v1.md`. One **Hat** per task. **TDD:** failing test first. If the code already exists, prove the test red against a stub before keeping the real code.
-- **Domain glossary is strict** (`CLAUDE.md`): Producer, Consumer, Blast Radius, Breaking Change, Evidence, Fail Mode.
-- **Cargo is serialized and the disk is tight.** C: runs at ~97–100%; a full build + test takes ~18 GB in `target/`. Use `-j 2` and run `cargo clean` when finished.
+- **Framework:** `Agents/gpm-v2.1.md`, `backlog-builder-v5.1.md`, `core-specification-v1.md`. One **Hat** per task. **TDD:** failing test first. Tasks that end red merge with `#[ignore = "<green task id>"]`, which the green task removes (see the plan's Global rules).
+- **Domain glossary is strict** (`CLAUDE.md` + plan glossary): Producer, Consumer, Blast Radius, Breaking Change, Evidence, Fail Mode, Organisation (never "tenant"), Spec Corpus, Ruleset.
+- **Cargo is serialized and the disk is tight.** Use `-j 2` and run `cargo clean` when finished. Use `cargo test -p <crate> -- name_a name_b` for several filters.
 - **Cross-backend rules:** queries use `?` through `q!`/`qs!`/`qa!`; REAL is f64 on SQLite but f32 on PG; PG enforces FKs (fixtures insert parents); `= ?` never matches NULL; tests never mutate process env; migrations use TEXT ids/timestamps and run on both backends.
+- **UI tests on this machine:** the full Vitest suite sometimes times out 1–2 unrelated tests at 5 s under parallel load. They pass alone and in CI. Rerun the named file before suspecting a regression.
 - **Git:** never push straight to `main`. Branch → PR → green CI → merge.
 
 ## Suggested first action
 
-Check CI on PR #77 and merge it when green. Then start **N-11**: write a failing test that seeds two orgs and asserts org A's digest contains none of org B's rows.
+Re-run the cache scan for Q-1-T1, show Yannick the ignored-only size list, and delete once Yannick says go.

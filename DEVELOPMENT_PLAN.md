@@ -1631,6 +1631,7 @@ And a "Learn more" link opens the Help page glossary
 > **Mode:** DELIVERY · **Tracer bullet:** Q-1
 > **Full backlog:** [`EPIC-Q-R-PLAN.md`](./EPIC-Q-R-PLAN.md) (tasks, Verify, Pull Gates, TD Items). Origin: the 2026-10-23 product review.
 > **Pull order:** EPIC Q before EPIC R and EPIC P.
+> **Status (2026-10-23):** Q-1-T2 ✅, Q-1-T3 ✅ (PR #77 merged as `ffe7a55`); Q-1-T1 (disk headroom) open. `main` CI green except the JS security audit (Electron 33 advisories, Dependabot #63).
 
 | ID | Title | Size | Dependencies |
 |---|---|---|---|
